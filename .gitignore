@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.installed.cfg
+*.egg
+
+# Virtualenvs / uv
+.venv/
+venv/
+.env
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Project artifacts (large or ephemeral)
+data/
+results/
+out/
+*.pt
+*.pth
+*.safetensors
+*.npy
+*.npz
+wandb/
+mlruns/
+tensorboard/
+
+# Logs / temp
+*.log
+.tmp/
