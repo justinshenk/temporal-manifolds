@@ -26,13 +26,13 @@ def main() -> None:
         help="Path to config YAML file (e.g., step_numbers.yaml)",
     )
     parser.add_argument(
-        "--save-to-hf",
+        "--save-to-gcp",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Upload generated NPZ files to the configured Hugging Face dataset repo.",
+        help="Upload generated NPZ files to the configured GCS bucket.",
     )
     args = parser.parse_args()
-    run_eap_ig(args.config, save_to_hf=args.save_to_hf)
+    run_eap_ig(args.config, save_to_gcp=args.save_to_gcp)
 
 
 if __name__ == "__main__":

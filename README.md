@@ -20,7 +20,7 @@ Pipeline:
 1. **Parametric dataset** — generate prompts across multiple scenarios, each
    with a set of equivalent phrasings for the same time horizon.
 2. **Activation caching** — cache residuals at 5 key token positions
-   (identified in prior work) and publish the tensors to the Hugging Face Hub.
+   (identified in prior work) and publish the tensors to Google Cloud Storage.
 3. **Geometric modeling** — PCA per scenario, manifold alignment across
    scenarios, replication of plots from `arxiv:2605.05115`.
 4. **Constraint phrasing** — a metric for whether equivalent phrasings map to
@@ -34,7 +34,7 @@ Pipeline:
 
 ```bash
 uv sync                                  # install deps (Python 3.12+)
-cp .env.example .env                     # fill in HF_TOKEN, etc.
+cp .env.example .env                     # fill in GCP/GCS settings, etc.
 uv run pytest -q                         # smoke tests
 
 # Generate a tiny example dataset

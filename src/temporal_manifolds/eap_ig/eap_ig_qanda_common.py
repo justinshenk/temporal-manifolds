@@ -13,14 +13,14 @@ import numpy as np
 import torch
 import yaml
 from dotenv import load_dotenv
-from huggingface_hub import HfApi
 
 warnings.filterwarnings("ignore")
 
 load_dotenv()
 
 CONFIG_PATH = Path(__file__).parent / "config"
-HF_REPO_ID = os.getenv("HF_REPO_ID", "Temporal_Awareness_Node_Scores")
+GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
 SUPPORTED_QUADRATURES = {
     "gauss-chebyshev",
     "gauss-legendre",
@@ -98,21 +98,6 @@ def extract_alnum(s: str) -> str:
         return "".join(out)
 
     raise ValueError(f"malformed option string {s}")
-
-
-def resolve_hf_repo_id(hf_api: HfApi, repo_id: str) -> str:
-    """Return a fully qualified Hub repo id."""
-    if "/" in repo_id:
-        return repo_id
-
-    whoami = hf_api.whoami()
-    username = whoami.get("name")
-    if not username:
-        raise ValueError(
-            "HF repo id must include a namespace like 'username/repo', or the "
-            "HF token must expose an account name so one can be inferred."
-        )
-    return f"{username}/{repo_id}"
 
 
 def resolve_quadrature(config: dict) -> str:

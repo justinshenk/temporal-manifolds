@@ -11,7 +11,7 @@ license = {text = "MIT"}
 requires-python = ">=3.12"
 dependencies = [
     "latents @ git+https://github.com/justinshenk/latents.git@257924b49ee5cc95c7e818d011d99a05bf875705",
-    "huggingface-hub>=0.31.0",
+    "google-cloud-storage>=2.18.0",
     # torch capped at <2.3 so macOS x86_64 (Intel) wheels are available;
     # Linux / Apple Silicon will resolve to a newer version naturally.
     "torch>=2.0.0,<2.3.0",

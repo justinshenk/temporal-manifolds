@@ -66,7 +66,7 @@ class WorkflowConfig:
     completeness_figures_dir: Path
     top_n: int
     selection_limit: int
-    save_to_hf: bool
+    save_to_gcp: bool
     start_at: StageName
     stop_after: StageName
 
@@ -81,7 +81,7 @@ class WorkflowConfig:
             completeness_figures_dir=resolve_repo_path(args.completeness_figures_dir),
             top_n=args.top_n,
             selection_limit=args.selection_limit,
-            save_to_hf=args.save_to_hf,
+            save_to_gcp=args.save_to_gcp,
             start_at=args.start_at,
             stop_after=args.stop_after,
         )
@@ -153,13 +153,13 @@ def is_stage_requested(
 def run_eap_ig_stage(
     *,
     config_dir: Path,
-    save_to_hf: bool,
+    save_to_gcp: bool,
 ) -> list[Path]:
     """Run the Q&A EAP-IG script once per config file."""
     config_paths = discover_eap_ig_configs(config_dir)
     for config_path in config_paths:
         args = ["--config", str(config_path)]
-        args.append("--save-to-hf" if save_to_hf else "--no-save-to-hf")
+        args.append("--save-to-gcp" if save_to_gcp else "--no-save-to-gcp")
         run_python_script(EAP_IG_INPUTS_SCRIPT, args)
     return config_paths
 
@@ -234,7 +234,7 @@ def safe_pearsonr(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
     """Compute Pearson correlation without crashing on constant arrays."""
     try:
         result = pearsonr(x, y)
-        return float(result.correlation), float(result.pvalue)
+        return float(result.correlation), float(result.pvalue)  # type: ignore
     except ValueError:
         return float("nan"), float("nan")
 
@@ -678,10 +678,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     execution_group = parser.add_argument_group("execution")
     execution_group.add_argument(
-        "--save-to-hf",
+        "--save-to-gcp",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Upload EAP-IG NPZ outputs to the configured Hugging Face dataset repo.",
+        help="Upload EAP-IG NPZ outputs to the configured GCS bucket.",
     )
     execution_group.add_argument(
         "--start-at",
@@ -711,7 +711,7 @@ def run_workflow(config: WorkflowConfig) -> None:
     if config.includes_stage("eap-ig"):
         run_eap_ig_stage(
             config_dir=config.eap_ig_config_dir,
-            save_to_hf=config.save_to_hf,
+            save_to_gcp=config.save_to_gcp,
         )
 
     if config.includes_stage("top-components"):

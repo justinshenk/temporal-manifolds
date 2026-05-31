@@ -13,7 +13,8 @@ from tqdm import tqdm
 
 try:
     from .eap_ig_qanda_common import (
-        HF_REPO_ID,
+        GCP_PROJECT_ID,
+        GCS_BUCKET_NAME,
         build_layer_components,
         chunk_list,
         extract_alnum,
@@ -23,10 +24,11 @@ try:
         resolve_quadrature,
         tensor_to_numpy,
     )
-    from .eap_ig_qanda_upload import maybe_start_upload_worker
+    from ..utils.gcs_upload import maybe_start_gcs_upload_worker
 except ImportError:
     from eap_ig_qanda_common import (
-        HF_REPO_ID,
+        GCP_PROJECT_ID,
+        GCS_BUCKET_NAME,
         build_layer_components,
         chunk_list,
         extract_alnum,
@@ -36,7 +38,7 @@ except ImportError:
         resolve_quadrature,
         tensor_to_numpy,
     )
-    from eap_ig_qanda_upload import maybe_start_upload_worker
+    from temporal_manifolds.utils.gcs_upload import maybe_start_gcs_upload_worker
 
 
 def build_metrics(token_a: int, token_b: int) -> dict[str, Any]:
@@ -184,7 +186,7 @@ def run_eap_ig(
     model=None,
     tokenizer=None,
     *,
-    save_to_hf: bool = True,
+    save_to_gcp: bool = True,
 ) -> tuple[Any, Any]:
     """Run Q&A EAP-IG from Python or notebooks."""
     config = load_config(resolve_config_path(config_path))
@@ -207,8 +209,9 @@ def run_eap_ig(
     prompt_suffix: str = config["input"]["prompt_suffix"]
 
     filename: str = config["output"]["filename"]
-    hf_repo_id: str = HF_REPO_ID
-    hf_repo_type: str = config["output"].get("hf_repo_type", "dataset")
+    gcp_project_id: str | None = config["output"].get("gcp_project_id", GCP_PROJECT_ID)
+    gcs_bucket_name: str | None = config["output"].get("gcs_bucket_name", GCS_BUCKET_NAME)
+    gcs_prefix: str | None = config["output"].get("gcs_prefix", "")
 
     system_prompt: str = config["parameters"]["system_prompt"]
     metric_type: str = config["parameters"]["metric_type"]
@@ -216,10 +219,11 @@ def run_eap_ig(
 
     input_file_path = data_loc / data_file
     save_loc.mkdir(parents=True, exist_ok=True)
-    upload_queue, upload_thread, enqueue_upload = maybe_start_upload_worker(
-        save_to_hf=save_to_hf,
-        hf_repo_id=hf_repo_id,
-        hf_repo_type=hf_repo_type,
+    upload_queue, upload_thread, enqueue_upload = maybe_start_gcs_upload_worker(
+        enabled=save_to_gcp,
+        project_id=gcp_project_id,
+        bucket_name=gcs_bucket_name,
+        prefix=gcs_prefix,
     )
 
     from ..utils.activation_dict import expand_mask
