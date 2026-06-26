@@ -1,10 +1,10 @@
 """Abstract quantity-distribution prompts over time constraints."""
 
 templates = [
-    {
+    {  # replace with something informative
         "id": "quantity_time_constraint",
         "template": """Quantity type: {task}
-Quantity amount: {quantity}
+Quantity amount: {quantity} 
 Time constraint: {value} {unit}
 
 Distribute the quantity across the available time.

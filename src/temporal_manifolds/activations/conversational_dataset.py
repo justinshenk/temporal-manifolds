@@ -50,13 +50,13 @@ tasks = {
     "copy a short code from one screen to another": {"seconds", "minutes"},
     "choose between two lunch options": {"seconds", "minutes"},
     # Short procedural tasks
-    "make a cup of tea": {"minutes"},
+    "make a cup of tea": {"minutes"},  ##
     "write a short email reply": {"minutes"},
     "pack a small bag for the day": {"minutes"},
     "tidy a desk before a meeting": {"minutes"},
     "prepare a brief status update": {"minutes"},
     # Personal / lifestyle (medium horizon, moderate structure)
-    "plan an international trip": {"hours", "days"},
+    "plan an international trip": {"hours", "days"},  ##
     # Physical / long-horizon, high dependency
     "prepare for a marathon": {"weeks", "months", "years"},
     # Coordination-heavy, multi-agent
@@ -70,8 +70,13 @@ tasks = {
     "write a short story": {"hours", "days"},
     # Operational / resource-constrained
     "renovate an apartment": {"hours", "days"},
+    "help me make an investment strategy for long-term wealth creation": {
+        "months",
+        "years",
+        "decades",
+    },
     # Business, multi-stage scaling
-    "expand a local business to new markets": {"months", "years", "decades"},
+    "expand a local business to new markets": {"months", "years", "decades"},  ##
     # High-stakes coordination, dynamic environment
     "coordinate disaster relief efforts": {"days", "weeks", "months"},
     # Retain one software task for contrast
@@ -103,7 +108,7 @@ tasks = {
         "decades",
     },
     "plan the long-term survival strategy of humanity": {"centuries", "millennia"},
-    "design infrastructure resilient to climate change": {"decades", "centuries"},
+    "design infrastructure resilient to climate change": {"decades", "centuries"},  ##
 }
 
 

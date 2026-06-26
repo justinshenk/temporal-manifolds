@@ -21,6 +21,9 @@ try:
     )
     from . import abstract_dataset, conversational_dataset
 except ImportError:
+    import abstract_dataset  # type: ignore
+    import conversational_dataset  # type: ignore
+
     from temporal_manifolds.utils.dataset_utils import (  # type: ignore
         NUMBER_FORMATS,
         NumberFormat,
@@ -30,9 +33,6 @@ except ImportError:
         smaller_unit_value,
         validate_task_units,
     )
-
-    import abstract_dataset  # type: ignore
-    import conversational_dataset  # type: ignore
 
 
 class TemplateConfig(TypedDict):
