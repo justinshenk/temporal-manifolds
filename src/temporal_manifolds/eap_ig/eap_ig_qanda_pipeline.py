@@ -5,7 +5,7 @@ Execution pipeline for the Q&A EAP-IG workflow.
 import gc
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -105,7 +105,8 @@ def process_batch(
     *,
     model: Any,
     expand_mask: Any,
-    eap_integrated_gradients: Any,
+    attribution_fn: Any,
+    attribution_method: Literal["eap_ig", "eap"],
     tokenized_clean_batch: dict[str, Any],
     tokenized_corrupted_batch: dict[str, Any],
     metric_fn: Any,
@@ -118,18 +119,18 @@ def process_batch(
     config: dict,
     order_label: str,
     metric_type: str,
+    compute_gradient_at: Literal["clean", "corrupted"] = "clean",
 ) -> dict[str, np.ndarray]:
     """Run all configured step counts for one tokenized prompt batch."""
     batch_output: dict[str, np.ndarray] = {}
     batch_output["metadata__config_json"] = np.array(json.dumps(config), dtype=np.str_)
     batch_output["metadata__option_order"] = np.array(order_label, dtype=np.str_)
     batch_output["metadata__metric_type"] = np.array(metric_type, dtype=np.str_)
+    batch_output["metadata__attribution_method"] = np.array(attribution_method, dtype=np.str_)
 
-    for num_steps in tqdm(
-        steps,
-        desc="Step counts",
-        leave=False,
-    ):
+    step_labels = steps if attribution_method == "eap_ig" else steps[:1]
+
+    for num_steps in tqdm(step_labels, desc="Step counts", leave=False):
         clean_inputs = {
             k: v.clone() if isinstance(v, torch.Tensor) else v
             for k, v in tokenized_clean_batch.items()
@@ -139,29 +140,40 @@ def process_batch(
             for k, v in tokenized_corrupted_batch.items()
         }
 
-        eap_ig_scores, (clean_logits, corrupted_logits) = eap_integrated_gradients(
-            model,
-            clean_inputs,
-            corrupted_inputs,
-            metric_fn,
-            layer_components,
-            steps=num_steps,
-            include_block_outputs=True,
-            quadrature=quadrature,
-        )
+        if attribution_method == "eap_ig":
+            eap_scores, (clean_logits, corrupted_logits) = attribution_fn(
+                model,
+                clean_inputs,
+                corrupted_inputs,
+                metric_fn,
+                layer_components,
+                steps=num_steps,
+                include_block_outputs=True,
+                quadrature=quadrature,
+            )
+        else:
+            eap_scores, (clean_logits, corrupted_logits) = attribution_fn(
+                model,
+                clean_inputs,
+                corrupted_inputs,
+                compute_grad_at=compute_gradient_at,
+                metric_fn=metric_fn,
+                layer_components=layer_components,
+                include_block_outputs=True,
+            )
 
         clean_logits_cpu = clean_logits[:, -1, [token_a, token_b]].detach().cpu()
         corrupted_logits_cpu = corrupted_logits[:, -1, [token_a, token_b]].detach().cpu()
         del clean_logits, corrupted_logits
 
-        eap_ig_scores.attention_mask = expand_mask(
-            eap_ig_scores.attention_mask, system_prompt_length
+        eap_scores.attention_mask = expand_mask(
+            eap_scores.attention_mask, system_prompt_length
         )
-        token_position_counts = eap_ig_scores.attention_mask.sum(dim=1).detach().cpu()
-        eap_ig_scores = eap_ig_scores.apply(torch.nansum, dim=1, mask_aware=True)
-        eap_ig_scores = eap_ig_scores.apply(lambda x: x.detach().cpu())
+        token_position_counts = eap_scores.attention_mask.sum(dim=1).detach().cpu()
+        eap_scores = eap_scores.apply(torch.nansum, dim=1, mask_aware=True)
+        eap_scores = eap_scores.apply(lambda x: x.detach().cpu())
 
-        for key, value in eap_ig_scores.items():
+        for key, value in eap_scores.items():
             batch_output[f"step_{num_steps}__{key[1]}__{key[0]}"] = tensor_to_numpy(value)
 
         batch_output[f"step_{num_steps}__clean_logits"] = clean_logits_cpu.float().numpy()
@@ -171,7 +183,7 @@ def process_batch(
         )
 
         del (
-            eap_ig_scores,
+            eap_scores,
             token_position_counts,
             clean_inputs,
             corrupted_inputs,
@@ -182,14 +194,32 @@ def process_batch(
     return batch_output
 
 
-def run_eap_ig(
+def resolve_save_loc(config_save_loc: Path, results_root: Path | None) -> Path:
+    """Resolve a config save path, optionally remapping it under a workflow root."""
+    if results_root is None:
+        return config_save_loc
+
+    parts = config_save_loc.parts
+    lowered_parts = [part.lower() for part in parts]
+    if "results" in lowered_parts:
+        results_index = lowered_parts.index("results")
+        relative_save_loc = Path(*parts[results_index + 1 :])
+    else:
+        relative_save_loc = Path(config_save_loc.name)
+    return results_root / relative_save_loc
+
+
+def run_qanda_attribution(
     config_path: Path,
     model=None,
     tokenizer=None,
     *,
     save_to_gcp: bool = True,
+    results_root: Path | None = None,
+    attribution_method: Literal["eap_ig", "eap"] = "eap_ig",
+    compute_gradient_at: Literal["clean", "corrupted"] = "clean",
 ) -> tuple[Any, Any]:
-    """Run Q&A EAP-IG from Python or notebooks."""
+    """Run Q&A EAP-style attribution from Python or notebooks."""
     config = load_config(resolve_config_path(config_path))
 
     model_name: str = config["setup"]["model"]
@@ -202,7 +232,7 @@ def run_eap_ig(
     dtype = config["setup"].get("dtype", None)
 
     data_loc = Path(config["paths"]["data_loc"])
-    save_loc = Path(config["paths"]["save_loc"])
+    save_loc = resolve_save_loc(Path(config["paths"]["save_loc"]), results_root)
 
     data_file: str = config["input"]["data_file"]
     template = config["input"]["template"]
@@ -229,6 +259,7 @@ def run_eap_ig(
 
     from ..utils.mech_interp_toolkit.activation_dict import expand_mask
     from ..utils.mech_interp_toolkit.gradient_based_attribution import (
+        edge_attribution_patching,
         eap_integrated_gradients,
     )
     from ..utils.mech_interp_toolkit.utils import (
@@ -278,7 +309,12 @@ def run_eap_ig(
                 batch_output = process_batch(
                     model=model,
                     expand_mask=expand_mask,
-                    eap_integrated_gradients=eap_integrated_gradients,
+                    attribution_fn=(
+                        eap_integrated_gradients
+                        if attribution_method == "eap_ig"
+                        else edge_attribution_patching
+                    ),
+                    attribution_method=attribution_method,
                     tokenized_clean_batch=tokenized_clean[i],
                     tokenized_corrupted_batch=tokenized_corrupted[i],
                     metric_fn=metric_fn,
@@ -291,6 +327,7 @@ def run_eap_ig(
                     config=config,
                     order_label=order_label,
                     metric_type=metric_type,
+                    compute_gradient_at=compute_gradient_at,
                 )
                 output_file = save_loc / (
                     f"{filename}_{order_label}_{metric_label}_batch_{i:05d}.npz"
@@ -313,3 +350,43 @@ def run_eap_ig(
         upload_thread.join()
 
     return model, tokenizer
+
+
+def run_eap_ig(
+    config_path: Path,
+    model=None,
+    tokenizer=None,
+    *,
+    save_to_gcp: bool = True,
+    results_root: Path | None = None,
+) -> tuple[Any, Any]:
+    """Run Q&A EAP-IG from Python or notebooks."""
+    return run_qanda_attribution(
+        config_path,
+        model=model,
+        tokenizer=tokenizer,
+        save_to_gcp=save_to_gcp,
+        results_root=results_root,
+        attribution_method="eap_ig",
+    )
+
+
+def run_eap(
+    config_path: Path,
+    model=None,
+    tokenizer=None,
+    *,
+    save_to_gcp: bool = True,
+    results_root: Path | None = None,
+    compute_gradient_at: Literal["clean", "corrupted"] = "clean",
+) -> tuple[Any, Any]:
+    """Run Q&A vanilla EAP from Python or notebooks."""
+    return run_qanda_attribution(
+        config_path,
+        model=model,
+        tokenizer=tokenizer,
+        save_to_gcp=save_to_gcp,
+        results_root=results_root,
+        attribution_method="eap",
+        compute_gradient_at=compute_gradient_at,
+    )

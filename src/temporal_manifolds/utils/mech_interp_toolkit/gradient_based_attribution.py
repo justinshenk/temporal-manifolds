@@ -256,6 +256,7 @@ def edge_attribution_patching(
 
     model.zero_grad(set_to_none=True)
     eap_scores.value_type = "eap_scores"
+    eap_scores.attention_mask = input_dict["attention_mask"]
     _cleanup_memory()
 
     return eap_scores, (input_logits, baseline_logits)

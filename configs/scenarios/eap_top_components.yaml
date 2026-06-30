@@ -1,0 +1,9 @@
+workflow: eap
+args:
+  modules:
+    - top-components
+    - node-selection
+  top-n: 500
+  selection-limit: 300
+  compue-gradient-at: clean
+  save-to-gcp: false

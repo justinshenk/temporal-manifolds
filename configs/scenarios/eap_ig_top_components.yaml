@@ -1,0 +1,8 @@
+workflow: eap-ig
+args:
+  modules:
+    - top-components
+    - node-selection
+  top-n: 500
+  selection-limit: 300
+  save-to-gcp: false
