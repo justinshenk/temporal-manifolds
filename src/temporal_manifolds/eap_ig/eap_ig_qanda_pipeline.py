@@ -12,6 +12,7 @@ import torch
 from tqdm import tqdm
 
 try:
+    from ..utils.gcs_upload import maybe_start_gcs_upload_worker
     from .eap_ig_qanda_common import (
         GCP_PROJECT_ID,
         GCS_BUCKET_NAME,
@@ -24,7 +25,6 @@ try:
         resolve_quadrature,
         tensor_to_numpy,
     )
-    from ..utils.gcs_upload import maybe_start_gcs_upload_worker
 except ImportError:
     from eap_ig_qanda_common import (
         GCP_PROJECT_ID,
@@ -38,7 +38,8 @@ except ImportError:
         resolve_quadrature,
         tensor_to_numpy,
     )
-    from temporal_manifolds.utils.gcs_upload import maybe_start_gcs_upload_worker
+
+    from ..utils.gcs_upload import maybe_start_gcs_upload_worker
 
 
 def build_metrics(token_a: int, token_b: int) -> dict[str, Any]:
@@ -226,11 +227,11 @@ def run_eap_ig(
         prefix=gcs_prefix,
     )
 
-    from ..utils.activation_dict import expand_mask
-    from ..utils.gradient_based_attribution import (
+    from ..utils.mech_interp_toolkit.activation_dict import expand_mask
+    from ..utils.mech_interp_toolkit.gradient_based_attribution import (
         eap_integrated_gradients,
     )
-    from ..utils.utils import (
+    from ..utils.mech_interp_toolkit.utils import (
         load_model_tokenizer_config,
         set_global_seed,
     )
