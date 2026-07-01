@@ -5,4 +5,5 @@ args:
     - node-selection
   top-n: 500
   selection-limit: 300
+  compute-completeness: true
   save-to-gcp: false

@@ -20,6 +20,7 @@ from temporal_manifolds.workflows.eap_common import (
 )
 
 __all__ = [
+    "ARTIFACT_LABEL",
     "DEFAULT_COMPLETENESS_FIGURES_DIR",
     "DEFAULT_EAP_IG_CONFIG_DIR",
     "DEFAULT_EAP_IG_RESULTS_DIR",
@@ -43,6 +44,7 @@ DEFAULT_EAP_IG_RESULTS_DIR = REPO_ROOT / "results"
 DEFAULT_TOP_COMPONENTS_DIR = REPO_ROOT / "data" / "top_n_nodes"
 DEFAULT_SELECTED_NODES_DIR = REPO_ROOT / "data" / "selected_nodes"
 DEFAULT_COMPLETENESS_FIGURES_DIR = REPO_ROOT / "results" / "figures" / "eap_ig_completeness"
+ARTIFACT_LABEL = "eap_ig"
 
 WORKFLOW_DEFINITION = EAPWorkflowDefinition(
     workflow_name="eap-ig",
@@ -55,6 +57,7 @@ WORKFLOW_DEFINITION = EAPWorkflowDefinition(
     default_top_components_dir=DEFAULT_TOP_COMPONENTS_DIR,
     default_selected_nodes_dir=DEFAULT_SELECTED_NODES_DIR,
     default_completeness_figures_dir=DEFAULT_COMPLETENESS_FIGURES_DIR,
+    artifact_label=ARTIFACT_LABEL,
 )
 STAGE_ORDER = WORKFLOW_DEFINITION.stage_order
 

@@ -64,6 +64,7 @@ class WorkflowConfig:
     top_n: int
     selection_limit: int
     compute_gradient_at: GradientSide
+    compute_completeness: bool
     save_to_gcp: bool
     modules: tuple[str, ...]
 
@@ -84,6 +85,7 @@ class WorkflowConfig:
             top_n=args.top_n,
             selection_limit=args.selection_limit,
             compute_gradient_at=args.compute_gradient_at,
+            compute_completeness=args.compute_completeness,
             save_to_gcp=args.save_to_gcp,
             modules=tuple(args.modules),
         )
@@ -218,6 +220,12 @@ def build_parser(definition: EAPWorkflowDefinition) -> argparse.ArgumentParser:
 
     execution_group = parser.add_argument_group("execution")
     execution_group.add_argument(
+        "--compute-completeness",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Compute and save completeness figures during the top-components stage.",
+    )
+    execution_group.add_argument(
         "--save-to-gcp",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -261,6 +269,7 @@ def run_workflow(config: WorkflowConfig) -> None:
             top_components_dir=config.top_components_dir,
             completeness_figures_dir=config.completeness_figures_dir,
             top_n=config.top_n,
+            compute_completeness=config.compute_completeness,
         )
 
     if config.includes_stage(NODE_SELECTION_STAGE):

@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import math
 import pickle
 import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, TypeAlias
 
-import matplotlib.pyplot as plt
 import numpy as np
-from scipy.stats import pearsonr
 
 from temporal_manifolds.utils.artifact_io import write_json, write_pickle
 
@@ -22,13 +19,11 @@ TopComponent: TypeAlias = tuple[str, int, float]
 SelectedNode: TypeAlias = tuple[str, int]
 
 DEFAULT_CASES = ("explicit", "implicit")
-COMPLETENESS_PLOT_ROWS = 3
 COMPONENT_ARRAY_NAMES = frozenset({"z", "mlp_hidden"})
 LOGIT_ARRAY_NAMES = frozenset({"clean_logits", "corrupted_logits"})
 NPZ_FILENAME_PATTERN = re.compile(
     r"^(?P<stem>.+)_(?P<option_order>short_first|long_first)_(?P<metric>logit_[AB])_batch_\d+\.npz$"
 )
-LOGIT_INDEX_BY_LABEL = {"A": 0, "B": 1}
 
 
 def extract_merged_array_name(array_key: str) -> str | None:
@@ -95,71 +90,6 @@ def load_case_results(
         raise FileNotFoundError(f"No Q&A result folders found in {case_dir}")
 
     return case_results
-
-
-def safe_pearsonr(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
-    """Compute Pearson correlation without crashing on constant arrays."""
-    try:
-        result = pearsonr(x, y)
-        return float(result.correlation), float(result.pvalue)  # type: ignore
-    except ValueError:
-        return float("nan"), float("nan")
-
-
-def compute_completeness_arrays(
-    group: MergedArrayGroup,
-    logit_index: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return the notebook-style predicted and target completeness arrays."""
-    target = group["clean_logits"][:, logit_index] - group["corrupted_logits"][:, logit_index]
-    component_predictions = [
-        values.sum(axis=-1) for key, values in group.items() if key not in LOGIT_ARRAY_NAMES
-    ]
-    predicted = np.stack(component_predictions, axis=-1).sum(axis=-1)
-    return predicted, target
-
-
-def plot_case_completeness(
-    case_name: str,
-    case_results: CaseResults,
-    output_path: Path,
-    *,
-    logit_label: str = "B",
-) -> Path:
-    """Save the completeness scatter plots produced in the notebook workflow."""
-    variants = list(case_results.keys())
-    columns = max(1, math.ceil(len(variants) / COMPLETENESS_PLOT_ROWS))
-    fig, axes = plt.subplots(
-        COMPLETENESS_PLOT_ROWS,
-        columns,
-        figsize=(5 * columns, 4.5 * COMPLETENESS_PLOT_ROWS),
-    )
-    axes = np.atleast_1d(axes).ravel()  # type: ignore
-
-    for axis, variant_name in zip(axes, variants, strict=False):
-        group = case_results[variant_name][f"short_first_logit_{logit_label}"]
-        predicted, target = compute_completeness_arrays(
-            group,
-            LOGIT_INDEX_BY_LABEL[logit_label],
-        )
-        correlation, p_value = safe_pearsonr(predicted, target)
-        axis.scatter(predicted, target, s=5)
-        axis.set_title(
-            f"{variant_name}_r:{correlation:.2f}_p:{p_value:.4f}",
-            fontsize=10,
-        )
-        axis.set_xlabel("Predicted sum")
-        axis.set_ylabel("Target logit delta")
-
-    for axis in axes[len(variants) :]:
-        axis.axis("off")
-
-    fig.suptitle(f"{case_name}_{logit_label}")
-    fig.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    return output_path
 
 
 def get_denom(group: MergedArrayGroup, logit_index: int) -> np.ndarray:
@@ -297,16 +227,23 @@ def build_top_components_for_case(
     case_name: str,
     results_dir: Path,
     top_components_dir: Path,
-    completeness_figures_dir: Path,
+    completeness_figures_dir: Path | None,
     top_n: int,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path | None]:
     """Compute, plot, and save top components for a single case."""
     case_results = load_case_results(results_dir, case_name)
-    figure_path = plot_case_completeness(
-        case_name,
-        case_results,
-        completeness_figures_dir / f"{case_name}_completeness.png",
-    )
+
+    if completeness_figures_dir is not None:
+        from temporal_manifolds.viz.eap_ig_plots import plot_case_completeness
+
+        figure_path = plot_case_completeness(
+            case_name,
+            case_results,
+            completeness_figures_dir / f"{case_name}_completeness.png",
+        )
+    else:
+        figure_path = None
+
     aggregated_scores = aggregate_case_scores(case_results)
     top_components = {
         horizon: topk_components(aggregated_scores[horizon], top_n) for horizon in aggregated_scores
@@ -328,6 +265,7 @@ def build_top_components(
     top_components_dir: Path,
     completeness_figures_dir: Path,
     top_n: int,
+    compute_completeness: bool = True,
 ) -> tuple[dict[str, Path], dict[str, Path]]:
     """Build top-component artifacts for both explicit and implicit cases."""
     pickles: dict[str, Path] = {}
@@ -337,11 +275,12 @@ def build_top_components(
             case_name=case_name,
             results_dir=results_dir,
             top_components_dir=top_components_dir,
-            completeness_figures_dir=completeness_figures_dir,
+            completeness_figures_dir=completeness_figures_dir if compute_completeness else None,
             top_n=top_n,
         )
         pickles[case_name] = pickle_path
-        figures[case_name] = figure_path
+        if figure_path is not None:
+            figures[case_name] = figure_path
     return pickles, figures
 
 
