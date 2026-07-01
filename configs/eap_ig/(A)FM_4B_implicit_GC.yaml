@@ -7,7 +7,7 @@ setup:
   quadrature: "riemann-midpoint"
 
 paths:
-  data_loc: "./data/raw/refined_datasets"
+  data_loc: "data/binary_choice_questions"
   save_loc: "./results/implicit/(A)"
 
 input:
