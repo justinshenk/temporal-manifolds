@@ -8,12 +8,14 @@ from pathlib import Path
 from typing import Literal, Sequence, TypeAlias
 
 from temporal_manifolds.activations.dataset_gen import DATASETS, generate_task_dataset
+from temporal_manifolds.activations.extract_activations import POSITION_SELECTION_POLICIES
 
 StageName: TypeAlias = Literal[
     "dataset",
     "completions",
     "activations",
 ]
+PositionSelectionPolicy: TypeAlias = Literal["default", "all"]
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_PROMPT_RECORDS_PATH = REPO_ROOT / "data" / "model_completions" / "activation_prompts.json"
@@ -48,6 +50,7 @@ class WorkflowConfig:
     dtype: str | None
     device: str | None
     attn_type: str
+    position_selection_policy: PositionSelectionPolicy
     max_samples: int | None
     overwrite: bool
     save_to_gcp: bool
@@ -75,6 +78,7 @@ class WorkflowConfig:
             dtype=args.dtype,
             device=args.device,
             attn_type=args.attn_type,
+            position_selection_policy=args.position_selection_policy,
             max_samples=args.max_samples,
             overwrite=args.overwrite,
             save_to_gcp=args.save_to_gcp,
@@ -171,6 +175,7 @@ def run_activations_stage(
     dtype: str | None,
     device: str | None,
     attn_type: str,
+    position_selection_policy: PositionSelectionPolicy,
     max_samples: int | None,
     overwrite: bool,
     save_to_gcp: bool,
@@ -189,6 +194,7 @@ def run_activations_stage(
         dtype=dtype,
         device=device,
         attn_type=attn_type,
+        position_selection_policy=position_selection_policy,
         max_samples=max_samples,
         overwrite=overwrite,
         save_to_gcp=save_to_gcp,
@@ -255,6 +261,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     activation_group = parser.add_argument_group("activations")
+    activation_group.add_argument(
+        "--position-selection-policy",
+        choices=POSITION_SELECTION_POLICIES,
+        default="default",
+        help="Policy used to select completion token positions for activation caching.",
+    )
     activation_group.add_argument("--max-samples", type=int, default=None)
     activation_group.add_argument(
         "--overwrite",
@@ -329,6 +341,7 @@ def run_workflow(config: WorkflowConfig) -> None:
             dtype=config.dtype,
             device=config.device,
             attn_type=config.attn_type,
+            position_selection_policy=config.position_selection_policy,
             max_samples=config.max_samples,
             overwrite=config.overwrite,
             save_to_gcp=config.save_to_gcp,

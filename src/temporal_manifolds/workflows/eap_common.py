@@ -10,15 +10,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import yaml
+
 from temporal_manifolds.utils.eap_ig_artifacts import (
     build_top_components,
     resolve_selected_nodes_path,
     write_selected_nodes,
 )
+from temporal_manifolds.utils.gcs_upload import upload_files_to_gcs
 
 GradientSide = Literal["clean", "corrupted"]
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_SCENARIO_DIR = REPO_ROOT / "configs" / "scenarios"
 EAP_INPUTS_SCRIPT = (
     REPO_ROOT / "src" / "temporal_manifolds" / "eap_ig" / "eap_ig_inputs_QandA.py"
 )
@@ -66,6 +70,7 @@ class WorkflowConfig:
     compute_gradient_at: GradientSide
     compute_completeness: bool
     save_to_gcp: bool
+    scenario_config: Path | None
     modules: tuple[str, ...]
 
     @classmethod
@@ -87,6 +92,11 @@ class WorkflowConfig:
             compute_gradient_at=args.compute_gradient_at,
             compute_completeness=args.compute_completeness,
             save_to_gcp=args.save_to_gcp,
+            scenario_config=(
+                resolve_repo_path(args.scenario_config)
+                if args.scenario_config is not None
+                else None
+            ),
             modules=tuple(args.modules),
         )
 
@@ -126,6 +136,38 @@ def discover_configs(config_dir: Path) -> list[Path]:
     return configs
 
 
+def default_scenario_config_path(
+    definition: EAPWorkflowDefinition,
+    compute_gradient_at: GradientSide,
+) -> Path:
+    """Return the scenario YAML used as the sole GCS-prefix source."""
+    if definition.workflow_name == "eap-ig":
+        return DEFAULT_SCENARIO_DIR / "eap_ig_top_components.yaml"
+    if definition.workflow_name == "eap":
+        return DEFAULT_SCENARIO_DIR / f"eap_top_components_{compute_gradient_at}.yaml"
+    raise ValueError(f"No default scenario config for workflow: {definition.workflow_name}")
+
+
+def read_scenario_gcs_prefix(scenario_config: Path) -> str:
+    """Read the GCS prefix from a scenario YAML file under configs/scenarios."""
+    scenario_config = scenario_config.resolve()
+    scenario_root = DEFAULT_SCENARIO_DIR.resolve()
+    try:
+        scenario_config.relative_to(scenario_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"GCS prefix must be read from a YAML file in {scenario_root}: {scenario_config}"
+        ) from exc
+
+    with scenario_config.open("r", encoding="utf-8") as f:
+        scenario = yaml.safe_load(f) or {}
+    if not isinstance(scenario, dict):
+        raise TypeError(f"Scenario config must be a mapping: {scenario_config}")
+
+    raw_prefix = scenario.get("gcs_prefix", scenario.get("gcs-prefix", ""))
+    return "" if raw_prefix is None else str(raw_prefix)
+
+
 def run_attribution_stage(
     *,
     definition: EAPWorkflowDefinition,
@@ -133,6 +175,7 @@ def run_attribution_stage(
     results_dir: Path,
     compute_gradient_at: GradientSide,
     save_to_gcp: bool,
+    gcs_prefix: str = "",
 ) -> list[Path]:
     """Run the Q&A attribution script once per config file."""
     config_paths = discover_configs(config_dir)
@@ -142,6 +185,7 @@ def run_attribution_stage(
             args.extend(["--method", definition.method])
         if definition.supports_compute_gradient_at:
             args.extend(["--compute-gradient-at", compute_gradient_at])
+        args.extend(["--gcs-prefix", gcs_prefix])
         args.append("--save-to-gcp" if save_to_gcp else "--no-save-to-gcp")
         run_python_script(EAP_INPUTS_SCRIPT, args)
     return config_paths
@@ -229,7 +273,16 @@ def build_parser(definition: EAPWorkflowDefinition) -> argparse.ArgumentParser:
         "--save-to-gcp",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help=f"Upload {definition.description_name} NPZ outputs to the configured GCS bucket.",
+        help=(
+            f"Upload generated {definition.description_name} artifacts to the "
+            "configured GCS bucket."
+        ),
+    )
+    execution_group.add_argument(
+        "--scenario-config",
+        type=Path,
+        default=None,
+        help=argparse.SUPPRESS,
     )
     execution_group.add_argument(
         "--modules",
@@ -253,6 +306,11 @@ def parse_args(
 def run_workflow(config: WorkflowConfig) -> None:
     """Execute the requested EAP-family workflow stages."""
     definition = config.definition
+    scenario_config = config.scenario_config or default_scenario_config_path(
+        definition,
+        config.compute_gradient_at,
+    )
+    gcs_prefix = read_scenario_gcs_prefix(scenario_config) if config.save_to_gcp else ""
 
     if config.includes_stage(definition.attribution_stage):
         run_attribution_stage(
@@ -261,24 +319,43 @@ def run_workflow(config: WorkflowConfig) -> None:
             results_dir=config.attribution_results_dir,
             compute_gradient_at=config.compute_gradient_at,
             save_to_gcp=config.save_to_gcp,
+            gcs_prefix=gcs_prefix,
         )
 
     if config.includes_stage(TOP_COMPONENTS_STAGE):
-        build_top_components(
+        top_component_pickles, completeness_figures = build_top_components(
             results_dir=config.attribution_results_dir,
             top_components_dir=config.top_components_dir,
             completeness_figures_dir=config.completeness_figures_dir,
             top_n=config.top_n,
             compute_completeness=config.compute_completeness,
         )
+        top_component_artifacts = [
+            artifact_path
+            for pickle_path in top_component_pickles.values()
+            for artifact_path in (pickle_path, pickle_path.with_suffix(".json"))
+        ]
+        top_component_artifacts.extend(completeness_figures.values())
+        upload_files_to_gcs(
+            top_component_artifacts,
+            enabled=config.save_to_gcp,
+            prefix=gcs_prefix,
+            upload_root=REPO_ROOT,
+        )
 
     if config.includes_stage(NODE_SELECTION_STAGE):
-        write_selected_nodes(
+        selected_node_artifacts = write_selected_nodes(
             top_components_dir=config.top_components_dir,
             selected_nodes_dir=config.selected_nodes_dir,
             top_n=config.top_n,
             selection_limit=config.selection_limit,
             artifact_label=definition.artifact_label,
+        )
+        upload_files_to_gcs(
+            selected_node_artifacts,
+            enabled=config.save_to_gcp,
+            prefix=gcs_prefix,
+            upload_root=REPO_ROOT,
         )
 
 

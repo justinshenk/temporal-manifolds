@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Callable
 
@@ -15,6 +16,16 @@ load_dotenv()
 
 UploadQueue = queue.Queue[tuple[Path, str] | None]
 EnqueueUpload = Callable[[Path, str], None]
+
+
+def gcs_object_name_for_file(local_file: Path, upload_root: Path | None = None) -> str:
+    """Return a stable GCS object name for a local artifact path."""
+    local_file_abs = local_file.resolve()
+    root = (upload_root or Path.cwd()).resolve()
+    try:
+        return local_file_abs.relative_to(root).as_posix()
+    except ValueError:
+        return local_file.name
 
 
 def _build_gcs_client(project_id: str) -> storage.Client:
@@ -46,7 +57,7 @@ def maybe_start_gcs_upload_worker(
     if not resolved_bucket_name:
         raise ValueError("GCS_BUCKET_NAME environment variable is required for GCS uploads.")
 
-    resolved_prefix = (prefix if prefix is not None else os.getenv("GCS_PREFIX", "")).strip("/")
+    resolved_prefix = (prefix or "").strip("/")
     gcs_client = _build_gcs_client(resolved_project_id)
     bucket = gcs_client.bucket(resolved_bucket_name)
     print(
@@ -90,3 +101,32 @@ def maybe_start_gcs_upload_worker(
         upload_queue.put((local_file, object_name))
 
     return upload_queue, upload_thread, _enqueue_upload
+
+
+def upload_files_to_gcs(
+    files: Iterable[Path],
+    *,
+    enabled: bool,
+    project_id: str | None = None,
+    bucket_name: str | None = None,
+    prefix: str | None = None,
+    upload_root: Path | None = None,
+) -> None:
+    """Upload generated artifact files to GCS when enabled."""
+    upload_queue, upload_thread, enqueue_upload = maybe_start_gcs_upload_worker(
+        enabled=enabled,
+        project_id=project_id,
+        bucket_name=bucket_name,
+        prefix=prefix,
+    )
+    try:
+        for file_path in files:
+            if file_path.exists():
+                enqueue_upload(
+                    file_path.resolve(),
+                    gcs_object_name_for_file(file_path, upload_root=upload_root),
+                )
+    finally:
+        if upload_queue is not None and upload_thread is not None:
+            upload_queue.put(None)
+            upload_thread.join()

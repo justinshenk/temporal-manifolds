@@ -1,5 +1,5 @@
-workflow: eap-ig
-gcs_prefix: "eap-ig"
+workflow: eap
+gcs_prefix: "eap-corrupted"
 args:
   modules:
   - top-components
@@ -7,4 +7,5 @@ args:
   top-n: 500
   selection-limit: 300
   compute-completeness: true
+  compue-gradient-at: corrupted
   save-to-gcp: true

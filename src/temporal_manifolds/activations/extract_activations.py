@@ -15,7 +15,7 @@ import json
 import pickle
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from tqdm import tqdm
 
@@ -40,6 +40,8 @@ DEFAULT_MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 SelectedNode = tuple[tuple[int, str], int]
 SelectedNodeGroups = dict[str, list[SelectedNode]]
 ActivationSpan = tuple[int, int, str, str]
+PositionSelectionPolicy = Literal["default", "all"]
+POSITION_SELECTION_POLICIES: tuple[PositionSelectionPolicy, ...] = ("default", "all")
 
 PLAN_MARKER_PAIRS = (
     ("Strategy:", "Steps:", "assistant_to_strategy_generation"),
@@ -227,6 +229,20 @@ def find_assistant_plan_span(full_text: str) -> ActivationSpan | None:
     return matched_span
 
 
+def find_activation_span(
+    full_text: str,
+    *,
+    position_selection_policy: PositionSelectionPolicy,
+) -> ActivationSpan | None:
+    """Return the activation char span selected by the requested policy."""
+    if position_selection_policy == "default":
+        return find_assistant_plan_span(full_text)
+    if position_selection_policy == "all":
+        return (0, len(full_text), full_text, "all_positions")
+
+    raise ValueError(f"Unsupported position selection policy: {position_selection_policy!r}")
+
+
 def token_positions_for_char_span(
     tokenizer: Any,
     text: str,
@@ -254,6 +270,34 @@ def token_positions_for_char_span(
     return positions
 
 
+def all_token_positions(tokenizer: Any, text: str) -> list[int]:
+    """Return every non-padding token position for ``text``."""
+    tokenized = tokenizer([text])
+    input_ids = tokenized["input_ids"]
+    sequence_length = input_ids.shape[-1] if hasattr(input_ids, "shape") else len(input_ids[0])
+    return list(range(sequence_length))
+
+
+def token_positions_for_policy(
+    tokenizer: Any,
+    text: str,
+    span: ActivationSpan,
+    *,
+    position_selection_policy: PositionSelectionPolicy,
+) -> list[int]:
+    """Return token positions selected by the requested policy."""
+    if position_selection_policy == "all":
+        return all_token_positions(tokenizer, text)
+
+    start_char, end_char, _, _ = span
+    return token_positions_for_char_span(
+        tokenizer,
+        text,
+        start_char,
+        end_char,
+    )
+
+
 def build_activation_metadata(
     record: dict[str, Any],
     sample_index: int,
@@ -261,6 +305,7 @@ def build_activation_metadata(
     token_positions: list[int],
     activation_text: str,
     activation_section: str,
+    position_selection_policy: PositionSelectionPolicy,
 ) -> list[dict[str, Any]]:
     """Build metadata for one assistant-to-plan-header activation sample."""
     return [
@@ -273,6 +318,7 @@ def build_activation_metadata(
             "activation_char_span": list(char_span),
             "activation_token_positions": token_positions,
             "activation_text": activation_text,
+            "position_selection_policy": position_selection_policy,
         }
     ]
 
@@ -292,6 +338,7 @@ def cache_completion_activations(
     gcp_project_id: str | None,
     gcs_bucket_name: str | None,
     gcs_prefix: str | None,
+    position_selection_policy: PositionSelectionPolicy = "default",
 ) -> None:
     """Load completions, cache assistant-to-strategy activations, and save caches."""
     import torch
@@ -335,7 +382,10 @@ def cache_completion_activations(
                 continue
 
             text = record["full_text"]
-            span = find_assistant_plan_span(text)
+            span = find_activation_span(
+                text,
+                position_selection_policy=position_selection_policy,
+            )
             if span is None:
                 skipped_spans.append(
                     {
@@ -348,11 +398,11 @@ def cache_completion_activations(
                 continue
 
             start_char, end_char, activation_text, activation_section = span
-            token_positions = token_positions_for_char_span(
+            token_positions = token_positions_for_policy(
                 tokenizer,
                 text,
-                start_char,
-                end_char,
+                span,
+                position_selection_policy=position_selection_policy,
             )
 
             texts = [text]
@@ -380,10 +430,12 @@ def cache_completion_activations(
                     token_positions=token_positions,
                     activation_text=activation_text,
                     activation_section=activation_section,
+                    position_selection_policy=position_selection_policy,
                 ),
                 "positions": token_positions,
                 "average_positions": False,
                 "activation_section": activation_section,
+                "position_selection_policy": position_selection_policy,
                 "activations": extract_selected_activations(
                     activations,
                     selected_node_groups,
@@ -442,6 +494,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--attn-type", default="sdpa")
+    parser.add_argument(
+        "--position-selection-policy",
+        choices=POSITION_SELECTION_POLICIES,
+        default="default",
+        help="Policy used to select completion token positions for activation caching.",
+    )
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument(
         "--overwrite",
@@ -476,6 +534,7 @@ def main() -> None:
         gcp_project_id=args.gcp_project_id,
         gcs_bucket_name=args.gcs_bucket_name,
         gcs_prefix=args.gcs_prefix,
+        position_selection_policy=args.position_selection_policy,
     )
 
 

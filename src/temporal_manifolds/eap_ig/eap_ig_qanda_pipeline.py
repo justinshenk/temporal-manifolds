@@ -218,6 +218,7 @@ def run_qanda_attribution(
     results_root: Path | None = None,
     attribution_method: Literal["eap_ig", "eap"] = "eap_ig",
     compute_gradient_at: Literal["clean", "corrupted"] = "clean",
+    gcs_prefix: str = "",
 ) -> tuple[Any, Any]:
     """Run Q&A EAP-style attribution from Python or notebooks."""
     config = load_config(resolve_config_path(config_path))
@@ -242,7 +243,6 @@ def run_qanda_attribution(
     filename: str = config["output"]["filename"]
     gcp_project_id: str | None = config["output"].get("gcp_project_id", GCP_PROJECT_ID)
     gcs_bucket_name: str | None = config["output"].get("gcs_bucket_name", GCS_BUCKET_NAME)
-    gcs_prefix: str | None = config["output"].get("gcs_prefix", "")
 
     system_prompt: str = config["parameters"]["system_prompt"]
     metric_type: str = config["parameters"]["metric_type"]
@@ -359,6 +359,7 @@ def run_eap_ig(
     *,
     save_to_gcp: bool = True,
     results_root: Path | None = None,
+    gcs_prefix: str = "",
 ) -> tuple[Any, Any]:
     """Run Q&A EAP-IG from Python or notebooks."""
     return run_qanda_attribution(
@@ -368,6 +369,7 @@ def run_eap_ig(
         save_to_gcp=save_to_gcp,
         results_root=results_root,
         attribution_method="eap_ig",
+        gcs_prefix=gcs_prefix,
     )
 
 
@@ -379,6 +381,7 @@ def run_eap(
     save_to_gcp: bool = True,
     results_root: Path | None = None,
     compute_gradient_at: Literal["clean", "corrupted"] = "clean",
+    gcs_prefix: str = "",
 ) -> tuple[Any, Any]:
     """Run Q&A vanilla EAP from Python or notebooks."""
     return run_qanda_attribution(
@@ -389,4 +392,5 @@ def run_eap(
         results_root=results_root,
         attribution_method="eap",
         compute_gradient_at=compute_gradient_at,
+        gcs_prefix=gcs_prefix,
     )

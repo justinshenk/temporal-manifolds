@@ -52,6 +52,11 @@ def main() -> None:
         default=None,
         help="Optional root directory overriding the results/ prefix in config save_loc paths.",
     )
+    parser.add_argument(
+        "--gcs-prefix",
+        default="",
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
     runner = run_eap_ig if args.method == "eap-ig" else run_eap
     if args.method == "eap":
@@ -60,9 +65,15 @@ def main() -> None:
             save_to_gcp=args.save_to_gcp,
             results_root=args.results_root,
             compute_gradient_at=args.compute_gradient_at,
+            gcs_prefix=args.gcs_prefix,
         )
     else:
-        runner(args.config, save_to_gcp=args.save_to_gcp, results_root=args.results_root)
+        runner(
+            args.config,
+            save_to_gcp=args.save_to_gcp,
+            results_root=args.results_root,
+            gcs_prefix=args.gcs_prefix,
+        )
 
 
 if __name__ == "__main__":

@@ -1,10 +1,11 @@
 workflow: eap
+gcs_prefix: "eap-clean"
 args:
   modules:
-    - top-components
-    - node-selection
+  - top-components
+  - node-selection
   top-n: 500
   selection-limit: 300
   compute-completeness: true
   compue-gradient-at: clean
-  save-to-gcp: false
+  save-to-gcp: true

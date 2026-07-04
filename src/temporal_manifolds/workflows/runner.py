@@ -196,6 +196,8 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     spec = lookup[workflow_name]
     workflow_args = scenario_args_to_argv(spec, scenario)
+    if "--scenario-config" in option_strings_for_workflow(spec):
+        workflow_args.extend(["--scenario-config", str(resolve_scenario_path(args.scenario))])
     load_workflow_main(spec)(workflow_args)
 
 
