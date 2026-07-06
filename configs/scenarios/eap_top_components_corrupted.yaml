@@ -2,10 +2,11 @@ workflow: eap
 gcs_prefix: "eap-corrupted"
 args:
   modules:
+  - eap
   - top-components
   - node-selection
   top-n: 500
   selection-limit: 300
   compute-completeness: true
-  compue-gradient-at: corrupted
+  compute-gradient-at: corrupted
   save-to-gcp: true

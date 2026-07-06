@@ -2,6 +2,7 @@ workflow: eap-ig
 gcs_prefix: "eap-ig"
 args:
   modules:
+  - eap-ig
   - top-components
   - node-selection
   top-n: 500
