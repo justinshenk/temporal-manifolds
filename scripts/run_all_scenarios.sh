@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_URL="${REPO_URL:-https://github.com/justinshenk/temporal-manifolds.git}"
+REPO_BRANCH="${REPO_BRANCH:-dev}"
+if [[ -d "${SCRIPT_REPO_ROOT}/.git" ]]; then
+  REPO_CLONE_DIR="${REPO_CLONE_DIR:-${SCRIPT_REPO_ROOT}}"
+else
+  REPO_CLONE_DIR="${REPO_CLONE_DIR:-${HOME}/temporal-manifolds}"
+fi
+REPO_ROOT="${REPO_CLONE_DIR}"
 SCENARIO_DIR="${REPO_ROOT}/configs/scenarios"
 GCLOUD_INSTALL_DIR="${GCLOUD_INSTALL_DIR:-${HOME}/google-cloud-sdk}"
 GCLOUD_INSTALL_TMPDIR=""
@@ -14,6 +22,25 @@ cleanup_gcloud_install() {
   if [[ -n "${GCLOUD_INSTALL_TMPDIR}" && -d "${GCLOUD_INSTALL_TMPDIR}" ]]; then
     rm -rf "${GCLOUD_INSTALL_TMPDIR}"
   fi
+}
+
+clone_dev_branch() {
+  if [[ -d "${REPO_CLONE_DIR}/.git" ]]; then
+    REPO_ROOT="$(cd "${REPO_CLONE_DIR}" && pwd)"
+    SCENARIO_DIR="${REPO_ROOT}/configs/scenarios"
+    log "Using repository at ${REPO_ROOT}"
+    return
+  fi
+
+  if [[ -e "${REPO_CLONE_DIR}" ]]; then
+    printf 'Cannot clone repository: %s already exists but is not a git checkout\n' "${REPO_CLONE_DIR}" >&2
+    exit 1
+  fi
+
+  log "Cloning ${REPO_URL} branch ${REPO_BRANCH} into ${REPO_CLONE_DIR}"
+  git clone --branch "${REPO_BRANCH}" --single-branch "${REPO_URL}" "${REPO_CLONE_DIR}"
+  REPO_ROOT="$(cd "${REPO_CLONE_DIR}" && pwd)"
+  SCENARIO_DIR="${REPO_ROOT}/configs/scenarios"
 }
 
 install_gcloud_cli() {
@@ -109,6 +136,7 @@ run_scenarios() {
 }
 
 main() {
+  clone_dev_branch
   install_gcloud_cli
   login_gcloud_no_browser
   prepare_env_file
