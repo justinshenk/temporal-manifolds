@@ -24,6 +24,27 @@ cleanup_gcloud_install() {
   fi
 }
 
+env_value() {
+  local key value
+  key="$1"
+
+  if [[ -n "${!key:-}" ]]; then
+    printf '%s\n' "${!key}"
+    return
+  fi
+
+  if [[ ! -f "${REPO_ROOT}/.env" ]]; then
+    return
+  fi
+
+  value="$(
+    grep -E "^[[:space:]]*${key}=" "${REPO_ROOT}/.env" \
+      | tail -n 1 \
+      | sed -E 's/^[^=]*=//; s/^["'"'"']//; s/["'"'"']$//'
+  )"
+  printf '%s\n' "${value}"
+}
+
 clone_dev_branch() {
   if [[ -d "${REPO_CLONE_DIR}/.git" ]]; then
     REPO_ROOT="$(cd "${REPO_CLONE_DIR}" && pwd)"
@@ -90,11 +111,25 @@ install_gcloud_cli() {
 login_gcloud_no_browser() {
   if [[ -n "$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null)" ]]; then
     log "gcloud already has an active authenticated account"
-    return
+  else
+    log "Starting gcloud account login without launching a browser"
+    gcloud auth login --no-launch-browser
   fi
 
-  log "Starting gcloud login without launching a browser"
-  gcloud auth login --no-launch-browser
+  if gcloud auth application-default print-access-token >/dev/null 2>&1; then
+    log "gcloud Application Default Credentials already available"
+  else
+    log "Starting gcloud Application Default Credentials login without launching a browser"
+    gcloud auth application-default login --no-launch-browser
+  fi
+
+  local project_id
+  project_id="$(env_value GCP_PROJECT_ID)"
+  if [[ -n "${project_id}" ]]; then
+    log "Setting gcloud project and ADC quota project to ${project_id}"
+    gcloud config set project "${project_id}" >/dev/null
+    gcloud auth application-default set-quota-project "${project_id}" >/dev/null
+  fi
 }
 
 prepare_env_file() {
@@ -138,8 +173,8 @@ run_scenarios() {
 main() {
   clone_dev_branch
   install_gcloud_cli
-  login_gcloud_no_browser
   prepare_env_file
+  login_gcloud_no_browser
   run_scenarios
 }
 
