@@ -126,9 +126,15 @@ login_gcloud_no_browser() {
   local project_id
   project_id="$(env_value GCP_PROJECT_ID)"
   if [[ -n "${project_id}" ]]; then
-    log "Setting gcloud project and ADC quota project to ${project_id}"
+    log "Setting gcloud project to ${project_id}"
     gcloud config set project "${project_id}" >/dev/null
-    gcloud auth application-default set-quota-project "${project_id}" >/dev/null
+
+    if [[ "${SET_ADC_QUOTA_PROJECT:-0}" == "1" ]]; then
+      log "Setting ADC quota project to ${project_id}"
+      if ! gcloud auth application-default set-quota-project "${project_id}" >/dev/null; then
+        log "Could not set ADC quota project. Continuing because ADC credentials are present."
+      fi
+    fi
   fi
 }
 
