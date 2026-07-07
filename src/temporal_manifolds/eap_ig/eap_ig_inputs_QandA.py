@@ -10,7 +10,7 @@ import torch
 try:
     from .eap_ig_qanda_pipeline import run_eap, run_eap_ig
 except ImportError:
-    from eap_ig_qanda_pipeline import run_eap, run_eap_ig
+    from temporal_manifolds.eap_ig.eap_ig_qanda_pipeline import run_eap, run_eap_ig
 
 torch.set_grad_enabled(False)
 

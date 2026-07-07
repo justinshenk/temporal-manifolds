@@ -26,7 +26,7 @@ try:
         tensor_to_numpy,
     )
 except ImportError:
-    from eap_ig_qanda_common import (
+    from temporal_manifolds.eap_ig.eap_ig_qanda_common import (
         GCP_PROJECT_ID,
         GCS_BUCKET_NAME,
         build_layer_components,
@@ -38,8 +38,7 @@ except ImportError:
         resolve_quadrature,
         tensor_to_numpy,
     )
-
-    from ..utils.gcs_upload import maybe_start_gcs_upload_worker
+    from temporal_manifolds.utils.gcs_upload import maybe_start_gcs_upload_worker
 
 
 def build_metrics(token_a: int, token_b: int) -> dict[str, Any]:
