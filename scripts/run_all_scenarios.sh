@@ -153,6 +153,21 @@ prepare_env_file() {
   log "Copied .env.example to .env"
 }
 
+prepare_python_env() {
+  if ! command -v uv >/dev/null 2>&1; then
+    printf 'Missing uv. Install it first: https://docs.astral.sh/uv/getting-started/installation/\n' >&2
+    exit 1
+  fi
+
+  cd "${REPO_ROOT}"
+
+  log "Syncing Python dependencies from uv.lock"
+  uv sync --locked
+
+  log "Checking PyTorch installation"
+  uv run python -c 'import torch; print(f"torch {torch.__version__}")'
+}
+
 run_scenarios() {
   if [[ ! -d "${SCENARIO_DIR}" ]]; then
     printf 'Missing scenario directory: %s\n' "${SCENARIO_DIR}" >&2
@@ -180,6 +195,7 @@ main() {
   clone_dev_branch
   install_gcloud_cli
   prepare_env_file
+  prepare_python_env
   login_gcloud_no_browser
   run_scenarios
 }
