@@ -12,7 +12,11 @@ import torch
 from tqdm import tqdm
 
 try:
-    from ..utils.gcs_upload import maybe_start_gcs_upload_worker
+    from ..utils.gcs_upload import (
+        gcs_object_name_for_file,
+        maybe_build_gcs_existing_object_fetcher,
+        maybe_start_gcs_upload_worker,
+    )
     from .eap_ig_qanda_common import (
         GCP_PROJECT_ID,
         GCS_BUCKET_NAME,
@@ -38,7 +42,11 @@ except ImportError:
         resolve_quadrature,
         tensor_to_numpy,
     )
-    from temporal_manifolds.utils.gcs_upload import maybe_start_gcs_upload_worker
+    from temporal_manifolds.utils.gcs_upload import (
+        gcs_object_name_for_file,
+        maybe_build_gcs_existing_object_fetcher,
+        maybe_start_gcs_upload_worker,
+    )
 
 
 def build_metrics(token_a: int, token_b: int) -> dict[str, Any]:
@@ -249,6 +257,12 @@ def run_qanda_attribution(
 
     input_file_path = data_loc / data_file
     save_loc.mkdir(parents=True, exist_ok=True)
+    fetch_existing_gcs_object = maybe_build_gcs_existing_object_fetcher(
+        enabled=save_to_gcp,
+        project_id=gcp_project_id,
+        bucket_name=gcs_bucket_name,
+        prefix=gcs_prefix,
+    )
     upload_queue, upload_thread, enqueue_upload = maybe_start_gcs_upload_worker(
         enabled=save_to_gcp,
         project_id=gcp_project_id,
@@ -305,6 +319,19 @@ def run_qanda_attribution(
                 range(len(tokenized_clean)),
                 desc=f"[{order_label}/{metric_label}] Batches",
             ):
+                output_file = save_loc / (
+                    f"{filename}_{order_label}_{metric_label}_batch_{i:05d}.npz"
+                )
+                output_file_abs = output_file.resolve()
+                object_name = gcs_object_name_for_file(output_file_abs)
+                if fetch_existing_gcs_object(object_name, output_file_abs):
+                    print(
+                        "[GCS resume] Skipping existing "
+                        f"object={object_name} local_path={output_file_abs}",
+                        flush=True,
+                    )
+                    continue
+
                 batch_output = process_batch(
                     model=model,
                     expand_mask=expand_mask,
@@ -328,17 +355,9 @@ def run_qanda_attribution(
                     metric_type=metric_type,
                     compute_gradient_at=compute_gradient_at,
                 )
-                output_file = save_loc / (
-                    f"{filename}_{order_label}_{metric_label}_batch_{i:05d}.npz"
-                )
                 output_file.parent.mkdir(parents=True, exist_ok=True)
                 np.savez_compressed(output_file, **batch_output)
-                output_file_abs = output_file.resolve()
-                try:
-                    path_in_repo = output_file_abs.relative_to(Path.cwd().resolve()).as_posix()
-                except ValueError:
-                    path_in_repo = output_file.name
-                enqueue_upload(output_file_abs, path_in_repo)
+                enqueue_upload(output_file_abs, object_name)
 
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()

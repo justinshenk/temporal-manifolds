@@ -16,6 +16,7 @@ load_dotenv()
 
 UploadQueue = queue.Queue[tuple[Path, str] | None]
 EnqueueUpload = Callable[[Path, str], None]
+FetchGCSObjectIfExists = Callable[[str, Path], bool]
 
 
 def gcs_object_name_for_file(local_file: Path, upload_root: Path | None = None) -> str:
@@ -39,6 +40,64 @@ def _build_gcs_client(project_id: str) -> storage.Client:
     return storage.Client(project=project_id)
 
 
+def _resolve_gcs_config(
+    project_id: str | None,
+    bucket_name: str | None,
+) -> tuple[str, str]:
+    """Resolve GCS project and bucket settings from args or environment."""
+    resolved_project_id = project_id or os.getenv("GCP_PROJECT_ID")
+    if not resolved_project_id:
+        raise ValueError("GCP_PROJECT_ID environment variable is required for GCS uploads.")
+
+    resolved_bucket_name = bucket_name or os.getenv("GCS_BUCKET_NAME")
+    if not resolved_bucket_name:
+        raise ValueError("GCS_BUCKET_NAME environment variable is required for GCS uploads.")
+
+    return resolved_project_id, resolved_bucket_name
+
+
+def apply_gcs_prefix(object_name: str, prefix: str | None = None) -> str:
+    """Apply a GCS prefix to an object name using the upload worker convention."""
+    resolved_prefix = (prefix or "").strip("/")
+    if resolved_prefix:
+        return f"{resolved_prefix}/{object_name.lstrip('/')}"
+    return object_name
+
+
+def maybe_build_gcs_existing_object_fetcher(
+    enabled: bool,
+    project_id: str | None = None,
+    bucket_name: str | None = None,
+    prefix: str | None = None,
+) -> FetchGCSObjectIfExists:
+    """Return a fetcher that downloads existing GCS objects to local paths."""
+    if not enabled:
+        return lambda _object_name, _destination: False
+
+    resolved_project_id, resolved_bucket_name = _resolve_gcs_config(project_id, bucket_name)
+    resolved_prefix = (prefix or "").strip("/")
+    gcs_client = _build_gcs_client(resolved_project_id)
+    bucket = gcs_client.bucket(resolved_bucket_name)
+
+    def _fetch_if_exists(object_name: str, destination: Path) -> bool:
+        prefixed_object_name = apply_gcs_prefix(object_name, resolved_prefix)
+        blob = bucket.blob(prefixed_object_name)
+        if not blob.exists():
+            return False
+
+        if not destination.exists():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            blob.download_to_filename(str(destination))
+            print(
+                "[GCS resume] Downloaded existing "
+                f"object={prefixed_object_name} local_path={destination}",
+                flush=True,
+            )
+        return True
+
+    return _fetch_if_exists
+
+
 def maybe_start_gcs_upload_worker(
     enabled: bool,
     project_id: str | None = None,
@@ -49,14 +108,7 @@ def maybe_start_gcs_upload_worker(
     if not enabled:
         return None, None, lambda _local_file, _object_name: None
 
-    resolved_project_id = project_id or os.getenv("GCP_PROJECT_ID")
-    if not resolved_project_id:
-        raise ValueError("GCP_PROJECT_ID environment variable is required for GCS uploads.")
-
-    resolved_bucket_name = bucket_name or os.getenv("GCS_BUCKET_NAME")
-    if not resolved_bucket_name:
-        raise ValueError("GCS_BUCKET_NAME environment variable is required for GCS uploads.")
-
+    resolved_project_id, resolved_bucket_name = _resolve_gcs_config(project_id, bucket_name)
     resolved_prefix = (prefix or "").strip("/")
     gcs_client = _build_gcs_client(resolved_project_id)
     bucket = gcs_client.bucket(resolved_bucket_name)
@@ -77,8 +129,7 @@ def maybe_start_gcs_upload_worker(
                 upload_queue.task_done()
                 break
             local_file, object_name = item
-            if resolved_prefix:
-                object_name = f"{resolved_prefix}/{object_name.lstrip('/')}"
+            object_name = apply_gcs_prefix(object_name, resolved_prefix)
             file_size = local_file.stat().st_size
             print(
                 f"[GCS upload] Starting file={local_file.name} "
