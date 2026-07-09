@@ -220,6 +220,15 @@ def edge_attribution_patching(
         baseline_activations, baseline_logits = get_activations(
             model, baseline_dict, layer_components, return_logits=True
         )
+
+        input_activations = input_activations.cpu()
+        baseline_activations = baseline_activations.cpu()
+
+        input_activations.attention_mask = torch.empty((1, 1))
+        baseline_activations.attention_mask = torch.empty((1, 1))
+
+        _cleanup_memory()
+
         grads, _ = get_gradients(
             model,
             grad_inputs,
@@ -228,6 +237,7 @@ def edge_attribution_patching(
             positions=None,
             return_logits=False,
         )
+        grads = grads.cpu()
 
         input_logits = cast(torch.Tensor, input_logits)
         baseline_logits = cast(torch.Tensor, baseline_logits)
