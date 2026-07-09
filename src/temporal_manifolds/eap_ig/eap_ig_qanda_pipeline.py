@@ -108,6 +108,22 @@ def build_option_orders(
     ]
 
 
+def expected_output_files(
+    save_loc: Path,
+    filename: str,
+    option_orders: list[tuple[str, list[list[str]], list[list[str]]]],
+) -> list[Path]:
+    """Return the output files produced by a Q&A attribution run."""
+    output_files = []
+    for order_label, chunked_clean_prompts, _chunked_corrupted_prompts in option_orders:
+        for metric_label in ("logit_A", "logit_B"):
+            for i in range(len(chunked_clean_prompts)):
+                output_files.append(
+                    save_loc / f"{filename}_{order_label}_{metric_label}_batch_{i:05d}.npz"
+                )
+    return output_files
+
+
 def process_batch(
     *,
     model: Any,
@@ -259,6 +275,25 @@ def run_qanda_attribution(
 
     input_file_path = data_loc / data_file
     save_loc.mkdir(parents=True, exist_ok=True)
+    option_orders = build_option_orders(
+        input_file_path=input_file_path,
+        template=template,
+        option_keys=option_keys,
+        batch_size=batch_size,
+    )
+    output_files = expected_output_files(
+        save_loc=save_loc,
+        filename=filename,
+        option_orders=option_orders,
+    )
+    if output_files and all(output_file.exists() for output_file in output_files):
+        print(
+            "[resume] All attribution outputs already exist locally; "
+            f"skipping config={config_path}",
+            flush=True,
+        )
+        return model, tokenizer
+
     fetch_existing_gcs_object = maybe_build_gcs_existing_object_fetcher(
         enabled=save_to_gcp,
         project_id=gcp_project_id,
@@ -307,12 +342,6 @@ def run_qanda_attribution(
     )
     token_a, token_b = resolve_option_tokens(tokenizer, option_keys)
     metrics = build_metrics(token_a, token_b)
-    option_orders = build_option_orders(
-        input_file_path=input_file_path,
-        template=template,
-        option_keys=option_keys,
-        batch_size=batch_size,
-    )
 
     for order_label, chunked_clean_prompts, chunked_corrupted_prompts in option_orders:
         tokenized_clean = [tokenizer(batch) for batch in chunked_clean_prompts]
@@ -328,6 +357,13 @@ def run_qanda_attribution(
                 )
                 output_file_abs = output_file.resolve()
                 object_name = gcs_object_name_for_file(output_file_abs)
+                if output_file_abs.exists():
+                    print(
+                        "[resume] Skipping existing local output "
+                        f"local_path={output_file_abs}",
+                        flush=True,
+                    )
+                    continue
                 if fetch_existing_gcs_object(object_name, output_file_abs):
                     print(
                         "[GCS resume] Skipping existing "
