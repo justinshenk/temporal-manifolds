@@ -69,8 +69,10 @@ def maybe_build_gcs_existing_object_fetcher(
     project_id: str | None = None,
     bucket_name: str | None = None,
     prefix: str | None = None,
+    *,
+    download_existing: bool = True,
 ) -> FetchGCSObjectIfExists:
-    """Return a fetcher that downloads existing GCS objects to local paths."""
+    """Return a fetcher that detects and optionally downloads existing GCS objects."""
     if not enabled:
         return lambda _object_name, _destination: False
 
@@ -85,12 +87,18 @@ def maybe_build_gcs_existing_object_fetcher(
         if not blob.exists():
             return False
 
-        if not destination.exists():
+        if download_existing and not destination.exists():
             destination.parent.mkdir(parents=True, exist_ok=True)
             blob.download_to_filename(str(destination))
             print(
                 "[GCS resume] Downloaded existing "
                 f"object={prefixed_object_name} local_path={destination}",
+                flush=True,
+            )
+        elif not download_existing:
+            print(
+                "[GCS resume] Found existing "
+                f"object={prefixed_object_name}; skipping local download",
                 flush=True,
             )
         return True
@@ -103,6 +111,8 @@ def maybe_start_gcs_upload_worker(
     project_id: str | None = None,
     bucket_name: str | None = None,
     prefix: str | None = None,
+    *,
+    delete_local_after_upload: bool = False,
 ) -> tuple[UploadQueue | None, threading.Thread | None, EnqueueUpload]:
     """Start a background GCS uploader when enabled."""
     if not enabled:
@@ -143,6 +153,12 @@ def maybe_start_gcs_upload_worker(
                 f"[GCS upload] Completed file={local_file.name}",
                 flush=True,
             )
+            if delete_local_after_upload:
+                local_file.unlink(missing_ok=True)
+                print(
+                    f"[GCS upload] Deleted local file={local_file.name}",
+                    flush=True,
+                )
             upload_queue.task_done()
 
     upload_thread = threading.Thread(target=_upload_worker, daemon=True)

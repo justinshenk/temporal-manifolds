@@ -14,6 +14,10 @@ SCENARIO_DIR="${REPO_ROOT}/configs/scenarios"
 GCLOUD_INSTALL_DIR="${GCLOUD_INSTALL_DIR:-${HOME}/google-cloud-sdk}"
 GCLOUD_INSTALL_TMPDIR=""
 
+if [[ -z "${MPLBACKEND:-}" || "${MPLBACKEND}" == "module://matplotlib_inline.backend_inline" ]]; then
+  export MPLBACKEND=Agg
+fi
+
 log() {
   printf '[run-all-scenarios] %s\n' "$*"
 }

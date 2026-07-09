@@ -70,6 +70,7 @@ class WorkflowConfig:
     compute_gradient_at: GradientSide
     compute_completeness: bool
     save_to_gcp: bool
+    delete_attribution_results_after_gcs_upload: bool
     scenario_config: Path | None
     modules: tuple[str, ...]
 
@@ -92,6 +93,9 @@ class WorkflowConfig:
             compute_gradient_at=args.compute_gradient_at,
             compute_completeness=args.compute_completeness,
             save_to_gcp=args.save_to_gcp,
+            delete_attribution_results_after_gcs_upload=(
+                args.delete_attribution_results_after_gcs_upload
+            ),
             scenario_config=(
                 resolve_repo_path(args.scenario_config)
                 if args.scenario_config is not None
@@ -176,6 +180,7 @@ def run_attribution_stage(
     compute_gradient_at: GradientSide,
     save_to_gcp: bool,
     gcs_prefix: str = "",
+    delete_after_gcs_upload: bool = False,
 ) -> list[Path]:
     """Run the Q&A attribution script once per config file."""
     config_paths = discover_configs(config_dir)
@@ -187,6 +192,8 @@ def run_attribution_stage(
             args.extend(["--compute-gradient-at", compute_gradient_at])
         args.extend(["--gcs-prefix", gcs_prefix])
         args.append("--save-to-gcp" if save_to_gcp else "--no-save-to-gcp")
+        if delete_after_gcs_upload:
+            args.append("--delete-local-after-gcs-upload")
         run_python_script(EAP_INPUTS_SCRIPT, args)
     return config_paths
 
@@ -279,6 +286,16 @@ def build_parser(definition: EAPWorkflowDefinition) -> argparse.ArgumentParser:
         ),
     )
     execution_group.add_argument(
+        "--delete-attribution-results-after-gcs-upload",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Delete attribution NPZ files after successful GCS upload. This is "
+            "only valid when running the attribution stage without downstream "
+            "top-components or node-selection stages."
+        ),
+    )
+    execution_group.add_argument(
         "--scenario-config",
         type=Path,
         default=None,
@@ -306,6 +323,19 @@ def parse_args(
 def run_workflow(config: WorkflowConfig) -> None:
     """Execute the requested EAP-family workflow stages."""
     definition = config.definition
+    if (
+        config.delete_attribution_results_after_gcs_upload
+        and (
+            not config.save_to_gcp
+            or config.includes_stage(TOP_COMPONENTS_STAGE)
+            or config.includes_stage(NODE_SELECTION_STAGE)
+        )
+    ):
+        raise ValueError(
+            "--delete-attribution-results-after-gcs-upload requires --save-to-gcp "
+            "and cannot be combined with top-components or node-selection stages."
+        )
+
     scenario_config = config.scenario_config or default_scenario_config_path(
         definition,
         config.compute_gradient_at,
@@ -320,6 +350,7 @@ def run_workflow(config: WorkflowConfig) -> None:
             compute_gradient_at=config.compute_gradient_at,
             save_to_gcp=config.save_to_gcp,
             gcs_prefix=gcs_prefix,
+            delete_after_gcs_upload=config.delete_attribution_results_after_gcs_upload,
         )
 
     if config.includes_stage(TOP_COMPONENTS_STAGE):

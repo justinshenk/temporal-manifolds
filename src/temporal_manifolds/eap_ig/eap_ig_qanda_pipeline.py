@@ -226,6 +226,8 @@ def run_qanda_attribution(
     attribution_method: Literal["eap_ig", "eap"] = "eap_ig",
     compute_gradient_at: Literal["clean", "corrupted"] = "clean",
     gcs_prefix: str = "",
+    delete_local_after_gcs_upload: bool = False,
+    download_existing_gcs_outputs: bool = True,
 ) -> tuple[Any, Any]:
     """Run Q&A EAP-style attribution from Python or notebooks."""
     config = load_config(resolve_config_path(config_path))
@@ -262,12 +264,14 @@ def run_qanda_attribution(
         project_id=gcp_project_id,
         bucket_name=gcs_bucket_name,
         prefix=gcs_prefix,
+        download_existing=download_existing_gcs_outputs,
     )
     upload_queue, upload_thread, enqueue_upload = maybe_start_gcs_upload_worker(
         enabled=save_to_gcp,
         project_id=gcp_project_id,
         bucket_name=gcs_bucket_name,
         prefix=gcs_prefix,
+        delete_local_after_upload=delete_local_after_gcs_upload,
     )
 
     from ..utils.mech_interp_toolkit.activation_dict import expand_mask
@@ -356,7 +360,11 @@ def run_qanda_attribution(
                     compute_gradient_at=compute_gradient_at,
                 )
                 output_file.parent.mkdir(parents=True, exist_ok=True)
-                np.savez_compressed(output_file, **batch_output)
+                try:
+                    np.savez_compressed(output_file, **batch_output)
+                except OSError:
+                    output_file.unlink(missing_ok=True)
+                    raise
                 enqueue_upload(output_file_abs, object_name)
 
                 if torch.cuda.is_available():
@@ -378,6 +386,8 @@ def run_eap_ig(
     save_to_gcp: bool = True,
     results_root: Path | None = None,
     gcs_prefix: str = "",
+    delete_local_after_gcs_upload: bool = False,
+    download_existing_gcs_outputs: bool = True,
 ) -> tuple[Any, Any]:
     """Run Q&A EAP-IG from Python or notebooks."""
     return run_qanda_attribution(
@@ -388,6 +398,8 @@ def run_eap_ig(
         results_root=results_root,
         attribution_method="eap_ig",
         gcs_prefix=gcs_prefix,
+        delete_local_after_gcs_upload=delete_local_after_gcs_upload,
+        download_existing_gcs_outputs=download_existing_gcs_outputs,
     )
 
 
@@ -400,6 +412,8 @@ def run_eap(
     results_root: Path | None = None,
     compute_gradient_at: Literal["clean", "corrupted"] = "clean",
     gcs_prefix: str = "",
+    delete_local_after_gcs_upload: bool = False,
+    download_existing_gcs_outputs: bool = True,
 ) -> tuple[Any, Any]:
     """Run Q&A vanilla EAP from Python or notebooks."""
     return run_qanda_attribution(
@@ -411,4 +425,6 @@ def run_eap(
         attribution_method="eap",
         compute_gradient_at=compute_gradient_at,
         gcs_prefix=gcs_prefix,
+        delete_local_after_gcs_upload=delete_local_after_gcs_upload,
+        download_existing_gcs_outputs=download_existing_gcs_outputs,
     )

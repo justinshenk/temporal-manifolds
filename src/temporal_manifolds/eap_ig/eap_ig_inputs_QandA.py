@@ -57,6 +57,24 @@ def main() -> None:
         default="",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--delete-local-after-gcs-upload",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Delete each local NPZ after it has been uploaded to GCS. Use only "
+            "when downstream stages do not need local attribution files."
+        ),
+    )
+    parser.add_argument(
+        "--download-existing-gcs-outputs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "When resuming with GCS enabled, download existing objects before "
+            "skipping them so downstream stages have complete local results."
+        ),
+    )
     args = parser.parse_args()
     runner = run_eap_ig if args.method == "eap-ig" else run_eap
     if args.method == "eap":
@@ -66,6 +84,8 @@ def main() -> None:
             results_root=args.results_root,
             compute_gradient_at=args.compute_gradient_at,
             gcs_prefix=args.gcs_prefix,
+            delete_local_after_gcs_upload=args.delete_local_after_gcs_upload,
+            download_existing_gcs_outputs=args.download_existing_gcs_outputs,
         )
     else:
         runner(
@@ -73,6 +93,8 @@ def main() -> None:
             save_to_gcp=args.save_to_gcp,
             results_root=args.results_root,
             gcs_prefix=args.gcs_prefix,
+            delete_local_after_gcs_upload=args.delete_local_after_gcs_upload,
+            download_existing_gcs_outputs=args.download_existing_gcs_outputs,
         )
 
 

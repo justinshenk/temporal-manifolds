@@ -4,7 +4,8 @@ The input is a JSONL file produced by ``generate_completions.py``. Each record i
 expected to contain ``full_text`` plus prompt metadata. Position-wise activations
 are cached from the generated ``assistant`` marker through the generated planning
 header, stopping before the detailed plan body marker. Conversational completions
-use ``Strategy:`` / ``Steps:``; abstract distribution completions use
+may use ``Strategy:`` / ``Steps:``, ``Summary:`` / ``Checklist:``, or
+``Approach:`` / ``Actions:``; abstract distribution completions use
 ``Allocation rule:`` / ``Schedule:``.
 """
 
@@ -45,6 +46,8 @@ POSITION_SELECTION_POLICIES: tuple[PositionSelectionPolicy, ...] = ("default", "
 
 PLAN_MARKER_PAIRS = (
     ("Strategy:", "Steps:", "assistant_to_strategy_generation"),
+    ("Summary:", "Checklist:", "assistant_to_summary_generation"),
+    ("Approach:", "Actions:", "assistant_to_approach_generation"),
     ("Allocation rule:", "Schedule:", "assistant_to_allocation_rule_generation"),
 )
 
@@ -192,6 +195,24 @@ def get_underlying_tokenizer(tokenizer: Any) -> Any:
     return getattr(tokenizer, "tokenizer", tokenizer)
 
 
+def set_pad_token_if_missing(tokenizer: Any) -> None:
+    """Set a pad token on wrapped or raw tokenizers when one is missing."""
+    hf_tokenizer = get_underlying_tokenizer(tokenizer)
+    if getattr(hf_tokenizer, "pad_token_id", None) is None:
+        hf_tokenizer.pad_token = hf_tokenizer.eos_token
+
+
+def tokenize_raw_texts(tokenizer: Any, texts: list[str]) -> dict[str, Any]:
+    """Tokenize decoded full-text completions without reapplying a chat template."""
+    hf_tokenizer = get_underlying_tokenizer(tokenizer)
+    return hf_tokenizer(
+        texts,
+        add_special_tokens=True,
+        return_tensors="pt",
+        padding=True,
+    )
+
+
 def find_assistant_plan_span(full_text: str) -> ActivationSpan | None:
     """Return the char span from assistant marker through the generated plan header."""
     assistant_marker = "assistant\n"
@@ -272,7 +293,7 @@ def token_positions_for_char_span(
 
 def all_token_positions(tokenizer: Any, text: str) -> list[int]:
     """Return every non-padding token position for ``text``."""
-    tokenized = tokenizer([text])
+    tokenized = tokenize_raw_texts(tokenizer, [text])
     input_ids = tokenized["input_ids"]
     sequence_length = input_ids.shape[-1] if hasattr(input_ids, "shape") else len(input_ids[0])
     return list(range(sequence_length))
@@ -343,9 +364,9 @@ def cache_completion_activations(
     """Load completions, cache assistant-to-strategy activations, and save caches."""
     import torch
 
-    from ..utils.activation_utils import get_activations
     from ..utils.gcs_upload import maybe_start_gcs_upload_worker
-    from ..utils.utils import load_model_tokenizer_config
+    from ..utils.mech_interp_toolkit.activation_utils import get_activations
+    from ..utils.mech_interp_toolkit.utils import load_model_tokenizer_config
 
     selected_node_groups = load_selected_node_groups(nodes_path)
     layer_components = get_unique_layer_components(selected_node_groups)
@@ -357,8 +378,7 @@ def cache_completion_activations(
         dtype=dtype,
         attn_type=attn_type,
     )
-    if getattr(tokenizer, "pad_token_id", None) is None:
-        tokenizer.pad_token = tokenizer.eos_token  # type: ignore
+    set_pad_token_if_missing(tokenizer)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     skipped_spans: list[dict[str, Any]] = []
@@ -406,7 +426,7 @@ def cache_completion_activations(
             )
 
             texts = [text]
-            tokenized_batch = tokenizer(texts)
+            tokenized_batch = tokenize_raw_texts(tokenizer, texts)
             activations, logits = get_activations(
                 model,
                 tokenized_batch,
