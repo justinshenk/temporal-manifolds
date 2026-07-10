@@ -40,3 +40,5 @@ tensorboard/
 # Logs / temp
 *.log
 .tmp/
+
+figures/*

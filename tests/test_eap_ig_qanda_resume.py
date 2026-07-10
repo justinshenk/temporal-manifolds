@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import yaml
 
-from temporal_manifolds.eap_ig.eap_ig_qanda_pipeline import run_qanda_attribution
+from temporal_manifolds.eap_ig.eap_ig_qanda_pipeline import (
+    existing_output_matches_run,
+    run_qanda_attribution,
+)
 
 
 def test_run_qanda_attribution_skips_when_all_local_outputs_exist(tmp_path) -> None:
@@ -79,3 +83,39 @@ def test_run_qanda_attribution_skips_when_all_local_outputs_exist(tmp_path) -> N
 
     assert model is None
     assert tokenizer is None
+
+
+def test_eap_corrupted_does_not_resume_from_legacy_output(tmp_path) -> None:
+    output_file = tmp_path / "legacy.npz"
+    output_file.write_bytes(b"present")
+
+    assert existing_output_matches_run(
+        output_file,
+        attribution_method="eap",
+        compute_gradient_at="clean",
+    )
+    assert not existing_output_matches_run(
+        output_file,
+        attribution_method="eap",
+        compute_gradient_at="corrupted",
+    )
+
+
+def test_eap_resume_requires_matching_gradient_side_metadata(tmp_path) -> None:
+    output_file = tmp_path / "clean.npz"
+    np.savez_compressed(
+        output_file,
+        metadata__attribution_method=np.array("eap", dtype=np.str_),
+        metadata__compute_gradient_at=np.array("clean", dtype=np.str_),
+    )
+
+    assert existing_output_matches_run(
+        output_file,
+        attribution_method="eap",
+        compute_gradient_at="clean",
+    )
+    assert not existing_output_matches_run(
+        output_file,
+        attribution_method="eap",
+        compute_gradient_at="corrupted",
+    )

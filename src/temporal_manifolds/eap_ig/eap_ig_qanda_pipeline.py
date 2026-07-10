@@ -124,6 +124,31 @@ def expected_output_files(
     return output_files
 
 
+def existing_output_matches_run(
+    output_file: Path,
+    *,
+    attribution_method: Literal["eap_ig", "eap"],
+    compute_gradient_at: Literal["clean", "corrupted"],
+) -> bool:
+    """Return whether an existing output can be reused for this run."""
+    if not output_file.exists():
+        return False
+    if attribution_method != "eap":
+        return True
+
+    try:
+        with np.load(output_file, allow_pickle=False) as data:
+            saved_method = str(data["metadata__attribution_method"].item())
+            saved_gradient_side = str(data["metadata__compute_gradient_at"].item())
+    except (KeyError, OSError, ValueError):
+        # Older vanilla-EAP artifacts did not record the gradient side. They
+        # were produced with the historical default, so only clean runs may
+        # safely resume from them.
+        return compute_gradient_at == "clean"
+
+    return saved_method == attribution_method and saved_gradient_side == compute_gradient_at
+
+
 def process_batch(
     *,
     model: Any,
@@ -150,6 +175,7 @@ def process_batch(
     batch_output["metadata__option_order"] = np.array(order_label, dtype=np.str_)
     batch_output["metadata__metric_type"] = np.array(metric_type, dtype=np.str_)
     batch_output["metadata__attribution_method"] = np.array(attribution_method, dtype=np.str_)
+    batch_output["metadata__compute_gradient_at"] = np.array(compute_gradient_at, dtype=np.str_)
 
     step_labels = steps if attribution_method == "eap_ig" else steps[:1]
 
@@ -286,7 +312,14 @@ def run_qanda_attribution(
         filename=filename,
         option_orders=option_orders,
     )
-    if output_files and all(output_file.exists() for output_file in output_files):
+    if output_files and all(
+        existing_output_matches_run(
+            output_file,
+            attribution_method=attribution_method,
+            compute_gradient_at=compute_gradient_at,
+        )
+        for output_file in output_files
+    ):
         print(
             "[resume] All attribution outputs already exist locally; "
             f"skipping config={config_path}",
@@ -357,17 +390,47 @@ def run_qanda_attribution(
                 )
                 output_file_abs = output_file.resolve()
                 object_name = gcs_object_name_for_file(output_file_abs)
-                if output_file_abs.exists():
+                if existing_output_matches_run(
+                    output_file_abs,
+                    attribution_method=attribution_method,
+                    compute_gradient_at=compute_gradient_at,
+                ):
                     print(
                         "[resume] Skipping existing local output "
                         f"local_path={output_file_abs}",
                         flush=True,
                     )
                     continue
-                if fetch_existing_gcs_object(object_name, output_file_abs):
+                if output_file_abs.exists():
                     print(
-                        "[GCS resume] Skipping existing "
-                        f"object={object_name} local_path={output_file_abs}",
+                        "[resume] Recomputing output with mismatched EAP metadata "
+                        f"local_path={output_file_abs}",
+                        flush=True,
+                    )
+                    output_file_abs.unlink()
+                if fetch_existing_gcs_object(object_name, output_file_abs):
+                    if not existing_output_matches_run(
+                        output_file_abs,
+                        attribution_method=attribution_method,
+                        compute_gradient_at=compute_gradient_at,
+                    ):
+                        print(
+                            "[GCS resume] Recomputing output with mismatched EAP metadata "
+                            f"object={object_name} local_path={output_file_abs}",
+                            flush=True,
+                        )
+                        output_file_abs.unlink(missing_ok=True)
+                    else:
+                        print(
+                            "[GCS resume] Skipping existing "
+                            f"object={object_name} local_path={output_file_abs}",
+                            flush=True,
+                        )
+                        continue
+                if output_file_abs.exists():
+                    print(
+                        "[resume] Skipping existing local output "
+                        f"local_path={output_file_abs}",
                         flush=True,
                     )
                     continue
