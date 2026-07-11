@@ -23,7 +23,7 @@ def load_model_and_tokenizer(
     attn_type: str = "sdpa",
 ) -> tuple[Any, Any]:
     """Load and return a HuggingFace causal LM and tokenizer."""
-    from ..utils.utils import load_model_tokenizer_config
+    from ..utils.mech_interp_toolkit.utils import load_model_tokenizer_config
 
     model, tokenizer, _ = load_model_tokenizer_config(
         model_name=model_name,

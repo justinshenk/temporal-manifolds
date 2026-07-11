@@ -113,32 +113,11 @@ install_gcloud_cli() {
 }
 
 login_gcloud_no_browser() {
-  local has_active_account=0 has_adc=0
-
-  if [[ -n "$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null)" ]]; then
-    has_active_account=1
-  fi
-
   if gcloud auth application-default print-access-token >/dev/null 2>&1; then
-    has_adc=1
-  fi
-
-  if [[ "${has_active_account}" -eq 1 && "${has_adc}" -eq 1 ]]; then
-    log "gcloud already authenticated; skipping login"
+    log "gcloud Application Default Credentials already available; skipping login"
   else
-    if [[ "${has_active_account}" -eq 1 ]]; then
-      log "gcloud already has an active authenticated account"
-    else
-      log "Starting gcloud account login without launching a browser"
-      gcloud auth login --no-launch-browser
-    fi
-
-    if [[ "${has_adc}" -eq 1 ]]; then
-      log "gcloud Application Default Credentials already available"
-    else
-      log "Starting gcloud Application Default Credentials login without launching a browser"
-      gcloud auth application-default login --no-launch-browser
-    fi
+    log "Starting gcloud Application Default Credentials login without launching a browser"
+    gcloud auth application-default login --no-launch-browser
   fi
 
   local project_id
