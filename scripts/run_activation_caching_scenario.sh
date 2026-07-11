@@ -19,6 +19,21 @@ require_file() {
   fi
 }
 
+prepare_env_file() {
+  if [[ ! -f "${REPO_ROOT}/.env.example" ]]; then
+    printf 'Missing .env.example at %s\n' "${REPO_ROOT}/.env.example" >&2
+    exit 1
+  fi
+
+  if [[ -f "${REPO_ROOT}/.env" && "${FORCE_ENV_COPY:-0}" != "1" ]]; then
+    log ".env already exists; leaving it unchanged. Set FORCE_ENV_COPY=1 to overwrite it."
+    return
+  fi
+
+  cp "${REPO_ROOT}/.env.example" "${REPO_ROOT}/.env"
+  log "Copied .env.example to .env"
+}
+
 prepare_python_env() {
   if ! command -v uv >/dev/null 2>&1; then
     printf 'Missing uv. Install it first: https://docs.astral.sh/uv/getting-started/installation/\n' >&2
@@ -42,7 +57,7 @@ run_scenario() {
 main() {
   cd "${REPO_ROOT}"
   require_file "${SCENARIO_PATH}" "activation-caching scenario config"
-  require_file "${REPO_ROOT}/.env" ".env file containing GCP_PROJECT_ID and GCS_BUCKET_NAME"
+  prepare_env_file
   prepare_python_env
   run_scenario
 }
