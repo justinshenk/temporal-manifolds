@@ -21,6 +21,8 @@ args:
   max_samples: null
   overwrite: false
   save_to_gcp: true
+  upload_worker_count: 16
+  upload_queue_capacity: 128
   modules:
   - dataset
   - completions

@@ -36,6 +36,8 @@ def config_values() -> dict:
         "max_samples": 2,
         "overwrite": False,
         "save_to_gcp": False,
+        "upload_worker_count": 16,
+        "upload_queue_capacity": 8,
         "modules": ["completions", "activations"],
     }
 
@@ -68,6 +70,8 @@ def test_loads_yaml_options_and_gcp_settings_from_environment(
     assert config.completions_gcs_prefix == "completion-artifacts"
     assert config.nodes_gcs_prefix == "node-artifacts"
     assert config.modules == ("completions", "activations")
+    assert config.upload_worker_count == 16
+    assert config.upload_queue_capacity == 8
     assert not config.includes_stage("dataset")
     assert config.includes_stage("completions")
 
@@ -88,6 +92,15 @@ def test_modules_must_be_a_non_empty_list_of_known_stages() -> None:
 
     values["modules"] = []
     with pytest.raises(TypeError, match="non-empty YAML list"):
+        WorkflowConfig.from_mapping(values)
+
+
+@pytest.mark.parametrize("key", ["upload_worker_count", "upload_queue_capacity"])
+def test_upload_concurrency_values_must_be_positive(key: str) -> None:
+    values = config_values()
+    values[key] = 0
+
+    with pytest.raises(ValueError, match=key):
         WorkflowConfig.from_mapping(values)
 
 
@@ -145,6 +158,8 @@ def test_dataset_and_completion_artifacts_are_uploaded(monkeypatch: pytest.Monke
     assert activation_kwargs["save_to_gcp"] is True
     assert activation_kwargs["gcs_prefix"] == "test-prefix"
     assert activation_kwargs["nodes_gcs_prefix"] == "node-artifacts"
+    assert activation_kwargs["upload_worker_count"] == 16
+    assert activation_kwargs["upload_queue_capacity"] == 8
 
 
 def test_cached_dataset_and_completions_skip_generation(

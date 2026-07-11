@@ -57,6 +57,8 @@ class WorkflowConfig:
     max_samples: int | None
     overwrite: bool
     save_to_gcp: bool
+    upload_worker_count: int
+    upload_queue_capacity: int
     gcp_project_id: str | None
     gcs_bucket_name: str | None
     gcs_prefix: str | None
@@ -106,6 +108,12 @@ class WorkflowConfig:
         for key in boolean_keys:
             if not isinstance(values[key], bool):
                 raise TypeError(f"{key} must be a YAML boolean")
+        upload_worker_count = int(values["upload_worker_count"])
+        if upload_worker_count < 1:
+            raise ValueError("upload_worker_count must be at least 1")
+        upload_queue_capacity = int(values["upload_queue_capacity"])
+        if upload_queue_capacity < 1:
+            raise ValueError("upload_queue_capacity must be at least 1")
 
         return cls(
             dataset=dataset,
@@ -125,6 +133,8 @@ class WorkflowConfig:
             max_samples=None if values["max_samples"] is None else int(values["max_samples"]),
             overwrite=bool(values["overwrite"]),
             save_to_gcp=bool(values["save_to_gcp"]),
+            upload_worker_count=upload_worker_count,
+            upload_queue_capacity=upload_queue_capacity,
             gcp_project_id=GCP_PROJECT_ID,
             gcs_bucket_name=GCS_BUCKET_NAME,
             gcs_prefix=gcs_prefix,
@@ -236,6 +246,8 @@ def run_activations_stage(
     gcs_bucket_name: str | None,
     gcs_prefix: str | None,
     nodes_gcs_prefix: str | None,
+    upload_worker_count: int,
+    upload_queue_capacity: int,
 ) -> Path:
     """Cache selected-node activations from generated completions."""
     from temporal_manifolds.activations.extract_activations import cache_completion_activations
@@ -263,6 +275,8 @@ def run_activations_stage(
         gcp_project_id=gcp_project_id,
         gcs_bucket_name=gcs_bucket_name,
         gcs_prefix=gcs_prefix,
+        upload_worker_count=upload_worker_count,
+        upload_queue_capacity=upload_queue_capacity,
     )
     return output_dir
 
@@ -483,6 +497,8 @@ def run_workflow(config: WorkflowConfig) -> None:
             gcs_bucket_name=config.gcs_bucket_name,
             gcs_prefix=config.gcs_prefix,
             nodes_gcs_prefix=config.nodes_gcs_prefix,
+            upload_worker_count=config.upload_worker_count,
+            upload_queue_capacity=config.upload_queue_capacity,
         )
 
 
