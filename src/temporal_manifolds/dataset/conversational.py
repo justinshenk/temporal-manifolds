@@ -76,22 +76,22 @@ Deadline: {value} {unit} from now
 Give a plan appropriate for this deadline.""",
     },
     {
-        "id": "object_available_time",
-        "body": """Object: {task}
+        "id": "objective_available_time",
+        "body": """Objective: {task}
 Available time: {value} {unit}
 
 Write a plan optimized for the available time.""",
     },
     {
-        "id": "object_time_budget",
-        "body": """Object: {task}
+        "id": "objective_time_budget",
+        "body": """Objective: {task}
 Time budget: {value} {unit}
 
 Provide a plan that fits this time budget.""",
     },
     {
-        "id": "object_deadline",
-        "body": """Object: {task}
+        "id": "objective_deadline",
+        "body": """Objective: {task}
 Deadline: {value} {unit} from now
 
 Give a plan appropriate for this deadline.""",
@@ -188,7 +188,7 @@ tasks = {
         stakes="low",
         agency="individual",
     ),
-    "pack a small bag for the day": _task(
+    "pack a bag with essentials for the day": _task(
         {"minutes"},
         task_family="personal_logistics",
         difficulty="low",
@@ -206,8 +206,8 @@ tasks = {
         stakes="low",
         agency="individual",
     ),
-    "prepare for a marathon": _task(
-        {"weeks", "months", "years"},
+    "train for a marathon": _task(
+        {"days", "weeks", "months"},
         task_family="physical_training",
         difficulty="medium",
         domain="personal_lifestyle",
@@ -216,7 +216,7 @@ tasks = {
         agency="individual",
     ),
     "plan an international trip": _task(
-        {"hours", "days"},
+        {"hours", "days", "weeks", "months"},
         task_family="travel_planning",
         difficulty="medium",
         domain="personal_lifestyle",
@@ -224,8 +224,8 @@ tasks = {
         stakes="medium",
         agency="individual",
     ),
-    "organize my friend's wedding": _task(
-        {"days", "weeks", "months"},
+    "organize a wedding for a friend": _task(
+        {"weeks", "months", "years"},
         task_family="event_planning",
         difficulty="high",
         domain="personal_lifestyle",
@@ -233,8 +233,8 @@ tasks = {
         stakes="medium",
         agency="multi_agent",
     ),
-    "move to a new city": _task(
-        {"hours", "days", "weeks"},
+    "plan a move to a new city": _task(
+        {"days", "weeks", "months"},
         task_family="relocation",
         difficulty="medium",
         domain="personal_lifestyle",
@@ -242,8 +242,8 @@ tasks = {
         stakes="medium",
         agency="individual",
     ),
-    "learn a new language": _task(
-        {"days", "weeks", "months"},
+    "build proficiency in a new language": _task(
+        {"weeks", "months", "years"},
         task_family="skill_learning",
         difficulty="medium",
         domain="personal_lifestyle",
@@ -270,7 +270,7 @@ tasks = {
         agency="individual",
     ),
     "renovate an apartment": _task(
-        {"hours", "days"},
+        {"days", "weeks", "months"},
         task_family="home_renovation",
         difficulty="medium",
         domain="personal_lifestyle",
@@ -278,7 +278,7 @@ tasks = {
         stakes="medium",
         agency="multi_agent",
     ),
-    "help me make an investment strategy for long-term wealth creation": _task(
+    "develop a long-term personal investment strategy": _task(
         {"months", "years", "decades"},
         task_family="investment_strategy",
         difficulty="high",
@@ -296,7 +296,7 @@ tasks = {
         stakes="high",
         agency="organization",
     ),
-    "coordinate disaster relief efforts": _task(
+    "coordinate a disaster relief effort": _task(
         {"days", "weeks", "months"},
         task_family="emergency_response",
         difficulty="high",
@@ -305,7 +305,7 @@ tasks = {
         stakes="high",
         agency="multi_agent",
     ),
-    "establish a self-sustaining civilization on a new planet": _task(
+    "establish a self-sustaining human settlement on another planet": _task(
         {"decades", "centuries", "millennia"},
         task_family="civilization_survival",
         difficulty="very_high",
@@ -323,7 +323,7 @@ tasks = {
         stakes="high",
         agency="multi_agent",
     ),
-    "build a city designed to survive natural disasters": _task(
+    "design and build a city resilient to natural disasters": _task(
         {"decades", "centuries"},
         task_family="resilient_infrastructure",
         difficulty="very_high",
@@ -332,7 +332,7 @@ tasks = {
         stakes="high",
         agency="organization",
     ),
-    "ensure long-term safe containment of hazardous materials": _task(
+    "develop a long-term plan for safely containing hazardous materials": _task(
         {"months", "years", "decades"},
         task_family="hazard_containment",
         difficulty="high",
@@ -341,7 +341,7 @@ tasks = {
         stakes="high",
         agency="organization",
     ),
-    "create an institution that remains stable and effective": _task(
+    "design an institution for long-term stability and effectiveness": _task(
         {"months", "years", "decades"},
         task_family="institution_design",
         difficulty="high",
@@ -350,7 +350,7 @@ tasks = {
         stakes="high",
         agency="organization",
     ),
-    "plan the long-term survival strategy of humanity": _task(
+    "develop a long-term strategy for humanity's survival": _task(
         {"centuries", "millennia"},
         task_family="civilization_survival",
         difficulty="very_high",
@@ -379,7 +379,7 @@ tasks = {
         stakes="low",
         agency="individual",
     ),
-    "write a sensitive email to resolve a team conflict": _task(
+    "write a sensitive email addressing a team conflict": _task(
         {"minutes", "hours", "days"},
         task_family="communication_plan",
         difficulty="medium",
@@ -434,7 +434,7 @@ tasks = {
         agency="individual",
     ),
     "create an e-commerce website": _task(
-        {"hours", "days", "weeks"},
+        {"days", "weeks", "months"},
         task_family="software_project",
         difficulty="medium",
         domain="software",
@@ -460,7 +460,7 @@ tasks = {
         stakes="medium",
         agency="individual",
     ),
-    "preserve an organization's records for future teams": _task(
+    "develop a process to preserve an organization's records for future teams": _task(
         {"months", "years", "decades"},
         task_family="knowledge_archive",
         difficulty="medium",
@@ -481,4 +481,4 @@ tasks = {
 }
 
 
-values = [1, 2, 3, 4, 5, 10, 50, 100]
+values = [1, 2, 3, 4, 5, 10, 20, 30, 50, 70, 100]

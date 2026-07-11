@@ -1,0 +1,24 @@
+workflow: activation-caching
+gcs_prefix: conversational_default
+args:
+  dataset: conversational
+  prompt_records_path: data/model_completions/activation_prompts.json
+  completions_path: data/model_completions/completions_256.jsonl
+  nodes_path: data/selected_nodes/final_500_eap_ig.pkl
+  output_dir: results/feature_geometry_new_activations
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  batch_size: 128
+  max_new_tokens: 256
+  temperature: 0.7
+  top_k: 20
+  dtype: null
+  device: null
+  attn_type: sdpa
+  position_selection_policy: default
+  max_samples: null
+  overwrite: false
+  save_to_gcp: true
+  modules:
+  - dataset
+  - completions
+  - activations

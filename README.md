@@ -36,18 +36,13 @@ Pipeline:
 uv sync                                  # install deps (Python 3.12+)
 cp .env.example .env                     # fill in GCP/GCS settings, etc.
 uv run pytest -q                         # smoke tests
-
-# Generate a tiny example dataset
-uv run python -m experiments.01_parametric_dataset.run \
-    --config configs/scenarios/example.yaml \
-    --out data/example/
 ```
 
 ## Layout
 
 ```
 configs/scenarios/        scenario YAMLs (templates, phrasing groups, splits)
-src/temporal_manifolds/   shared library (dataset, activations, geometry, ...)
+src/temporal_manifolds/   shared library (activations, workflows, visualization, ...)
 experiments/NN_<name>/    one folder per ledger row; entry point + README
 notebooks/                exploratory work (clean before committing)
 scripts/                  thin CLI wrappers for batch / cluster runs

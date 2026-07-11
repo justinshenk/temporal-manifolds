@@ -1,0 +1,128 @@
+from pathlib import Path
+
+import pytest
+import yaml
+
+import temporal_manifolds.workflows.activation_caching_workflow as workflow_module
+from temporal_manifolds.workflows.activation_caching_workflow import (
+    REPO_ROOT,
+    WorkflowConfig,
+    parse_args,
+    run_workflow,
+)
+
+
+def config_values() -> dict:
+    return {
+        "dataset": "conversational",
+        "prompt_records_path": "data/prompts.json",
+        "completions_path": "data/completions.jsonl",
+        "nodes_path": "data/nodes.pkl",
+        "output_dir": "results/activations",
+        "model_name": "test/model",
+        "batch_size": 4,
+        "max_new_tokens": 32,
+        "temperature": 0.0,
+        "top_k": 20,
+        "dtype": None,
+        "device": "cpu",
+        "attn_type": "sdpa",
+        "position_selection_policy": "default",
+        "max_samples": 2,
+        "overwrite": False,
+        "save_to_gcp": False,
+        "modules": ["completions", "activations"],
+    }
+
+
+def test_loads_yaml_options_and_gcp_settings_from_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(workflow_module, "GCP_PROJECT_ID", "test-project")
+    monkeypatch.setattr(workflow_module, "GCS_BUCKET_NAME", "test-bucket")
+    config_path = tmp_path / "activation_caching.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "workflow": "activation-caching",
+                "gcs_prefix": "test-prefix",
+                "args": config_values(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = WorkflowConfig.from_yaml(config_path)
+
+    assert config.model_name == "test/model"
+    assert config.prompt_records_path == REPO_ROOT / "data/prompts.json"
+    assert config.gcp_project_id == "test-project"
+    assert config.gcs_bucket_name == "test-bucket"
+    assert config.gcs_prefix == "test-prefix"
+    assert config.modules == ("completions", "activations")
+    assert not config.includes_stage("dataset")
+    assert config.includes_stage("completions")
+
+
+def test_config_requires_every_option() -> None:
+    values = config_values()
+    del values["batch_size"]
+
+    with pytest.raises(ValueError, match="Missing.*batch_size"):
+        WorkflowConfig.from_mapping(values)
+
+
+def test_modules_must_be_a_non_empty_list_of_known_stages() -> None:
+    values = config_values()
+    values["modules"] = ["dataset", "unknown"]
+    with pytest.raises(ValueError, match="modules entries"):
+        WorkflowConfig.from_mapping(values)
+
+    values["modules"] = []
+    with pytest.raises(TypeError, match="non-empty YAML list"):
+        WorkflowConfig.from_mapping(values)
+
+
+def test_cli_only_accepts_scenario_config() -> None:
+    args = parse_args(["--scenario-config", "config.yaml"])
+    assert args.scenario_config == Path("config.yaml")
+
+    with pytest.raises(SystemExit):
+        parse_args(["--batch-size", "4"])
+
+
+def test_dataset_and_completion_artifacts_are_uploaded(monkeypatch: pytest.MonkeyPatch) -> None:
+    values = config_values()
+    values["modules"] = ["dataset", "completions", "activations"]
+    values["save_to_gcp"] = True
+    config = WorkflowConfig.from_mapping(values, gcs_prefix="test-prefix")
+    uploaded: list[Path] = []
+    activation_kwargs: dict = {}
+
+    monkeypatch.setattr(
+        workflow_module,
+        "run_dataset_stage",
+        lambda **_kwargs: config.prompt_records_path,
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "run_completions_stage",
+        lambda **_kwargs: config.completions_path,
+    )
+
+    def capture_activation_stage(**kwargs: object) -> Path:
+        activation_kwargs.update(kwargs)
+        return config.output_dir
+
+    monkeypatch.setattr(workflow_module, "run_activations_stage", capture_activation_stage)
+    monkeypatch.setattr(
+        workflow_module,
+        "upload_stage_artifacts",
+        lambda artifacts, **_kwargs: uploaded.extend(artifacts),
+    )
+
+    run_workflow(config)
+
+    assert uploaded == [config.prompt_records_path, config.completions_path]
+    assert activation_kwargs["save_to_gcp"] is True
+    assert activation_kwargs["gcs_prefix"] == "test-prefix"

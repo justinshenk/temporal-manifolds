@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 def test_conversational_records_include_task_metadata() -> None:
-    from temporal_manifolds.activations.dataset_gen import generate_task_dataset
+    from temporal_manifolds.dataset.generate import generate_task_dataset
 
     records = generate_task_dataset(
         dataset="conversational",
@@ -39,7 +39,7 @@ def test_conversational_records_include_task_metadata() -> None:
 
 
 def test_plain_task_unit_sets_remain_supported() -> None:
-    from temporal_manifolds.activations.dataset_gen import generate_task_dataset
+    from temporal_manifolds.dataset.generate import generate_task_dataset
 
     records = generate_task_dataset(
         template_list=[
@@ -57,7 +57,7 @@ def test_plain_task_unit_sets_remain_supported() -> None:
 
 
 def test_conversational_dataset_has_crossed_difficulty_controls() -> None:
-    from temporal_manifolds.activations import conversational_dataset
+    from temporal_manifolds.dataset import conversational
 
     controlled_families = {
         "communication_plan",
@@ -67,7 +67,7 @@ def test_conversational_dataset_has_crossed_difficulty_controls() -> None:
     }
     variants_by_family = {family: [] for family in controlled_families}
 
-    for config in conversational_dataset.tasks.values():
+    for config in conversational.tasks.values():
         family = config["task_family"]
         if family in variants_by_family:
             variants_by_family[family].append(config)
@@ -79,12 +79,22 @@ def test_conversational_dataset_has_crossed_difficulty_controls() -> None:
 
 
 def test_conversational_dataset_has_output_format_variations() -> None:
-    from temporal_manifolds.activations import conversational_dataset
+    from temporal_manifolds.dataset import conversational
 
-    output_formats = {template["output_format"] for template in conversational_dataset.templates}
+    output_formats = {template["output_format"] for template in conversational.templates}
     assert output_formats == {"strategy_steps", "summary_checklist", "approach_actions"}
 
-    prompt_framings = {template["prompt_framing"] for template in conversational_dataset.templates}
-    assert prompt_framings == {"task_available_time", "goal_time_budget", "objective_deadline"}
+    prompt_framings = {template["prompt_framing"] for template in conversational.templates}
+    assert prompt_framings == {
+        "task_available_time",
+        "task_time_budget",
+        "task_deadline",
+        "goal_available_time",
+        "goal_time_budget",
+        "goal_deadline",
+        "objective_available_time",
+        "objective_time_budget",
+        "objective_deadline",
+    }
 
-    assert len(conversational_dataset.templates) == len(output_formats) * len(prompt_framings)
+    assert len(conversational.templates) == len(output_formats) * len(prompt_framings)
