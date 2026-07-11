@@ -60,6 +60,9 @@ class WorkflowConfig:
     gcp_project_id: str | None
     gcs_bucket_name: str | None
     gcs_prefix: str | None
+    dataset_gcs_prefix: str | None
+    completions_gcs_prefix: str | None
+    nodes_gcs_prefix: str | None
     modules: tuple[StageName, ...]
 
     @classmethod
@@ -125,6 +128,21 @@ class WorkflowConfig:
             gcp_project_id=GCP_PROJECT_ID,
             gcs_bucket_name=GCS_BUCKET_NAME,
             gcs_prefix=gcs_prefix,
+            dataset_gcs_prefix=(
+                None
+                if values["dataset_gcs_prefix"] is None
+                else str(values["dataset_gcs_prefix"])
+            ),
+            completions_gcs_prefix=(
+                None
+                if values["completions_gcs_prefix"] is None
+                else str(values["completions_gcs_prefix"])
+            ),
+            nodes_gcs_prefix=(
+                None
+                if values["nodes_gcs_prefix"] is None
+                else str(values["nodes_gcs_prefix"])
+            ),
             modules=modules,
         )
 
@@ -217,9 +235,18 @@ def run_activations_stage(
     gcp_project_id: str | None,
     gcs_bucket_name: str | None,
     gcs_prefix: str | None,
+    nodes_gcs_prefix: str | None,
 ) -> Path:
     """Cache selected-node activations from generated completions."""
     from temporal_manifolds.activations.extract_activations import cache_completion_activations
+
+    ensure_nodes_file_available(
+        nodes_path,
+        save_to_gcp=save_to_gcp,
+        gcp_project_id=gcp_project_id,
+        gcs_bucket_name=gcs_bucket_name,
+        nodes_gcs_prefix=nodes_gcs_prefix,
+    )
 
     cache_completion_activations(
         input_path=completions_path,
@@ -239,6 +266,86 @@ def run_activations_stage(
     )
     return output_dir
 
+
+def ensure_nodes_file_available(
+    nodes_path: Path,
+    *,
+    save_to_gcp: bool,
+    gcp_project_id: str | None,
+    gcs_bucket_name: str | None,
+    nodes_gcs_prefix: str | None,
+) -> None:
+    """Download the selected-node file from GCS when it is absent locally."""
+    if nodes_path.is_file():
+        return
+
+    from temporal_manifolds.utils.gcs_upload import (
+        gcs_object_name_for_file,
+        maybe_build_gcs_existing_object_fetcher,
+    )
+
+    object_name = gcs_object_name_for_file(nodes_path, upload_root=REPO_ROOT)
+    fetch_from_gcs = maybe_build_gcs_existing_object_fetcher(
+        enabled=save_to_gcp,
+        project_id=gcp_project_id,
+        bucket_name=gcs_bucket_name,
+        prefix=nodes_gcs_prefix,
+    )
+    if fetch_from_gcs(object_name, nodes_path):
+        return
+
+    location = (
+        f"{nodes_gcs_prefix.strip('/')}/{object_name}"
+        if nodes_gcs_prefix
+        else object_name
+    )
+    raise FileNotFoundError(
+        f"Selected-node file was not found locally at {nodes_path}"
+        + (
+            f" or in GCS at gs://{gcs_bucket_name}/{location}."
+            if save_to_gcp
+            else ". GCS lookup is disabled because save_to_gcp is false."
+        )
+    )
+
+
+def ensure_input_artifact_available(
+    artifact_path: Path,
+    *,
+    artifact_name: str,
+    save_to_gcp: bool,
+    gcp_project_id: str | None,
+    gcs_bucket_name: str | None,
+    gcs_prefix: str | None,
+) -> None:
+    """Download a required workflow input from GCS when absent locally."""
+    if artifact_path.is_file():
+        return
+
+    from temporal_manifolds.utils.gcs_upload import (
+        gcs_object_name_for_file,
+        maybe_build_gcs_existing_object_fetcher,
+    )
+
+    object_name = gcs_object_name_for_file(artifact_path, upload_root=REPO_ROOT)
+    fetch_from_gcs = maybe_build_gcs_existing_object_fetcher(
+        enabled=save_to_gcp,
+        project_id=gcp_project_id,
+        bucket_name=gcs_bucket_name,
+        prefix=gcs_prefix,
+    )
+    if fetch_from_gcs(object_name, artifact_path):
+        return
+
+    location = f"{gcs_prefix.strip('/')}/{object_name}" if gcs_prefix else object_name
+    raise FileNotFoundError(
+        f"{artifact_name} artifact was not found locally at {artifact_path}"
+        + (
+            f" or in GCS at gs://{gcs_bucket_name}/{location}."
+            if save_to_gcp
+            else ". GCS lookup is disabled because save_to_gcp is false."
+        )
+    )
 
 def upload_stage_artifacts(
     artifacts: Sequence[Path],
@@ -289,6 +396,14 @@ def run_workflow(config: WorkflowConfig) -> None:
         upload_stage_artifacts([dataset_artifact], config=config)
 
     if config.includes_stage("completions"):
+        ensure_input_artifact_available(
+            config.prompt_records_path,
+            artifact_name="Dataset",
+            save_to_gcp=config.save_to_gcp,
+            gcp_project_id=config.gcp_project_id,
+            gcs_bucket_name=config.gcs_bucket_name,
+            gcs_prefix=config.dataset_gcs_prefix,
+        )
         completions_artifact = run_completions_stage(
             prompt_records_path=config.prompt_records_path,
             completions_path=config.completions_path,
@@ -304,6 +419,14 @@ def run_workflow(config: WorkflowConfig) -> None:
         upload_stage_artifacts([completions_artifact], config=config)
 
     if config.includes_stage("activations"):
+        ensure_input_artifact_available(
+            config.completions_path,
+            artifact_name="Completions",
+            save_to_gcp=config.save_to_gcp,
+            gcp_project_id=config.gcp_project_id,
+            gcs_bucket_name=config.gcs_bucket_name,
+            gcs_prefix=config.completions_gcs_prefix,
+        )
         run_activations_stage(
             completions_path=config.completions_path,
             nodes_path=config.nodes_path,
@@ -319,6 +442,7 @@ def run_workflow(config: WorkflowConfig) -> None:
             gcp_project_id=config.gcp_project_id,
             gcs_bucket_name=config.gcs_bucket_name,
             gcs_prefix=config.gcs_prefix,
+            nodes_gcs_prefix=config.nodes_gcs_prefix,
         )
 
 

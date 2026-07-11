@@ -7,6 +7,8 @@ import temporal_manifolds.workflows.activation_caching_workflow as workflow_modu
 from temporal_manifolds.workflows.activation_caching_workflow import (
     REPO_ROOT,
     WorkflowConfig,
+    ensure_input_artifact_available,
+    ensure_nodes_file_available,
     parse_args,
     run_workflow,
 )
@@ -16,8 +18,11 @@ def config_values() -> dict:
     return {
         "dataset": "conversational",
         "prompt_records_path": "data/prompts.json",
+        "dataset_gcs_prefix": "dataset-artifacts",
         "completions_path": "data/completions.jsonl",
+        "completions_gcs_prefix": "completion-artifacts",
         "nodes_path": "data/nodes.pkl",
+        "nodes_gcs_prefix": "node-artifacts",
         "output_dir": "results/activations",
         "model_name": "test/model",
         "batch_size": 4,
@@ -59,6 +64,9 @@ def test_loads_yaml_options_and_gcp_settings_from_environment(
     assert config.gcp_project_id == "test-project"
     assert config.gcs_bucket_name == "test-bucket"
     assert config.gcs_prefix == "test-prefix"
+    assert config.dataset_gcs_prefix == "dataset-artifacts"
+    assert config.completions_gcs_prefix == "completion-artifacts"
+    assert config.nodes_gcs_prefix == "node-artifacts"
     assert config.modules == ("completions", "activations")
     assert not config.includes_stage("dataset")
     assert config.includes_stage("completions")
@@ -120,9 +128,114 @@ def test_dataset_and_completion_artifacts_are_uploaded(monkeypatch: pytest.Monke
         "upload_stage_artifacts",
         lambda artifacts, **_kwargs: uploaded.extend(artifacts),
     )
+    monkeypatch.setattr(
+        workflow_module,
+        "ensure_input_artifact_available",
+        lambda *_args, **_kwargs: None,
+    )
 
     run_workflow(config)
 
     assert uploaded == [config.prompt_records_path, config.completions_path]
     assert activation_kwargs["save_to_gcp"] is True
     assert activation_kwargs["gcs_prefix"] == "test-prefix"
+    assert activation_kwargs["nodes_gcs_prefix"] == "node-artifacts"
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "prefix"),
+    [("Dataset", "dataset-artifacts"), ("Completions", "completion-artifacts")],
+)
+def test_missing_input_artifact_is_downloaded_from_its_gcs_prefix(
+    artifact_name: str,
+    prefix: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_path = tmp_path / f"{artifact_name.lower()}.jsonl"
+    requested: list[tuple[str, Path]] = []
+
+    def build_fetcher(**kwargs: object):
+        assert kwargs["prefix"] == prefix
+
+        def fetch(object_name: str, destination: Path) -> bool:
+            requested.append((object_name, destination))
+            destination.write_text("artifact", encoding="utf-8")
+            return True
+
+        return fetch
+
+    monkeypatch.setattr(
+        "temporal_manifolds.utils.gcs_upload.maybe_build_gcs_existing_object_fetcher",
+        build_fetcher,
+    )
+
+    ensure_input_artifact_available(
+        artifact_path,
+        artifact_name=artifact_name,
+        save_to_gcp=True,
+        gcp_project_id="test-project",
+        gcs_bucket_name="test-bucket",
+        gcs_prefix=prefix,
+    )
+
+    assert requested == [(artifact_path.name, artifact_path)]
+    assert artifact_path.read_text(encoding="utf-8") == "artifact"
+
+
+def test_missing_nodes_file_is_downloaded_from_gcs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nodes_path = tmp_path / "data" / "selected_nodes" / "nodes.pkl"
+    requested: list[tuple[str, Path]] = []
+
+    def build_fetcher(**kwargs: object):
+        assert kwargs == {
+            "enabled": True,
+            "project_id": "test-project",
+            "bucket_name": "test-bucket",
+            "prefix": "node-artifacts",
+        }
+
+        def fetch(object_name: str, destination: Path) -> bool:
+            requested.append((object_name, destination))
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(b"nodes")
+            return True
+
+        return fetch
+
+    monkeypatch.setattr(
+        "temporal_manifolds.utils.gcs_upload.maybe_build_gcs_existing_object_fetcher",
+        build_fetcher,
+    )
+
+    ensure_nodes_file_available(
+        nodes_path,
+        save_to_gcp=True,
+        gcp_project_id="test-project",
+        gcs_bucket_name="test-bucket",
+        nodes_gcs_prefix="node-artifacts",
+    )
+
+    assert requested == [("nodes.pkl", nodes_path)]
+    assert nodes_path.read_bytes() == b"nodes"
+
+
+def test_existing_nodes_file_does_not_check_gcs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nodes_path = tmp_path / "nodes.pkl"
+    nodes_path.write_bytes(b"nodes")
+    monkeypatch.setattr(
+        "temporal_manifolds.utils.gcs_upload.maybe_build_gcs_existing_object_fetcher",
+        lambda **_kwargs: pytest.fail("GCS should not be checked"),
+    )
+
+    ensure_nodes_file_available(
+        nodes_path,
+        save_to_gcp=True,
+        gcp_project_id="test-project",
+        gcs_bucket_name="test-bucket",
+        nodes_gcs_prefix="node-artifacts",
+    )
