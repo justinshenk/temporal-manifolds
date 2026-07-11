@@ -133,6 +133,11 @@ def test_dataset_and_completion_artifacts_are_uploaded(monkeypatch: pytest.Monke
         "ensure_input_artifact_available",
         lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(
+        workflow_module,
+        "download_cached_artifact",
+        lambda *_args, **_kwargs: False,
+    )
 
     run_workflow(config)
 
@@ -140,6 +145,50 @@ def test_dataset_and_completion_artifacts_are_uploaded(monkeypatch: pytest.Monke
     assert activation_kwargs["save_to_gcp"] is True
     assert activation_kwargs["gcs_prefix"] == "test-prefix"
     assert activation_kwargs["nodes_gcs_prefix"] == "node-artifacts"
+
+
+def test_cached_dataset_and_completions_skip_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = config_values()
+    values["modules"] = ["dataset", "completions", "activations"]
+    values["save_to_gcp"] = True
+    config = WorkflowConfig.from_mapping(values, gcs_prefix="test-prefix")
+    checked: list[tuple[Path, str | None]] = []
+
+    def download_cached(path: Path, **kwargs: object) -> bool:
+        checked.append((path, kwargs["gcs_prefix"]))
+        return True
+
+    monkeypatch.setattr(workflow_module, "download_cached_artifact", download_cached)
+    monkeypatch.setattr(
+        workflow_module,
+        "ensure_input_artifact_available",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "run_dataset_stage",
+        lambda **_kwargs: pytest.fail("dataset should not be regenerated"),
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "run_completions_stage",
+        lambda **_kwargs: pytest.fail("completions should not be regenerated"),
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "upload_stage_artifacts",
+        lambda *_args, **_kwargs: pytest.fail("cached artifacts should not be uploaded"),
+    )
+    monkeypatch.setattr(workflow_module, "run_activations_stage", lambda **_kwargs: None)
+
+    run_workflow(config)
+
+    assert checked == [
+        (config.prompt_records_path, "dataset-artifacts"),
+        (config.completions_path, "completion-artifacts"),
+    ]
 
 
 @pytest.mark.parametrize(

@@ -347,6 +347,30 @@ def ensure_input_artifact_available(
         )
     )
 
+
+def download_cached_artifact(
+    artifact_path: Path,
+    *,
+    save_to_gcp: bool,
+    gcp_project_id: str | None,
+    gcs_bucket_name: str | None,
+    gcs_prefix: str | None,
+) -> bool:
+    """Download a stage artifact from GCS, returning whether it was found."""
+    from temporal_manifolds.utils.gcs_upload import (
+        gcs_object_name_for_file,
+        maybe_build_gcs_existing_object_fetcher,
+    )
+
+    object_name = gcs_object_name_for_file(artifact_path, upload_root=REPO_ROOT)
+    fetch_from_gcs = maybe_build_gcs_existing_object_fetcher(
+        enabled=save_to_gcp,
+        project_id=gcp_project_id,
+        bucket_name=gcs_bucket_name,
+        prefix=gcs_prefix,
+    )
+    return fetch_from_gcs(object_name, artifact_path)
+
 def upload_stage_artifacts(
     artifacts: Sequence[Path],
     *,
@@ -389,11 +413,19 @@ def run_workflow(config: WorkflowConfig) -> None:
     """Execute the selected modules in the workflow's fixed order."""
 
     if config.includes_stage("dataset"):
-        dataset_artifact = run_dataset_stage(
-            dataset=config.dataset,
-            output_path=config.prompt_records_path,
+        dataset_cached = download_cached_artifact(
+            config.prompt_records_path,
+            save_to_gcp=config.save_to_gcp,
+            gcp_project_id=config.gcp_project_id,
+            gcs_bucket_name=config.gcs_bucket_name,
+            gcs_prefix=config.dataset_gcs_prefix,
         )
-        upload_stage_artifacts([dataset_artifact], config=config)
+        if not dataset_cached:
+            dataset_artifact = run_dataset_stage(
+                dataset=config.dataset,
+                output_path=config.prompt_records_path,
+            )
+            upload_stage_artifacts([dataset_artifact], config=config)
 
     if config.includes_stage("completions"):
         ensure_input_artifact_available(
@@ -404,19 +436,27 @@ def run_workflow(config: WorkflowConfig) -> None:
             gcs_bucket_name=config.gcs_bucket_name,
             gcs_prefix=config.dataset_gcs_prefix,
         )
-        completions_artifact = run_completions_stage(
-            prompt_records_path=config.prompt_records_path,
-            completions_path=config.completions_path,
-            model_name=config.model_name,
-            batch_size=config.batch_size,
-            max_new_tokens=config.max_new_tokens,
-            temperature=config.temperature,
-            top_k=config.top_k,
-            dtype=config.dtype,
-            device=config.device,
-            attn_type=config.attn_type,
+        completions_cached = download_cached_artifact(
+            config.completions_path,
+            save_to_gcp=config.save_to_gcp,
+            gcp_project_id=config.gcp_project_id,
+            gcs_bucket_name=config.gcs_bucket_name,
+            gcs_prefix=config.completions_gcs_prefix,
         )
-        upload_stage_artifacts([completions_artifact], config=config)
+        if not completions_cached:
+            completions_artifact = run_completions_stage(
+                prompt_records_path=config.prompt_records_path,
+                completions_path=config.completions_path,
+                model_name=config.model_name,
+                batch_size=config.batch_size,
+                max_new_tokens=config.max_new_tokens,
+                temperature=config.temperature,
+                top_k=config.top_k,
+                dtype=config.dtype,
+                device=config.device,
+                attn_type=config.attn_type,
+            )
+            upload_stage_artifacts([completions_artifact], config=config)
 
     if config.includes_stage("activations"):
         ensure_input_artifact_available(
