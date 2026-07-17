@@ -14,6 +14,7 @@ dist/
 # Virtualenvs / uv
 .venv/
 venv/
+.uv-cache/
 .env
 
 # Editor / OS
@@ -40,3 +41,5 @@ tensorboard/
 # Logs / temp
 *.log
 .tmp/
+
+figures/*

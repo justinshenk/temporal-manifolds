@@ -136,6 +136,11 @@ def option_strings_for_workflow(spec: WorkflowSpec) -> set[str]:
     }
 
 
+def workflow_uses_config_only(spec: WorkflowSpec) -> bool:
+    """Return whether a workflow accepts only its scenario YAML path."""
+    return bool(getattr(import_module(spec.module), "CONFIG_ONLY", False))
+
+
 def normalize_option_name(name: str) -> str:
     """Convert a YAML mapping key into a CLI option name."""
     return f"--{name.replace('_', '-')}"
@@ -195,7 +200,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
 
     spec = lookup[workflow_name]
-    workflow_args = scenario_args_to_argv(spec, scenario)
+    if workflow_uses_config_only(spec):
+        workflow_args = ["--scenario-config", str(resolve_scenario_path(args.scenario))]
+    else:
+        workflow_args = scenario_args_to_argv(spec, scenario)
+        if "--scenario-config" in option_strings_for_workflow(spec):
+            workflow_args.extend(["--scenario-config", str(resolve_scenario_path(args.scenario))])
     load_workflow_main(spec)(workflow_args)
 
 

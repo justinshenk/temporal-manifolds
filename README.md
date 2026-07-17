@@ -36,11 +36,6 @@ Pipeline:
 uv sync                                  # install deps (Python 3.12+)
 cp .env.example .env                     # fill in GCP/GCS settings, etc.
 uv run pytest -q                         # smoke tests
-
-# Generate a tiny example dataset
-uv run python -m experiments.01_parametric_dataset.run \
-    --config configs/scenarios/example.yaml \
-    --out data/example/
 ```
 
 ## Layout
@@ -48,6 +43,7 @@ uv run python -m experiments.01_parametric_dataset.run \
 ```
 configs/scenarios/        scenario YAMLs (templates, phrasing groups, splits)
 configs/prompt_datasets/  prompt-dataset JSON configs (DataManager inputs)
+configs/activation_caching/  activation-caching workflow configs
 src/common/               shared schemas, math, analysis, file/device utils
 src/inference/            model runners and backends
 src/binary_choice/        binary choice running + parsing
@@ -55,8 +51,11 @@ src/geometry/             activation extraction (config, data, utils)
 src/datasets/             DataManager + default configs, with subpackages:
                           prompt/ (incl. formatting/), preference/, other/
                           (parametric generate/phrasings/templates)
+src/temporal_manifolds/   legacy shared library from dev (activations,
+                          workflows, EAP/EAP-IG, visualization, ...)
 streams/                  research streams (stability, prediction, ...)
 utils/                    thin CLI wrappers (e.g. generate_samples_with_activation.py)
+scripts/                  gcloud/GCS scenario runners and download helpers
 notebooks/                exploratory work (clean before committing)
 tests/                    pytest
 data/, results/           gitignored; data/ is the content-addressed cache:

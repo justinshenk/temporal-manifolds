@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import random
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Literal, TypedDict
 
 try:
-    from ..utils.dataset_utils import (
+    from . import abstract as abstract_dataset
+    from . import conversational as conversational_dataset
+    from .utils import (
         NUMBER_FORMATS,
         NumberFormat,
         UnitVariant,
@@ -19,12 +21,11 @@ try:
         smaller_unit_value,
         validate_task_units,
     )
-    from . import abstract_dataset, conversational_dataset
 except ImportError:
-    import abstract_dataset  # type: ignore
-    import conversational_dataset  # type: ignore
+    import abstract as abstract_dataset  # type: ignore
+    import conversational as conversational_dataset  # type: ignore
 
-    from temporal_manifolds.utils.dataset_utils import (  # type: ignore
+    from temporal_manifolds.dataset.utils import (  # type: ignore
         NUMBER_FORMATS,
         NumberFormat,
         UnitVariant,
@@ -35,15 +36,23 @@ except ImportError:
     )
 
 
-class TemplateConfig(TypedDict):
-    id: str
-    template: str
+TemplateConfig = dict[str, object]
+
+
+TaskConfig = set[str] | dict[str, object]
+
+
+class NormalizedTaskConfig(TypedDict):
+    units: set[str]
+    metadata: dict[str, str]
 
 
 class PromptRecord(TypedDict):
     text: str
     template_id: str
+    template_metadata: dict[str, str]
     task: str
+    task_metadata: dict[str, str]
     quantity: int | None
     quantity_text: str | None
     base_value: int
@@ -73,7 +82,7 @@ def normalize_dataset_name(dataset: str) -> DatasetName:
 
 def load_dataset_config(
     dataset: str,
-) -> tuple[Iterable[TemplateConfig], dict[str, set[str]], Iterable[int], Iterable[int | None]]:
+) -> tuple[Iterable[TemplateConfig], Mapping[str, TaskConfig], Iterable[int], Iterable[int | None]]:
     """Return templates, task units, time values, and quantities for a named dataset."""
     dataset_name = normalize_dataset_name(dataset)
     dataset_module = DATASETS[dataset_name]
@@ -85,10 +94,35 @@ def load_dataset_config(
     )
 
 
+def normalize_task_configs(task_configs: Mapping[str, TaskConfig]) -> dict[str, NormalizedTaskConfig]:
+    """Return task units plus optional analysis metadata for each task."""
+    normalized: dict[str, NormalizedTaskConfig] = {}
+    units_by_task: dict[str, set[str]] = {}
+
+    for task, config in task_configs.items():
+        if isinstance(config, set):
+            units = set(config)
+            metadata: dict[str, str] = {}
+        else:
+            raw_units = config.get("units")
+            if not isinstance(raw_units, set):
+                raise ValueError(f"Task {task!r} must define units as a set of time units")
+            units = set(raw_units)
+            metadata = {key: str(value) for key, value in config.items() if key != "units"}
+
+        units_by_task[task] = units
+        normalized[task] = {"units": units, "metadata": metadata}
+
+    validate_task_units(units_by_task)
+    return normalized
+
+
 def make_prompt_record(
     template: str,
     template_id: str,
+    template_metadata: dict[str, str],
     task: str,
+    task_metadata: dict[str, str],
     quantity: int | None,
     base_value: int,
     base_unit: str,
@@ -116,7 +150,9 @@ def make_prompt_record(
             unit=rendered_unit,
         ),
         "template_id": template_id,
+        "template_metadata": template_metadata,
         "task": task,
+        "task_metadata": task_metadata,
         "quantity": quantity,
         "quantity_text": quantity_text,
         "base_value": base_value,
@@ -133,7 +169,9 @@ def append_prompt_variants(
     records: list[PromptRecord],
     template: str,
     template_id: str,
+    template_metadata: dict[str, str],
     task: str,
+    task_metadata: dict[str, str],
     quantity: int | None,
     base_value: int,
     base_unit: str,
@@ -147,7 +185,9 @@ def append_prompt_variants(
             make_prompt_record(
                 template=template,
                 template_id=template_id,
+                template_metadata=template_metadata,
                 task=task,
+                task_metadata=task_metadata,
                 quantity=quantity,
                 base_value=base_value,
                 base_unit=base_unit,
@@ -161,7 +201,7 @@ def append_prompt_variants(
 
 def generate_task_dataset(
     template_list: Iterable[TemplateConfig] | None = None,
-    task_units: dict[str, set[str]] | None = None,
+    task_units: Mapping[str, TaskConfig] | None = None,
     time_values: Iterable[int] | None = None,
     quantity_values: Iterable[int | None] | None = None,
     output_path: str | Path | None = None,
@@ -193,19 +233,30 @@ def generate_task_dataset(
         raise ValueError("template_list must contain at least one template")
     if not quantity_configs:
         raise ValueError("quantity_values must contain at least one value")
-    validate_task_units(task_units)
+    task_configs = normalize_task_configs(task_units)
 
     if randomize_template:
-        for task, units in sorted(task_units.items()):
+        for task, task_config in sorted(task_configs.items()):
+            units = task_config["units"]
+            task_metadata = task_config["metadata"]
             for quantity in quantity_configs:
                 for unit in sorted(units):
                     for value in time_values:
                         template_config = random.choice(template_configs)
+                        template_id = str(template_config["id"])
+                        template = str(template_config["template"])
+                        template_metadata = {
+                            key: str(value)
+                            for key, value in template_config.items()
+                            if key not in {"id", "template"}
+                        }
                         append_prompt_variants(
                             records=records,
-                            template=template_config["template"],
-                            template_id=template_config["id"],
+                            template=template,
+                            template_id=template_id,
+                            template_metadata=template_metadata,
                             task=task,
+                            task_metadata=task_metadata,
                             quantity=quantity,
                             base_value=value,
                             base_unit=unit,
@@ -218,11 +269,20 @@ def generate_task_dataset(
                         if smaller is not None:
                             smaller_value, smaller_unit = smaller
                             template_config = random.choice(template_configs)
+                            template_id = str(template_config["id"])
+                            template = str(template_config["template"])
+                            template_metadata = {
+                                key: str(value)
+                                for key, value in template_config.items()
+                                if key not in {"id", "template"}
+                            }
                             append_prompt_variants(
                                 records=records,
-                                template=template_config["template"],
-                                template_id=template_config["id"],
+                                template=template,
+                                template_id=template_id,
+                                template_metadata=template_metadata,
                                 task=task,
+                                task_metadata=task_metadata,
                                 quantity=quantity,
                                 base_value=value,
                                 base_unit=unit,
@@ -232,9 +292,16 @@ def generate_task_dataset(
                             )
     else:
         for template_config in template_configs:
-            template_id = template_config["id"]
-            template = template_config["template"]
-            for task, units in sorted(task_units.items()):
+            template_id = str(template_config["id"])
+            template = str(template_config["template"])
+            template_metadata = {
+                key: str(value)
+                for key, value in template_config.items()
+                if key not in {"id", "template"}
+            }
+            for task, task_config in sorted(task_configs.items()):
+                units = task_config["units"]
+                task_metadata = task_config["metadata"]
                 for quantity in quantity_configs:
                     for unit in sorted(units):
                         for value in time_values:
@@ -242,7 +309,9 @@ def generate_task_dataset(
                                 records=records,
                                 template=template,
                                 template_id=template_id,
+                                template_metadata=template_metadata,
                                 task=task,
+                                task_metadata=task_metadata,
                                 quantity=quantity,
                                 base_value=value,
                                 base_unit=unit,
@@ -258,7 +327,9 @@ def generate_task_dataset(
                                     records=records,
                                     template=template,
                                     template_id=template_id,
+                                    template_metadata=template_metadata,
                                     task=task,
+                                    task_metadata=task_metadata,
                                     quantity=quantity,
                                     base_value=value,
                                     base_unit=unit,

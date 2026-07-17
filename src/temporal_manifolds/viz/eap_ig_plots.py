@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
+
+if os.environ.get("MPLBACKEND") in {None, "module://matplotlib_inline.backend_inline"}:
+    os.environ["MPLBACKEND"] = "Agg"
 
 import matplotlib.pyplot as plt
 import numpy as np

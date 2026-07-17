@@ -4,18 +4,20 @@ The input is a JSONL file produced by ``generate_completions.py``. Each record i
 expected to contain ``full_text`` plus prompt metadata. Position-wise activations
 are cached from the generated ``assistant`` marker through the generated planning
 header, stopping before the detailed plan body marker. Conversational completions
-use ``Strategy:`` / ``Steps:``; abstract distribution completions use
+may use ``Strategy:`` / ``Steps:``, ``Summary:`` / ``Checklist:``, or
+``Approach:`` / ``Actions:``; abstract distribution completions use
 ``Allocation rule:`` / ``Schedule:``.
 """
 
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import pickle
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from tqdm import tqdm
 
@@ -40,9 +42,13 @@ DEFAULT_MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 SelectedNode = tuple[tuple[int, str], int]
 SelectedNodeGroups = dict[str, list[SelectedNode]]
 ActivationSpan = tuple[int, int, str, str]
+PositionSelectionPolicy = Literal["default", "all"]
+POSITION_SELECTION_POLICIES: tuple[PositionSelectionPolicy, ...] = ("default", "all")
 
 PLAN_MARKER_PAIRS = (
     ("Strategy:", "Steps:", "assistant_to_strategy_generation"),
+    ("Summary:", "Checklist:", "assistant_to_summary_generation"),
+    ("Approach:", "Actions:", "assistant_to_approach_generation"),
     ("Allocation rule:", "Schedule:", "assistant_to_allocation_rule_generation"),
 )
 
@@ -190,6 +196,24 @@ def get_underlying_tokenizer(tokenizer: Any) -> Any:
     return getattr(tokenizer, "tokenizer", tokenizer)
 
 
+def set_pad_token_if_missing(tokenizer: Any) -> None:
+    """Set a pad token on wrapped or raw tokenizers when one is missing."""
+    hf_tokenizer = get_underlying_tokenizer(tokenizer)
+    if getattr(hf_tokenizer, "pad_token_id", None) is None:
+        hf_tokenizer.pad_token = hf_tokenizer.eos_token
+
+
+def tokenize_raw_texts(tokenizer: Any, texts: list[str]) -> dict[str, Any]:
+    """Tokenize decoded full-text completions without reapplying a chat template."""
+    hf_tokenizer = get_underlying_tokenizer(tokenizer)
+    return hf_tokenizer(
+        texts,
+        add_special_tokens=True,
+        return_tensors="pt",
+        padding=True,
+    )
+
+
 def find_assistant_plan_span(full_text: str) -> ActivationSpan | None:
     """Return the char span from assistant marker through the generated plan header."""
     assistant_marker = "assistant\n"
@@ -227,6 +251,20 @@ def find_assistant_plan_span(full_text: str) -> ActivationSpan | None:
     return matched_span
 
 
+def find_activation_span(
+    full_text: str,
+    *,
+    position_selection_policy: PositionSelectionPolicy,
+) -> ActivationSpan | None:
+    """Return the activation char span selected by the requested policy."""
+    if position_selection_policy == "default":
+        return find_assistant_plan_span(full_text)
+    if position_selection_policy == "all":
+        return (0, len(full_text), full_text, "all_positions")
+
+    raise ValueError(f"Unsupported position selection policy: {position_selection_policy!r}")
+
+
 def token_positions_for_char_span(
     tokenizer: Any,
     text: str,
@@ -254,6 +292,34 @@ def token_positions_for_char_span(
     return positions
 
 
+def all_token_positions(tokenizer: Any, text: str) -> list[int]:
+    """Return every non-padding token position for ``text``."""
+    tokenized = tokenize_raw_texts(tokenizer, [text])
+    input_ids = tokenized["input_ids"]
+    sequence_length = input_ids.shape[-1] if hasattr(input_ids, "shape") else len(input_ids[0])
+    return list(range(sequence_length))
+
+
+def token_positions_for_policy(
+    tokenizer: Any,
+    text: str,
+    span: ActivationSpan,
+    *,
+    position_selection_policy: PositionSelectionPolicy,
+) -> list[int]:
+    """Return token positions selected by the requested policy."""
+    if position_selection_policy == "all":
+        return all_token_positions(tokenizer, text)
+
+    start_char, end_char, _, _ = span
+    return token_positions_for_char_span(
+        tokenizer,
+        text,
+        start_char,
+        end_char,
+    )
+
+
 def build_activation_metadata(
     record: dict[str, Any],
     sample_index: int,
@@ -261,6 +327,7 @@ def build_activation_metadata(
     token_positions: list[int],
     activation_text: str,
     activation_section: str,
+    position_selection_policy: PositionSelectionPolicy,
 ) -> list[dict[str, Any]]:
     """Build metadata for one assistant-to-plan-header activation sample."""
     return [
@@ -273,6 +340,7 @@ def build_activation_metadata(
             "activation_char_span": list(char_span),
             "activation_token_positions": token_positions,
             "activation_text": activation_text,
+            "position_selection_policy": position_selection_policy,
         }
     ]
 
@@ -292,13 +360,16 @@ def cache_completion_activations(
     gcp_project_id: str | None,
     gcs_bucket_name: str | None,
     gcs_prefix: str | None,
+    upload_worker_count: int = 4,
+    upload_queue_capacity: int = 8,
+    position_selection_policy: PositionSelectionPolicy = "default",
 ) -> None:
     """Load completions, cache assistant-to-strategy activations, and save caches."""
     import torch
 
-    from ..utils.activation_utils import get_activations
-    from ..utils.gcs_upload import maybe_start_gcs_upload_worker
-    from ..utils.utils import load_model_tokenizer_config
+    from ..utils.gcs_upload import maybe_start_memory_gcs_upload_workers
+    from ..utils.mech_interp_toolkit.activation_utils import get_activations
+    from ..utils.mech_interp_toolkit.utils import load_model_tokenizer_config
 
     selected_node_groups = load_selected_node_groups(nodes_path)
     layer_components = get_unique_layer_components(selected_node_groups)
@@ -310,16 +381,18 @@ def cache_completion_activations(
         dtype=dtype,
         attn_type=attn_type,
     )
-    if getattr(tokenizer, "pad_token_id", None) is None:
-        tokenizer.pad_token = tokenizer.eos_token  # type: ignore
+    set_pad_token_if_missing(tokenizer)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if not save_to_gcp:
+        output_dir.mkdir(parents=True, exist_ok=True)
     skipped_spans: list[dict[str, Any]] = []
-    upload_queue, upload_thread, enqueue_upload = maybe_start_gcs_upload_worker(
+    upload_queue, upload_threads, enqueue_upload = maybe_start_memory_gcs_upload_workers(
         enabled=save_to_gcp,
         project_id=gcp_project_id,
         bucket_name=gcs_bucket_name,
         prefix=gcs_prefix,
+        worker_count=upload_worker_count,
+        queue_capacity=upload_queue_capacity,
     )
 
     try:
@@ -331,11 +404,14 @@ def cache_completion_activations(
             )
         ):
             output_file = output_dir / f"activations_sample_{sample_index:05d}.pt"
-            if output_file.exists() and not overwrite:
+            if not save_to_gcp and output_file.exists() and not overwrite:
                 continue
 
             text = record["full_text"]
-            span = find_assistant_plan_span(text)
+            span = find_activation_span(
+                text,
+                position_selection_policy=position_selection_policy,
+            )
             if span is None:
                 skipped_spans.append(
                     {
@@ -348,15 +424,15 @@ def cache_completion_activations(
                 continue
 
             start_char, end_char, activation_text, activation_section = span
-            token_positions = token_positions_for_char_span(
+            token_positions = token_positions_for_policy(
                 tokenizer,
                 text,
-                start_char,
-                end_char,
+                span,
+                position_selection_policy=position_selection_policy,
             )
 
             texts = [text]
-            tokenized_batch = tokenizer(texts)
+            tokenized_batch = tokenize_raw_texts(tokenizer, texts)
             activations, logits = get_activations(
                 model,
                 tokenized_batch,
@@ -380,10 +456,12 @@ def cache_completion_activations(
                     token_positions=token_positions,
                     activation_text=activation_text,
                     activation_section=activation_section,
+                    position_selection_policy=position_selection_policy,
                 ),
                 "positions": token_positions,
                 "average_positions": False,
                 "activation_section": activation_section,
+                "position_selection_policy": position_selection_policy,
                 "activations": extract_selected_activations(
                     activations,
                     selected_node_groups,
@@ -392,24 +470,37 @@ def cache_completion_activations(
             if logits is not None:
                 cache_payload["logits"] = logits.detach().cpu()
 
-            torch.save(cache_payload, output_file)
+            if save_to_gcp:
+                cache_buffer = io.BytesIO()
+                torch.save(cache_payload, cache_buffer)
+                enqueue_upload(
+                    cache_buffer,
+                    gcs_object_name_for_file(output_file, upload_root=output_dir),
+                    output_file.name,
+                )
+            else:
+                torch.save(cache_payload, output_file)
 
         if skipped_spans:
             skipped_path = output_dir / "skipped_assistant_plan_header_spans.jsonl"
-            with skipped_path.open("w", encoding="utf-8") as f:
-                for skipped in skipped_spans:
-                    f.write(json.dumps(skipped, ensure_ascii=False) + "\n")
-
-        if save_to_gcp:
-            for local_file in sorted(path for path in output_dir.rglob("*") if path.is_file()):
+            skipped_contents = "".join(
+                json.dumps(skipped, ensure_ascii=False) + "\n" for skipped in skipped_spans
+            )
+            if save_to_gcp:
+                skipped_buffer = io.BytesIO(skipped_contents.encode("utf-8"))
                 enqueue_upload(
-                    local_file.resolve(),
-                    gcs_object_name_for_file(local_file, upload_root=output_dir),
+                    skipped_buffer,
+                    gcs_object_name_for_file(skipped_path, upload_root=output_dir),
+                    skipped_path.name,
                 )
+            else:
+                skipped_path.write_text(skipped_contents, encoding="utf-8")
     finally:
-        if upload_queue is not None and upload_thread is not None:
-            upload_queue.put(None)
-            upload_thread.join()
+        if upload_queue is not None:
+            for _ in upload_threads:
+                upload_queue.put(None)
+            for upload_thread in upload_threads:
+                upload_thread.join()
 
 
 def parse_args() -> argparse.Namespace:
@@ -442,6 +533,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--attn-type", default="sdpa")
+    parser.add_argument(
+        "--position-selection-policy",
+        choices=POSITION_SELECTION_POLICIES,
+        default="default",
+        help="Policy used to select completion token positions for activation caching.",
+    )
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument(
         "--overwrite",
@@ -457,6 +554,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gcp-project-id", default=None)
     parser.add_argument("--gcs-bucket-name", default=None)
     parser.add_argument("--gcs-prefix", default=None)
+    parser.add_argument("--upload-worker-count", type=int, default=4)
+    parser.add_argument("--upload-queue-capacity", type=int, default=8)
     return parser.parse_args()
 
 
@@ -476,6 +575,9 @@ def main() -> None:
         gcp_project_id=args.gcp_project_id,
         gcs_bucket_name=args.gcs_bucket_name,
         gcs_prefix=args.gcs_prefix,
+        upload_worker_count=args.upload_worker_count,
+        upload_queue_capacity=args.upload_queue_capacity,
+        position_selection_policy=args.position_selection_policy,
     )
 
 

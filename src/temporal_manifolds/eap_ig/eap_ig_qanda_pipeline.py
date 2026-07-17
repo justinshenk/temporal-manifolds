@@ -12,7 +12,11 @@ import torch
 from tqdm import tqdm
 
 try:
-    from ..utils.gcs_upload import maybe_start_gcs_upload_worker
+    from ..utils.gcs_upload import (
+        gcs_object_name_for_file,
+        maybe_build_gcs_existing_object_fetcher,
+        maybe_start_gcs_upload_worker,
+    )
     from .eap_ig_qanda_common import (
         GCP_PROJECT_ID,
         GCS_BUCKET_NAME,
@@ -26,7 +30,7 @@ try:
         tensor_to_numpy,
     )
 except ImportError:
-    from eap_ig_qanda_common import (
+    from temporal_manifolds.eap_ig.eap_ig_qanda_common import (
         GCP_PROJECT_ID,
         GCS_BUCKET_NAME,
         build_layer_components,
@@ -38,8 +42,11 @@ except ImportError:
         resolve_quadrature,
         tensor_to_numpy,
     )
-
-    from ..utils.gcs_upload import maybe_start_gcs_upload_worker
+    from temporal_manifolds.utils.gcs_upload import (
+        gcs_object_name_for_file,
+        maybe_build_gcs_existing_object_fetcher,
+        maybe_start_gcs_upload_worker,
+    )
 
 
 def build_metrics(token_a: int, token_b: int) -> dict[str, Any]:
@@ -101,6 +108,47 @@ def build_option_orders(
     ]
 
 
+def expected_output_files(
+    save_loc: Path,
+    filename: str,
+    option_orders: list[tuple[str, list[list[str]], list[list[str]]]],
+) -> list[Path]:
+    """Return the output files produced by a Q&A attribution run."""
+    output_files = []
+    for order_label, chunked_clean_prompts, _chunked_corrupted_prompts in option_orders:
+        for metric_label in ("logit_A", "logit_B"):
+            for i in range(len(chunked_clean_prompts)):
+                output_files.append(
+                    save_loc / f"{filename}_{order_label}_{metric_label}_batch_{i:05d}.npz"
+                )
+    return output_files
+
+
+def existing_output_matches_run(
+    output_file: Path,
+    *,
+    attribution_method: Literal["eap_ig", "eap"],
+    compute_gradient_at: Literal["clean", "corrupted"],
+) -> bool:
+    """Return whether an existing output can be reused for this run."""
+    if not output_file.exists():
+        return False
+    if attribution_method != "eap":
+        return True
+
+    try:
+        with np.load(output_file, allow_pickle=False) as data:
+            saved_method = str(data["metadata__attribution_method"].item())
+            saved_gradient_side = str(data["metadata__compute_gradient_at"].item())
+    except (KeyError, OSError, ValueError):
+        # Older vanilla-EAP artifacts did not record the gradient side. They
+        # were produced with the historical default, so only clean runs may
+        # safely resume from them.
+        return compute_gradient_at == "clean"
+
+    return saved_method == attribution_method and saved_gradient_side == compute_gradient_at
+
+
 def process_batch(
     *,
     model: Any,
@@ -127,6 +175,7 @@ def process_batch(
     batch_output["metadata__option_order"] = np.array(order_label, dtype=np.str_)
     batch_output["metadata__metric_type"] = np.array(metric_type, dtype=np.str_)
     batch_output["metadata__attribution_method"] = np.array(attribution_method, dtype=np.str_)
+    batch_output["metadata__compute_gradient_at"] = np.array(compute_gradient_at, dtype=np.str_)
 
     step_labels = steps if attribution_method == "eap_ig" else steps[:1]
 
@@ -218,6 +267,9 @@ def run_qanda_attribution(
     results_root: Path | None = None,
     attribution_method: Literal["eap_ig", "eap"] = "eap_ig",
     compute_gradient_at: Literal["clean", "corrupted"] = "clean",
+    gcs_prefix: str = "",
+    delete_local_after_gcs_upload: bool = False,
+    download_existing_gcs_outputs: bool = True,
 ) -> tuple[Any, Any]:
     """Run Q&A EAP-style attribution from Python or notebooks."""
     config = load_config(resolve_config_path(config_path))
@@ -242,7 +294,6 @@ def run_qanda_attribution(
     filename: str = config["output"]["filename"]
     gcp_project_id: str | None = config["output"].get("gcp_project_id", GCP_PROJECT_ID)
     gcs_bucket_name: str | None = config["output"].get("gcs_bucket_name", GCS_BUCKET_NAME)
-    gcs_prefix: str | None = config["output"].get("gcs_prefix", "")
 
     system_prompt: str = config["parameters"]["system_prompt"]
     metric_type: str = config["parameters"]["metric_type"]
@@ -250,11 +301,45 @@ def run_qanda_attribution(
 
     input_file_path = data_loc / data_file
     save_loc.mkdir(parents=True, exist_ok=True)
+    option_orders = build_option_orders(
+        input_file_path=input_file_path,
+        template=template,
+        option_keys=option_keys,
+        batch_size=batch_size,
+    )
+    output_files = expected_output_files(
+        save_loc=save_loc,
+        filename=filename,
+        option_orders=option_orders,
+    )
+    if output_files and all(
+        existing_output_matches_run(
+            output_file,
+            attribution_method=attribution_method,
+            compute_gradient_at=compute_gradient_at,
+        )
+        for output_file in output_files
+    ):
+        print(
+            "[resume] All attribution outputs already exist locally; "
+            f"skipping config={config_path}",
+            flush=True,
+        )
+        return model, tokenizer
+
+    fetch_existing_gcs_object = maybe_build_gcs_existing_object_fetcher(
+        enabled=save_to_gcp,
+        project_id=gcp_project_id,
+        bucket_name=gcs_bucket_name,
+        prefix=gcs_prefix,
+        download_existing=download_existing_gcs_outputs,
+    )
     upload_queue, upload_thread, enqueue_upload = maybe_start_gcs_upload_worker(
         enabled=save_to_gcp,
         project_id=gcp_project_id,
         bucket_name=gcs_bucket_name,
         prefix=gcs_prefix,
+        delete_local_after_upload=delete_local_after_gcs_upload,
     )
 
     from ..utils.mech_interp_toolkit.activation_dict import expand_mask
@@ -290,12 +375,6 @@ def run_qanda_attribution(
     )
     token_a, token_b = resolve_option_tokens(tokenizer, option_keys)
     metrics = build_metrics(token_a, token_b)
-    option_orders = build_option_orders(
-        input_file_path=input_file_path,
-        template=template,
-        option_keys=option_keys,
-        batch_size=batch_size,
-    )
 
     for order_label, chunked_clean_prompts, chunked_corrupted_prompts in option_orders:
         tokenized_clean = [tokenizer(batch) for batch in chunked_clean_prompts]
@@ -306,6 +385,56 @@ def run_qanda_attribution(
                 range(len(tokenized_clean)),
                 desc=f"[{order_label}/{metric_label}] Batches",
             ):
+                output_file = save_loc / (
+                    f"{filename}_{order_label}_{metric_label}_batch_{i:05d}.npz"
+                )
+                output_file_abs = output_file.resolve()
+                object_name = gcs_object_name_for_file(output_file_abs)
+                if existing_output_matches_run(
+                    output_file_abs,
+                    attribution_method=attribution_method,
+                    compute_gradient_at=compute_gradient_at,
+                ):
+                    print(
+                        "[resume] Skipping existing local output "
+                        f"local_path={output_file_abs}",
+                        flush=True,
+                    )
+                    continue
+                if output_file_abs.exists():
+                    print(
+                        "[resume] Recomputing output with mismatched EAP metadata "
+                        f"local_path={output_file_abs}",
+                        flush=True,
+                    )
+                    output_file_abs.unlink()
+                if fetch_existing_gcs_object(object_name, output_file_abs):
+                    if not existing_output_matches_run(
+                        output_file_abs,
+                        attribution_method=attribution_method,
+                        compute_gradient_at=compute_gradient_at,
+                    ):
+                        print(
+                            "[GCS resume] Recomputing output with mismatched EAP metadata "
+                            f"object={object_name} local_path={output_file_abs}",
+                            flush=True,
+                        )
+                        output_file_abs.unlink(missing_ok=True)
+                    else:
+                        print(
+                            "[GCS resume] Skipping existing "
+                            f"object={object_name} local_path={output_file_abs}",
+                            flush=True,
+                        )
+                        continue
+                if output_file_abs.exists():
+                    print(
+                        "[resume] Skipping existing local output "
+                        f"local_path={output_file_abs}",
+                        flush=True,
+                    )
+                    continue
+
                 batch_output = process_batch(
                     model=model,
                     expand_mask=expand_mask,
@@ -329,17 +458,13 @@ def run_qanda_attribution(
                     metric_type=metric_type,
                     compute_gradient_at=compute_gradient_at,
                 )
-                output_file = save_loc / (
-                    f"{filename}_{order_label}_{metric_label}_batch_{i:05d}.npz"
-                )
                 output_file.parent.mkdir(parents=True, exist_ok=True)
-                np.savez_compressed(output_file, **batch_output)
-                output_file_abs = output_file.resolve()
                 try:
-                    path_in_repo = output_file_abs.relative_to(Path.cwd().resolve()).as_posix()
-                except ValueError:
-                    path_in_repo = output_file.name
-                enqueue_upload(output_file_abs, path_in_repo)
+                    np.savez_compressed(output_file, **batch_output)
+                except OSError:
+                    output_file.unlink(missing_ok=True)
+                    raise
+                enqueue_upload(output_file_abs, object_name)
 
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -359,6 +484,9 @@ def run_eap_ig(
     *,
     save_to_gcp: bool = True,
     results_root: Path | None = None,
+    gcs_prefix: str = "",
+    delete_local_after_gcs_upload: bool = False,
+    download_existing_gcs_outputs: bool = True,
 ) -> tuple[Any, Any]:
     """Run Q&A EAP-IG from Python or notebooks."""
     return run_qanda_attribution(
@@ -368,6 +496,9 @@ def run_eap_ig(
         save_to_gcp=save_to_gcp,
         results_root=results_root,
         attribution_method="eap_ig",
+        gcs_prefix=gcs_prefix,
+        delete_local_after_gcs_upload=delete_local_after_gcs_upload,
+        download_existing_gcs_outputs=download_existing_gcs_outputs,
     )
 
 
@@ -379,6 +510,9 @@ def run_eap(
     save_to_gcp: bool = True,
     results_root: Path | None = None,
     compute_gradient_at: Literal["clean", "corrupted"] = "clean",
+    gcs_prefix: str = "",
+    delete_local_after_gcs_upload: bool = False,
+    download_existing_gcs_outputs: bool = True,
 ) -> tuple[Any, Any]:
     """Run Q&A vanilla EAP from Python or notebooks."""
     return run_qanda_attribution(
@@ -389,4 +523,7 @@ def run_eap(
         results_root=results_root,
         attribution_method="eap",
         compute_gradient_at=compute_gradient_at,
+        gcs_prefix=gcs_prefix,
+        delete_local_after_gcs_upload=delete_local_after_gcs_upload,
+        download_existing_gcs_outputs=download_existing_gcs_outputs,
     )
