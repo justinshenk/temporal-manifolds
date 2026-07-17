@@ -1,3 +1,6 @@
+# Copied from the mech-interp-toolkit project.
+# Source: https://github.com/SD-interp/mech-interp-toolkit
+
 import gc
 from collections.abc import Callable
 from typing import Literal, cast
