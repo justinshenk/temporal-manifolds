@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEFAULT_SCENARIO_PATH="${REPO_ROOT}/configs/activation_caching/conversational_default.yaml"
+DEFAULT_SCENARIO_PATH="${REPO_ROOT}/configs/activation_caching/conversational_all.yaml"
 SCENARIO_PATH="${SCENARIO_PATH:-${DEFAULT_SCENARIO_PATH}}"
 GCLOUD_INSTALL_DIR="${GCLOUD_INSTALL_DIR:-${HOME}/google-cloud-sdk}"
 GCLOUD_INSTALL_TMPDIR=""
