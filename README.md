@@ -47,12 +47,20 @@ uv run python -m experiments.01_parametric_dataset.run \
 
 ```
 configs/scenarios/        scenario YAMLs (templates, phrasing groups, splits)
-src/temporal_manifolds/   shared library (dataset, activations, geometry, ...)
-experiments/NN_<name>/    one folder per ledger row; entry point + README
+configs/prompt_datasets/  prompt-dataset JSON configs (DataManager inputs)
+src/common/               shared schemas, math, analysis, file/device utils
+src/inference/            model runners and backends
+src/binary_choice/        binary choice running + parsing
+src/geometry/             activation extraction (config, data, utils)
+src/datasets/             DataManager + default configs, with subpackages:
+                          prompt/ (incl. formatting/), preference/, other/
+                          (parametric generate/phrasings/templates)
+streams/                  research streams (stability, prediction, ...)
+utils/                    thin CLI wrappers (e.g. generate_samples_with_activation.py)
 notebooks/                exploratory work (clean before committing)
-scripts/                  thin CLI wrappers for batch / cluster runs
 tests/                    pytest
-data/, results/           gitignored
+data/, results/           gitignored; data/ is the content-addressed cache:
+                          data/<prompt_hash>/<model_name>/ (see src/datasets/data_manager.py)
 ```
 
 ## Related prior work in this org

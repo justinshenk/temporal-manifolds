@@ -8,13 +8,14 @@ import yaml
 
 
 def test_package_imports() -> None:
-    import temporal_manifolds  # noqa: F401
-    from temporal_manifolds import dataset, activations, geometry, models, evaluation, viz  # noqa: F401
+    import src  # noqa: F401
+    from src import binary_choice, common, datasets, geometry, inference  # noqa: F401
+    from src.datasets import other, preference, prompt  # noqa: F401
 
 
 def test_generate_example_dataset(tmp_path: Path) -> None:
-    from temporal_manifolds.dataset import generate_dataset
-    from temporal_manifolds.dataset.generate import DatasetConfig
+    from src.datasets import generate_dataset
+    from src.datasets.other.generate import DatasetConfig
 
     config_path = Path(__file__).parent.parent / "configs" / "scenarios" / "example.yaml"
     config = DatasetConfig.from_yaml(config_path)
