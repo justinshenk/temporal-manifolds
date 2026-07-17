@@ -16,7 +16,12 @@ if [[ -z "${REMOTE_PATH}" ]]; then
   exit 1
 fi
 
-gcloud auth login --no-launch-browser
+if gcloud auth print-access-token >/dev/null 2>&1; then
+  printf 'Existing gcloud authentication found; skipping login.\n'
+else
+  gcloud auth login --no-launch-browser
+fi
+
 gcloud config set project "${PROJECT_ID}"
 gcloud storage cp --recursive \
   "gs://${BUCKET_NAME}/${REMOTE_PATH#/}" \
