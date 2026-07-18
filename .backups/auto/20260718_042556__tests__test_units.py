@@ -85,12 +85,3 @@ def test_pca_shapes_and_variance():
     assert res.components.shape == (3, 16)
     assert res.explained_variance_ratio[0] > 0.5
     assert abs(res.components[0, 0]) > 0.9
-
-
-def test_parse_schedule_window_horizons():
-    assert abs(parsing._parse_duration_years("Months 1–2") - 2 / 12) < 1e-9
-    assert abs(parsing._parse_duration_years("Years 3-5") - 3.0) < 1e-9
-    assert abs(parsing._parse_duration_years("Month 3") - 1 / 12) < 1e-9
-    assert abs(parsing._parse_duration_years("Week 2") - 7 / 365.25) < 1e-9
-    # plain durations still work
-    assert abs(parsing._parse_duration_years("2 months") - 2 / 12) < 1e-9

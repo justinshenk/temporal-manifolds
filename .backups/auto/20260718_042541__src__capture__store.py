@@ -232,15 +232,7 @@ class ResponseStore:
                         continue
                     step_horizon = None
                     if 0 <= b.turn_index < len(record.turns):
-                        turn = record.turns[b.turn_index]
-                        step_horizon = turn.step_horizon_years
-                        if step_horizon is None and turn.step_horizon_text:
-                            # stored raw text; parser may have improved since
-                            from ..conversation.parsing import _parse_duration_years
-
-                            step_horizon = _parse_duration_years(
-                                turn.step_horizon_text
-                            )
+                        step_horizon = record.turns[b.turn_index].step_horizon_years
                     for lay in wanted_layers:
                         key = f"L{lay}_p{b.abs_pos}"
                         if key not in npz:

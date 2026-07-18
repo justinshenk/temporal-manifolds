@@ -50,26 +50,9 @@ def parse_step_horizon(text: str) -> tuple[str | None, float | None]:
 
 
 def _parse_duration_years(raw: str) -> float | None:
-    """Parse free-ish durations: '2 months', '~3 weeks', '1-2 years', '6 mo',
-    and schedule-window styles: 'Months 1–2' (=2 months), 'Year 3' (=1 year)."""
+    """Parse free-ish durations: '2 months', '~3 weeks', '1-2 years', '6 mo'."""
     text = raw.lower().strip().rstrip(".")
     text = text.replace("approximately", "").replace("about", "").replace("~", "")
-    text = text.replace("–", "-").replace("—", "-")
-    # unit-first schedule window: "months 1-2" -> window length 2 months
-    win = re.match(r"^([a-z]+)\s+(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)$", text)
-    if win:
-        unit, lo, hi = win.group(1), float(win.group(2)), float(win.group(3))
-        try:
-            return TimeValue(max(hi - lo + 1, 1.0), unit).to_years()
-        except ValueError:
-            pass
-    # unit-first single slot: "month 3" -> 1 month
-    slot = re.match(r"^([a-z]+)\s+(\d+(?:\.\d+)?)$", text)
-    if slot:
-        try:
-            return TimeValue(1.0, slot.group(1)).to_years()
-        except ValueError:
-            pass
     # ranges: take the midpoint
     range_m = re.search(
         r"(\d+(?:\.\d+)?)\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)\s*([a-z]+)", text
