@@ -1,80 +1,71 @@
 # temporal-manifolds
 
-Experiments on the geometric structure of LLM residual-stream activations under
-temporal / planning-horizon phrasings. Targeting a **BlackboxNLP 2026** workshop
-submission (deadline **2026-07-17**).
+Experiments on the geometric structure of LLM residual-stream activations
+under temporal / planning-horizon framings.
 
-Project ledger: [Temporal Manifolds (Google Sheet)](https://docs.google.com/spreadsheets/d/1hyTdfxwrIedeaYX2Ri5xhSj5VCqW0T4EW90J2H6s6p0/edit?gid=0#gid=0).
-The same ledger is mirrored in [`ROADMAP.md`](ROADMAP.md) and used to organize
-the `experiments/` directory.
+**Current project: temporal manifolds in multi-stage conversations.** Building
+on [arXiv:2606.05194](https://arxiv.org/pdf/2606.05194) (temporal preference is
+localizable; the change-of-turn token sequence is where the horizon manifold
+collapses into committed preference), we track how time-horizon geometry
+**evolves across the turns of a planning conversation**: the model plans a task
+under a target horizon, is stepped through the plan with "Continue.", and we
+capture residual-stream activations at 40/60/80% layer depth at change-of-turn
+tokens and thinking delimiters (never inside chain-of-thought).
 
-## What we're studying
-
-Given prompts that differ only in how a planning horizon is expressed
-("4 weeks" vs. "1 month" vs. "28 days"), do the residual-stream activations
-collapse onto a low-dimensional **temporal manifold**? And how does that
-manifold vary by scenario?
-
-Pipeline:
-
-1. **Parametric dataset** — generate prompts across multiple scenarios, each
-   with a set of equivalent phrasings for the same time horizon.
-2. **Activation caching** — cache residuals at 5 key token positions
-   (identified in prior work) and publish the tensors to Google Cloud Storage.
-3. **Geometric modeling** — PCA per scenario, manifold alignment across
-   scenarios, replication of plots from `arxiv:2605.05115`.
-4. **Constraint phrasing** — a metric for whether equivalent phrasings map to
-   the same point.
-5. **Linear baseline** — residual → planning-horizon regression as a baseline.
-6. **Predictive model** — a learned head over concatenated activations.
-7. **Evaluation** — held-out accuracy + comparisons to existing evals.
-8. **Cross-model generalization** — repeat on other models.
+See [`DESIGN.md`](DESIGN.md) for the architecture and
+[`experiments/README.md`](experiments/README.md) for how to run.
 
 ## Quickstart
 
 ```bash
 uv sync                                  # install deps (Python 3.12+)
-cp .env.example .env                     # fill in GCP/GCS settings, etc.
-uv run pytest -q                         # smoke tests
+uv run pytest -q                         # tests (incl. live tokenizer checks)
+
+# end-to-end smoke on a tiny model
+uv run python experiments/run_experiment.py --config experiments/configs/smoke_small.json
+
+# main run (Qwen3-14B, no-thinking) + analysis
+uv run python experiments/run_experiment.py --config experiments/configs/main_qwen14b_nothink.json
+uv run python experiments/analyze_geometry.py --run <run_id> --model Qwen/Qwen3-14B
 ```
 
 ## Layout
 
 ```
-configs/scenarios/        scenario YAMLs (templates, phrasing groups, splits)
-configs/prompt_datasets/  prompt-dataset JSON configs (DataManager inputs)
-configs/activation_caching/  activation-caching workflow configs
-src/common/               shared schemas, math, analysis, file/device utils
-src/inference/            model runners and backends
-src/binary_choice/        binary choice running + parsing
-src/geometry/             activation extraction (config, data, utils)
-src/datasets/             DataManager + default configs, with subpackages:
-                          prompt/ (incl. formatting/), preference/, other/
-                          (parametric generate/phrasings/templates)
-src/temporal_manifolds/   legacy shared library from dev (activations,
-                          workflows, EAP/EAP-IG, visualization, ...)
-streams/                  research streams (stability, prediction, ...)
-utils/                    thin CLI wrappers (e.g. generate_samples_with_activation.py)
-scripts/                  gcloud/GCS scenario runners and download helpers
-notebooks/                exploratory work (clean before committing)
-tests/                    pytest
-data/, results/           gitignored; data/ is the content-addressed cache:
-                          data/<prompt_hash>/<model_name>/ (see src/datasets/data_manager.py)
+src/core/           schemas + deterministic ids, TimeValue, file/device/path utils
+src/chat_markup/    per-family × per-generation chat token anatomy
+                    (turn tokens, think delimiters), VERIFIED against real
+                    tokenizers at engine init and in tests
+src/datasets/       planning prompt datasets: tasks (crossed families ×
+                    natural time scales) × target horizons × ecologically
+                    valid horizon phrasings
+src/engine/         model engines: HF transformers (MPS/CUDA/CPU) and MLX
+                    (Apple Silicon, big quantized models); targeted
+                    resid_post capture; depth→layer convention
+src/conversation/   plan-then-Continue protocol driver, thinking policies
+                    (disabled / capped / natural), response parsing, records
+src/capture/        boundary-token location (decode-checked), activation
+                    extraction, content-addressed ResponseStore + query API
+src/analysis/       numpy PCA + 2D/3D scatter figures
+src/temporal_manifolds/   legacy shared library (untouched; previous project)
+experiments/        run_experiment.py (generate_llm_responses),
+                    analyze_geometry.py, configs/
+streams/            research stream notes
+tests/              pytest (49 tests incl. live-tokenizer markup verification)
+output/             gitignored; content-addressed runs:
+                    output/runs/<run_id>/<model>/samples/<sample_uid>/
 ```
+
+The pre-refactor prototype (binary-choice/intertemporal pipeline: inference
+backends, interventions, token trees, preference datasets, entropy/diversity
+math) is preserved in git history at commit `43b9cc9`.
 
 ## Related prior work in this org
 
-- [`temporal-awareness`](../temporal-awareness/) — closest predecessor; we
-  reuse its prompt-pair patterns and activation-extraction style.
-- [`temporal/latents`](../temporal/latents/) — CAA framework; reused for
-  hook-based residual extraction patterns.
-- External: `goodfire-ai/causalab` branch `manifold_steering` — referenced for
-  replicating manifold plots.
-
-## Status
-
-Local repo, no remote yet. Add a remote when collaboration starts:
-
-```bash
-gh repo create temporal-manifolds --private --source=. --remote=origin
-```
+- [arXiv:2606.05194](https://arxiv.org/pdf/2606.05194) — Temporal Preference
+  Concepts and their Functions in a Large Language Model (the predecessor
+  paper this project extends).
+- [`temporal-awareness`](../temporal-awareness/) — prompt-pair patterns and
+  activation-extraction style.
+- [`temporal/latents`](../temporal/latents/) — CAA framework; hook-based
+  residual extraction patterns.

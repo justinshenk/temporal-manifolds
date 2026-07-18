@@ -1,5 +1,30 @@
 # Verification Log
 
+## 2026-07-17 — Multi-stage conversation pipeline (refactor + validation)
+
+- **ChatMarkup registry facts** (turn/think tokens for ChatML/Qwen3/2507/SmolLM2/
+  Llama-3.1/Gemma-3): established by running real tokenizers (apply_chat_template +
+  single-token encode) and re-proved on every `pytest` run by
+  tests/test_chat_markup.py (5 families, live tokenizers). — VERIFIED
+- **Test suite** after refactor: `uv run pytest` → 49 passed, 0 failed (run twice,
+  second run after protocol hardening). — VERIFIED
+- **SmolLM2-135M smoke run** (run f95ed9ae8962, 4 conversations): opened
+  conversation.json (10 alternating turns), boundaries.json (59 boundaries, kinds
+  correct), activations.npz (177 vectors = 59 boundaries × 3 layers, all finite,
+  key set exactly matches expectation, depth→layer 11/17/23 for 30 layers). — VERIFIED
+- **Qwen3-0.6B smoke run** (run d409e0e629e6 after protocol fix): 4/4 conversations,
+  full 5 assistant turns, empty-think-block delimiters captured per assistant turn;
+  first replies read directly (role-play failure of tiny model documented, protocol
+  hardened + completion detection restricted to standalone short reply). — VERIFIED
+- **Capped-thinking smoke** (run 90488e0b1443): opened stored record — all 3
+  assistant turns show think_forced_closed=True, think_open/think_close captured
+  3× each, CoT interior not captured. — VERIFIED
+- **Analysis stage** on d409e0e629e6: 150 figures written;
+  d80_L21_turn_end__target_horizon__2d.png viewed WITH IMAGE TOKENS (axes,
+  log colorbar, points render correctly). Other 149 figures NOT individually
+  viewed. — VERIFIED (one exemplar); remainder UNVERIFIED individually
+- **Main Qwen3-14B run**: launched in background — UNVERIFIED (in progress).
+
 ## 2026-07-17 — Merge of origin/dev into ian-prototyping (commits 43b9cc9 → ede8ed1)
 
 - **WIP commit 43b9cc9** (local prototype restructure, 160 files): staged file list reviewed
