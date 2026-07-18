@@ -64,14 +64,6 @@
   viewed WITH IMAGE TOKENS (gradient present, diagonal, one outlier). Other
   Llama figures NOT individually viewed. — VERIFIED (exemplar)
 
-- **Gemma-2-9B run** (9dd33616af46): 20/20 done 0 failed (log read). Probes:
-  target LOTO R²=0.848/ρ=0.93 (L16 role) — strongest cross-task transfer;
-  step grouped-CV R²=0.763/ρ=0.90 n=104, step LOTO R²=0.670. Figure
-  d40_L16_turn_start_first__target_horizon.png viewed WITH IMAGE TOKENS
-  (clean diagonal gradient, all 4 tasks aligned). — VERIFIED (exemplar)
-- **Qwen3-32B-4bit MLX run** (f42ab94c4a17, 72 prompts): launched. — UNVERIFIED
-  (in progress)
-
 ## 2026-07-17 — Merge of origin/dev into ian-prototyping (commits 43b9cc9 → ede8ed1)
 
 - **WIP commit 43b9cc9** (local prototype restructure, 160 files): staged file list reviewed
