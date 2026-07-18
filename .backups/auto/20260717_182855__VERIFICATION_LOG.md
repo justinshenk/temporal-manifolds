@@ -34,21 +34,6 @@
   d40_L15_role_first vs target_horizon rho=0.96 p=4.9e-5 n=9. Both figures
   viewed WITH IMAGE TOKENS — gradients visible along PC1 across both tasks.
   — VERIFIED (exemplars; full-run figures pending)
-- **Main Qwen3-14B run COMPLETE** (run 23f1cdc1ecb8): 20/20 samples, 0 failed,
-  manifest status complete (log tail + manifest read directly). Independent
-  verifier agent re-checked: 20 sample dirs each with the 3 artifact files;
-  3 randomly picked samples fully validated (alternating turns, 107 boundaries
-  each all in-range with correct kinds/token ids, 321 npz arrays = 107×3
-  layers, all (5120,) float32 finite). — VERIFIED
-- **Headline statistic** (target horizon vs PC1 at first-assistant-turn `role`
-  token, L15 = 40% depth, task-centered): Spearman rho=-0.963, p=1.2e-11,
-  n=20 — INDEPENDENTLY RECOMPUTED by verifier agent from raw stored
-  activations, matching horizon_results.json to full precision. — VERIFIED
-- **Final figures**: d40_L15_role_first__target_horizon.png and
-  d40_L15_turn_end_trajectories.png viewed WITH IMAGE TOKENS by me AND by the
-  verifier agent (real plots, gradients/trajectories as described). Remaining
-  ~215 figures generated but not individually viewed. — VERIFIED (exemplars);
-  bulk figures UNVERIFIED individually
 
 ## 2026-07-17 — Merge of origin/dev into ian-prototyping (commits 43b9cc9 → ede8ed1)
 
