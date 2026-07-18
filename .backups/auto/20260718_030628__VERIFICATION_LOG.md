@@ -50,20 +50,6 @@
   ~215 figures generated but not individually viewed. — VERIFIED (exemplars);
   bulk figures UNVERIFIED individually
 
-## 2026-07-18 — Phase 2: cross-family + scale-up
-
-- **MLX engine numerical validation**: Qwen3-0.6B same tokens through HFEngine
-  vs MLXEngine — cosine ≥ 0.9996, rel-err ≤ 2.8% at layers 11/16/22 (computed
-  directly, printed). — VERIFIED
-- **Qwen3-14B probes** (run 23f1cdc1ecb8): grouped-CV R²=0.965/ρ=0.97 (target,
-  L23 role), LOTO R²=0.835 (think_close L23); step R²=0.588/ρ=0.80 n=60.
-  Probe table read directly from script output. — VERIFIED
-- **Llama-3.1-8B run** (17c2a9edea10): 20/20 done 0 failed (log read). Probes:
-  target grouped-CV R²=0.776/ρ=0.88 (L18 turn_start), step R²=0.670/ρ=0.83
-  n=74, LOTO R²=0.191. Figure d60_L18_turn_start_first__target_horizon.png
-  viewed WITH IMAGE TOKENS (gradient present, diagonal, one outlier). Other
-  Llama figures NOT individually viewed. — VERIFIED (exemplar)
-
 ## 2026-07-17 — Merge of origin/dev into ian-prototyping (commits 43b9cc9 → ede8ed1)
 
 - **WIP commit 43b9cc9** (local prototype restructure, 160 files): staged file list reviewed
