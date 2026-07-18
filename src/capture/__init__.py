@@ -1,4 +1,4 @@
-"""Planning-conversation prompt datasets: tasks × target horizons × phrasings."""
+"""Boundary-token activation capture and storage."""
 
 from ..core.auto_export import auto_export
 

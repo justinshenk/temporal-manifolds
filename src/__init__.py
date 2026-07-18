@@ -1,9 +1,12 @@
-"""Temporal-manifolds research framework.
+"""temporal-manifolds source tree.
 
-DO NOT add explicit __all__ lists here - use auto_export instead.
-See src/common/auto_export.py for documentation on how this works.
+Packages:
+    core          schemas, ids, time values, file/device/path utils
+    chat_markup   per-family chat token anatomy (verified)
+    datasets      planning prompt datasets (task x horizon x phrasing)
+    engine        model engines (HF, MLX)
+    conversation  multi-stage planning conversation driver
+    capture       boundary-token activation capture + store
+    analysis      PCA + visualization
+    temporal_manifolds   legacy shared library (untouched)
 """
-
-from src.common.auto_export import auto_export
-
-__all__ = auto_export(__file__, __name__, globals())

@@ -1,4 +1,4 @@
-"""Planning-conversation prompt datasets: tasks × target horizons × phrasings."""
+"""Per-family × per-generation chat token anatomy, verified against tokenizers."""
 
 from ..core.auto_export import auto_export
 

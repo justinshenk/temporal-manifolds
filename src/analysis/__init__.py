@@ -1,4 +1,4 @@
-"""Planning-conversation prompt datasets: tasks × target horizons × phrasings."""
+"""PCA + visualization of boundary-token activation geometry."""
 
 from ..core.auto_export import auto_export
 

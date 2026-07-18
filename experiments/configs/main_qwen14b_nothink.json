@@ -1,0 +1,16 @@
+{
+  "name": "main_qwen14b_nothink",
+  "model": "Qwen/Qwen3-14B",
+  "backend": "hf",
+  "tasks": ["climate_city", "marathon", "dinner_party", "knowledge_archive"],
+  "horizons": ["1 days", "2 weeks", "6 months", "5 years", "50 years"],
+  "phrasings": ["available_time"],
+  "depths": [0.4, 0.6, 0.8],
+  "protocol": {
+    "max_assistant_turns": 9,
+    "max_new_tokens_per_turn": 700,
+    "temperature": 0.0,
+    "thinking_mode": "disabled",
+    "seed": 0
+  }
+}

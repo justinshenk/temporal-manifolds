@@ -34,10 +34,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5", "black>=24.0", "nbstripout>=0.7"]
-# API-backend clients (legacy; lazily imported)
-api = ["openai>=1.0.0", "anthropic>=0.25.0", "google-genai>=1.0.0"]
-# Apple Silicon engine for large quantized models (src/engine/mlx_engine.py)
-mlx = ["mlx-lm>=0.24.0"]
 
 [project.scripts]
 temporal-manifolds-workflow = "temporal_manifolds.workflows:main"
@@ -49,8 +45,7 @@ include = ["src*"]
 prerelease = "allow"
 
 [tool.uv.sources]
-# CUDA wheels only exist for Linux; macOS resolves torch from PyPI.
-torch = { index = "pytorch-cu128", marker = "sys_platform == 'linux'" }
+torch = { index = "pytorch-cu128" }
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
@@ -77,6 +72,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["F401"]
 "src/**/__init__.py" = ["F401", "F811"]  # re-exports
+"src/common/math/entropy_diversity/entropy_primitives.py" = ["F401"]  # re-exports _EPS
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

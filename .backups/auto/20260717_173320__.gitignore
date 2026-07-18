@@ -43,6 +43,3 @@ tensorboard/
 .tmp/
 
 figures/*
-
-# Experiment outputs (activations, figures)
-output/

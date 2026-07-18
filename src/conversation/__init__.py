@@ -1,4 +1,4 @@
-"""Planning-conversation prompt datasets: tasks × target horizons × phrasings."""
+"""Multi-stage planning conversation protocol, driver, records, parsing."""
 
 from ..core.auto_export import auto_export
 
