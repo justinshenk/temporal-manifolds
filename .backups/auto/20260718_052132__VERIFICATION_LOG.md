@@ -69,26 +69,8 @@
   step grouped-CV R²=0.763/ρ=0.90 n=104, step LOTO R²=0.670. Figure
   d40_L16_turn_start_first__target_horizon.png viewed WITH IMAGE TOKENS
   (clean diagonal gradient, all 4 tasks aligned). — VERIFIED (exemplar)
-- **Qwen3-32B-4bit MLX run** (f42ab94c4a17): 72/72 done 0 failed (log read;
-  manifest complete). Independent verifier agent: all 72 sample dirs complete,
-  3 random samples fully validated incl. token_id↔abs_pos crosschecks; headline
-  independently reproduced from raw activations (PC1 Spearman rho=-0.912,
-  p=8.9e-29, n=72 at L50 role first turns). — VERIFIED
-- **32B probes** (after schedule-window parser fix, 50 tests pass): target
-  grouped-CV R²=0.988/ρ=0.99 p=1.5e-62; target LOTO R²=0.857; step grouped-CV
-  R²=0.816/ρ=0.92 p=6e-151 n=365. Read from script output. — VERIFIED
-- **Figures viewed WITH IMAGE TOKENS** (by me; two also by verifier agent):
-  d60_L37_think_close_first__target_horizon.png (smooth two-band manifold,
-  log-horizon gradient along PC1 in all 4 tasks),
-  d60_L37_think_close_first__phrasing.png (bands = phrasings, clean PC2
-  separation → phrasing-equivariant horizon manifold),
-  d60_L37_turn_end_trajectories.png (all 72 conversations traverse one
-  reproducible phase loop). Bulk figures not individually viewed. — VERIFIED
-  (exemplars)
-- **Cross-model probe table** (best per model, from probe_results.json):
-  target-R²(cv)/target-R²(LOTO)/step-R²(cv): Qwen3-14B .965/.835/.751;
-  Llama-3.1-8B .963/.191/.670; Gemma-2-9B .970/.949/.805; Qwen3-32B
-  .988/.857/.816. — VERIFIED (recomputed from stored results)
+- **Qwen3-32B-4bit MLX run** (f42ab94c4a17, 72 prompts): launched. — UNVERIFIED
+  (in progress)
 
 ## 2026-07-17 — Merge of origin/dev into ian-prototyping (commits 43b9cc9 → ede8ed1)
 
