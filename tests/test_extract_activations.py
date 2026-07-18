@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from temporal_manifolds.activations.extract_activations import (
     all_token_positions,
+    extract_residual_stream_activations,
     find_activation_span,
+    get_cache_layer_components,
     set_pad_token_if_missing,
     tokenize_raw_texts,
 )
@@ -13,6 +15,12 @@ from temporal_manifolds.activations.extract_activations import (
 class FakeTensor:
     def __init__(self, shape: tuple[int, ...]) -> None:
         self.shape = shape
+
+    def detach(self) -> "FakeTensor":
+        return self
+
+    def cpu(self) -> "FakeTensor":
+        return self
 
 
 class FakeUnderlyingTokenizer:
@@ -92,3 +100,62 @@ def test_find_activation_span_supports_approach_actions_format() -> None:
         "assistant\nApproach: short plan",
         "assistant_to_approach_generation",
     )
+
+
+def test_find_activation_span_selects_assistant_marker_and_everything_after_it() -> None:
+    full_text = "user\nTask text\nassistant\nFirst line\nSecond line\n"
+
+    span = find_activation_span(full_text, position_selection_policy="after_assistant")
+
+    assert span == (
+        len("user\nTask text\n"),
+        len(full_text),
+        "assistant\nFirst line\nSecond line\n",
+        "assistant_response",
+    )
+
+
+def test_after_assistant_policy_uses_final_assistant_marker() -> None:
+    full_text = "assistant\nold response\nuser\nfollow-up\nassistant\nnew response"
+
+    span = find_activation_span(full_text, position_selection_policy="after_assistant")
+
+    assert span is not None
+    assert span[2] == "assistant\nnew response"
+
+
+def test_after_assistant_policy_requires_non_empty_response() -> None:
+    assert (
+        find_activation_span("user\ntask\nassistant\n", position_selection_policy="after_assistant")
+        is None
+    )
+
+
+def test_cache_layer_components_include_residual_after_every_layer() -> None:
+    selected_nodes = {
+        "group": [
+            ((1, "z"), 2),
+            ((0, "layer_out"), 3),
+        ]
+    }
+
+    assert get_cache_layer_components(selected_nodes, num_hidden_layers=3) == [
+        (0, "layer_out"),
+        (1, "layer_out"),
+        (1, "z"),
+        (2, "layer_out"),
+    ]
+
+
+def test_extract_residual_stream_activations_keeps_full_layer_outputs() -> None:
+    layer_zero = FakeTensor((1, 5, 8))
+    layer_one = FakeTensor((1, 5, 8))
+    activations = {
+        (0, "layer_out"): layer_zero,
+        (1, "layer_out"): layer_one,
+    }
+
+    assert extract_residual_stream_activations(activations, num_hidden_layers=2) == {
+        "layer_out/0": layer_zero,
+        "layer_out/1": layer_one,
+    }

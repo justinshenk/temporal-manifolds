@@ -1,12 +1,11 @@
 """Extract selected-node activations for generated temporal prompt completions.
 
 The input is a JSONL file produced by ``generate_completions.py``. Each record is
-expected to contain ``full_text`` plus prompt metadata. Position-wise activations
-are cached from the generated ``assistant`` marker through the generated planning
-header, stopping before the detailed plan body marker. Conversational completions
-may use ``Strategy:`` / ``Steps:``, ``Summary:`` / ``Checklist:``, or
-``Approach:`` / ``Actions:``; abstract distribution completions use
-``Allocation rule:`` / ``Schedule:``.
+expected to contain ``full_text`` plus prompt metadata. The default position policy
+caches from the generated ``assistant`` marker through the generated planning header,
+stopping before the detailed plan body marker. Other policies can cache the entire
+text or every position from the assistant marker through the response. Selected-node
+activations and full residual-stream outputs after every model layer are saved.
 """
 
 from __future__ import annotations
@@ -42,8 +41,14 @@ DEFAULT_MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 SelectedNode = tuple[tuple[int, str], int]
 SelectedNodeGroups = dict[str, list[SelectedNode]]
 ActivationSpan = tuple[int, int, str, str]
-PositionSelectionPolicy = Literal["default", "all"]
-POSITION_SELECTION_POLICIES: tuple[PositionSelectionPolicy, ...] = ("default", "all")
+PositionSelectionPolicy = Literal["default", "all", "after_assistant"]
+POSITION_SELECTION_POLICIES: tuple[PositionSelectionPolicy, ...] = (
+    "default",
+    "all",
+    "after_assistant",
+)
+
+ASSISTANT_MARKER = "assistant\n"
 
 PLAN_MARKER_PAIRS = (
     ("Strategy:", "Steps:", "assistant_to_strategy_generation"),
@@ -122,6 +127,16 @@ def get_unique_layer_components(
     )
 
 
+def get_cache_layer_components(
+    selected_node_groups: SelectedNodeGroups,
+    num_hidden_layers: int,
+) -> list[tuple[int, str]]:
+    """Return selected components plus every layer's residual-stream output."""
+    layer_components = set(get_unique_layer_components(selected_node_groups))
+    layer_components.update((layer, "layer_out") for layer in range(num_hidden_layers))
+    return sorted(layer_components)
+
+
 def group_node_indices(
     selected_node_groups: SelectedNodeGroups,
 ) -> dict[tuple[int, str], list[int]]:
@@ -170,6 +185,17 @@ def extract_selected_activations(
     return selected
 
 
+def extract_residual_stream_activations(
+    activations: Any,
+    num_hidden_layers: int,
+) -> dict[str, Any]:
+    """Extract full residual-stream activations after every transformer layer."""
+    return {
+        f"layer_out/{layer}": activations[(layer, "layer_out")].detach().cpu()
+        for layer in range(num_hidden_layers)
+    }
+
+
 def load_completion_records(
     input_path: Path,
     max_samples: int | None = None,
@@ -216,11 +242,10 @@ def tokenize_raw_texts(tokenizer: Any, texts: list[str]) -> dict[str, Any]:
 
 def find_assistant_plan_span(full_text: str) -> ActivationSpan | None:
     """Return the char span from assistant marker through the generated plan header."""
-    assistant_marker = "assistant\n"
-    assistant_start = full_text.rfind(assistant_marker)
+    assistant_start = full_text.rfind(ASSISTANT_MARKER)
     if assistant_start == -1:
         return None
-    search_start = assistant_start + len(assistant_marker)
+    search_start = assistant_start + len(ASSISTANT_MARKER)
 
     matched_span: ActivationSpan | None = None
     matched_header_start: int | None = None
@@ -251,6 +276,23 @@ def find_assistant_plan_span(full_text: str) -> ActivationSpan | None:
     return matched_span
 
 
+def find_assistant_response_span(full_text: str) -> ActivationSpan | None:
+    """Return the final assistant marker and its non-empty response char span."""
+    assistant_start = full_text.rfind(ASSISTANT_MARKER)
+    if assistant_start == -1:
+        return None
+
+    response_start = assistant_start + len(ASSISTANT_MARKER)
+    if response_start >= len(full_text):
+        return None
+    return (
+        assistant_start,
+        len(full_text),
+        full_text[assistant_start:],
+        "assistant_response",
+    )
+
+
 def find_activation_span(
     full_text: str,
     *,
@@ -261,6 +303,8 @@ def find_activation_span(
         return find_assistant_plan_span(full_text)
     if position_selection_policy == "all":
         return (0, len(full_text), full_text, "all_positions")
+    if position_selection_policy == "after_assistant":
+        return find_assistant_response_span(full_text)
 
     raise ValueError(f"Unsupported position selection policy: {position_selection_policy!r}")
 
@@ -364,7 +408,7 @@ def cache_completion_activations(
     upload_queue_capacity: int = 8,
     position_selection_policy: PositionSelectionPolicy = "default",
 ) -> None:
-    """Load completions, cache assistant-to-strategy activations, and save caches."""
+    """Cache selected-node and per-layer residual-stream completion activations."""
     import torch
 
     from ..utils.gcs_upload import maybe_start_memory_gcs_upload_workers
@@ -372,7 +416,6 @@ def cache_completion_activations(
     from ..utils.mech_interp_toolkit.utils import load_model_tokenizer_config
 
     selected_node_groups = load_selected_node_groups(nodes_path)
-    layer_components = get_unique_layer_components(selected_node_groups)
     records = load_completion_records(input_path, max_samples=max_samples)
 
     model, tokenizer, _ = load_model_tokenizer_config(
@@ -382,6 +425,8 @@ def cache_completion_activations(
         attn_type=attn_type,
     )
     set_pad_token_if_missing(tokenizer)
+    num_hidden_layers = int(model.config.num_hidden_layers)
+    layer_components = get_cache_layer_components(selected_node_groups, num_hidden_layers)
 
     if not save_to_gcp:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -416,7 +461,10 @@ def cache_completion_activations(
                 skipped_spans.append(
                     {
                         "sample_index": sample_index,
-                        "error": "Could not find non-empty assistant-to-plan-header span",
+                        "error": (
+                            "Could not find a non-empty activation span for position policy "
+                            f"{position_selection_policy!r}"
+                        ),
                         "prompt": record.get("prompt"),
                         "prompt_metadata": record.get("prompt_metadata", {}),
                     }
@@ -465,6 +513,10 @@ def cache_completion_activations(
                 "activations": extract_selected_activations(
                     activations,
                     selected_node_groups,
+                ),
+                "residual_stream_activations": extract_residual_stream_activations(
+                    activations,
+                    num_hidden_layers,
                 ),
             }
             if logits is not None:

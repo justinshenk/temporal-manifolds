@@ -95,6 +95,29 @@ def test_modules_must_be_a_non_empty_list_of_known_stages() -> None:
         WorkflowConfig.from_mapping(values)
 
 
+def test_after_assistant_position_policy_is_supported() -> None:
+    values = config_values()
+    values["position_selection_policy"] = "after_assistant"
+
+    config = WorkflowConfig.from_mapping(values)
+
+    assert config.position_selection_policy == "after_assistant"
+
+
+def test_after_assistant_residual_stream_scenario_config() -> None:
+    config = WorkflowConfig.from_yaml(
+        REPO_ROOT
+        / "configs"
+        / "activation_caching"
+        / "conversational_after_assistant_residual_stream.yaml"
+    )
+
+    assert config.position_selection_policy == "after_assistant"
+    assert config.output_dir == (
+        REPO_ROOT / "results" / "feature_geometry_after_assistant_residual_stream"
+    )
+
+
 @pytest.mark.parametrize("key", ["upload_worker_count", "upload_queue_capacity"])
 def test_upload_concurrency_values_must_be_positive(key: str) -> None:
     values = config_values()

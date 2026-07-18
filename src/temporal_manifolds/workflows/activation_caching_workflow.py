@@ -19,7 +19,7 @@ StageName: TypeAlias = Literal[
     "completions",
     "activations",
 ]
-PositionSelectionPolicy: TypeAlias = Literal["default", "all"]
+PositionSelectionPolicy: TypeAlias = Literal["default", "all", "after_assistant"]
 CONFIG_ONLY = True
 
 load_dotenv()
