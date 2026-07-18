@@ -52,10 +52,12 @@ class ChatTemplateTokenizer:
             base_prompts = [base_prompts]
 
         instruct_syntax_prompts = [
-            [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
+            (
+                ([{"role": "system", "content": self.system_prompt}]
+                 if self.system_prompt
+                 else [])
+                + [{"role": "user", "content": user_prompt}]
+            )
             for user_prompt in base_prompts
         ]
 
