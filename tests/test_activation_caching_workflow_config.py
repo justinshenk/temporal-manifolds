@@ -113,6 +113,9 @@ def test_after_assistant_residual_stream_scenario_config() -> None:
     )
 
     assert config.position_selection_policy == "after_assistant"
+    assert config.completions_path == REPO_ROOT / "completions_256.jsonl"
+    assert config.completions_gcs_prefix == "completions"
+    assert config.modules == ("activations",)
     assert config.output_dir == (
         REPO_ROOT / "results" / "feature_geometry_after_assistant_residual_stream"
     )

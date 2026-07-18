@@ -4,8 +4,8 @@ args:
   dataset: conversational
   prompt_records_path: data/model_completions/activation_prompts.json
   dataset_gcs_prefix: conversational_default
-  completions_path: data/model_completions/completions_256.jsonl
-  completions_gcs_prefix: conversational_default
+  completions_path: completions_256.jsonl
+  completions_gcs_prefix: completions
   nodes_path: data/selected_nodes/final_500_eap_ig.pkl
   nodes_gcs_prefix: eap-ig
   output_dir: results/feature_geometry_after_assistant_residual_stream
@@ -24,6 +24,4 @@ args:
   upload_worker_count: 16
   upload_queue_capacity: 128
   modules:
-  - dataset
-  - completions
   - activations
