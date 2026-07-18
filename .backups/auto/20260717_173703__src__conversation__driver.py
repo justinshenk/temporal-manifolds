@@ -209,7 +209,7 @@ class ConversationDriver:
 
             step_idx = parsing.parse_step_index(visible)
             horizon_raw, horizon_years = parsing.parse_step_horizon(visible)
-            completed = assistant_i > 0 and parsing.is_final_completion(visible)
+            completed = parsing.is_plan_completed(visible) and step_idx is None
 
             record.turns.append(
                 Turn(

@@ -30,11 +30,7 @@ Time horizon: <duration of this step>
 <detailed plan for this step>
 
 3. After the final step has been expanded, reply to my next "Continue." with \
-exactly: Plan Completed
-
-Important: reply one message at a time and then stop. Never write "Continue." \
-yourself, never expand more than one step per message, and never write \
-"Plan Completed" in the same message as a step."""
+exactly: Plan Completed"""
 
 
 PROMPT_TEMPLATE = """Scenario:

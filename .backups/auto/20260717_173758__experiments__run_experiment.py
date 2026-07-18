@@ -85,12 +85,8 @@ def main() -> int:
 
     dataset = build_prompt_dataset(cfg)
     run_id = run_fingerprint(
-        {
-            "name": cfg["name"],
-            # hash the ACTUAL prompt texts so any template/phrasing change
-            # produces a fresh run instead of silently resuming stale samples
-            "prompts": {p.prompt_id: p.text for p in dataset.prompts},
-        },
+        {"name": cfg["name"], "horizons": cfg["horizons"],
+         "tasks": cfg.get("tasks"), "phrasings": cfg.get("phrasings")},
         protocol.to_dict(),
         depths,
     )

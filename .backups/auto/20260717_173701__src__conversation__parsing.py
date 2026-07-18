@@ -76,13 +76,6 @@ def is_plan_completed(text: str) -> bool:
     return PLAN_COMPLETED_RE.search(text) is not None
 
 
-def is_final_completion(text: str) -> bool:
-    """True only for a standalone completion reply (not a mention inside a
-    longer message — small models sometimes role-play the whole protocol)."""
-    stripped = text.strip()
-    return PLAN_COMPLETED_RE.search(stripped) is not None and len(stripped) <= 40
-
-
 def count_overview_steps(text: str) -> int:
     """Count numbered/bulleted step lines in the overview reply."""
     return len(OVERVIEW_STEP_RE.findall(text))
