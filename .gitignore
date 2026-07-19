@@ -43,3 +43,5 @@ tensorboard/
 .tmp/
 
 figures/*
+
+data/completions_completions_256.jsonl
