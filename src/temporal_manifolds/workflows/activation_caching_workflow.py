@@ -55,6 +55,7 @@ class WorkflowConfig:
     attn_type: str
     position_selection_policy: PositionSelectionPolicy
     max_samples: int | None
+    remove_time_constraints: bool
     overwrite: bool
     save_to_gcp: bool
     upload_worker_count: int
@@ -104,7 +105,7 @@ class WorkflowConfig:
             )
         modules = tuple(cast(StageName, module) for module in raw_modules)
 
-        boolean_keys = ("overwrite", "save_to_gcp")
+        boolean_keys = ("remove_time_constraints", "overwrite", "save_to_gcp")
         for key in boolean_keys:
             if not isinstance(values[key], bool):
                 raise TypeError(f"{key} must be a YAML boolean")
@@ -114,6 +115,8 @@ class WorkflowConfig:
         upload_queue_capacity = int(values["upload_queue_capacity"])
         if upload_queue_capacity < 1:
             raise ValueError("upload_queue_capacity must be at least 1")
+
+        remove_time_constraints = bool(values["remove_time_constraints"])
 
         return cls(
             dataset=dataset,
@@ -131,22 +134,27 @@ class WorkflowConfig:
             attn_type=str(values["attn_type"]),
             position_selection_policy=cast(PositionSelectionPolicy, position_selection_policy),
             max_samples=None if values["max_samples"] is None else int(values["max_samples"]),
+            remove_time_constraints=remove_time_constraints,
             overwrite=bool(values["overwrite"]),
             save_to_gcp=bool(values["save_to_gcp"]),
             upload_worker_count=upload_worker_count,
             upload_queue_capacity=upload_queue_capacity,
             gcp_project_id=GCP_PROJECT_ID,
             gcs_bucket_name=GCS_BUCKET_NAME,
-            gcs_prefix=gcs_prefix,
+            gcs_prefix=with_no_constraints_prefix(gcs_prefix, remove_time_constraints),
             dataset_gcs_prefix=(
                 None
                 if values["dataset_gcs_prefix"] is None
-                else str(values["dataset_gcs_prefix"])
+                else with_no_constraints_prefix(
+                    str(values["dataset_gcs_prefix"]), remove_time_constraints
+                )
             ),
             completions_gcs_prefix=(
                 None
                 if values["completions_gcs_prefix"] is None
-                else str(values["completions_gcs_prefix"])
+                else with_no_constraints_prefix(
+                    str(values["completions_gcs_prefix"]), remove_time_constraints
+                )
             ),
             nodes_gcs_prefix=(
                 None
@@ -185,15 +193,24 @@ def resolve_repo_path(path: str | Path) -> Path:
     return REPO_ROOT / candidate
 
 
+def with_no_constraints_prefix(prefix: str | None, enabled: bool) -> str | None:
+    """Namespace GCS artifacts generated without explicit time constraints."""
+    if not enabled or prefix is None or prefix.startswith("NC_"):
+        return prefix
+    return f"NC_{prefix}"
+
+
 def run_dataset_stage(
     *,
     dataset: str,
     output_path: Path,
+    remove_time_constraints: bool,
 ) -> Path:
     """Generate prompt records for the requested activation dataset."""
     generate_task_dataset(
         output_path=output_path,
         dataset=dataset,
+        remove_time_constraints=remove_time_constraints,
     )
     return output_path
 
@@ -438,6 +455,7 @@ def run_workflow(config: WorkflowConfig) -> None:
             dataset_artifact = run_dataset_stage(
                 dataset=config.dataset,
                 output_path=config.prompt_records_path,
+                remove_time_constraints=config.remove_time_constraints,
             )
             upload_stage_artifacts([dataset_artifact], config=config)
 

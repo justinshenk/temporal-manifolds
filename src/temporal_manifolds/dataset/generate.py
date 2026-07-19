@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -55,13 +56,13 @@ class PromptRecord(TypedDict):
     task_metadata: dict[str, str]
     quantity: int | None
     quantity_text: str | None
-    base_value: int
-    base_unit: str
-    unit_variant: Literal["original", "smaller"]
-    number_format: Literal["numeric", "words"]
-    value: int
-    value_text: str
-    unit: str
+    base_value: int | None
+    base_unit: str | None
+    unit_variant: Literal["original", "smaller"] | None
+    number_format: Literal["numeric", "words"] | None
+    value: int | None
+    value_text: str | None
+    unit: str | None
 
 
 DatasetName = Literal["conversational", "abstract"]
@@ -70,6 +71,17 @@ DATASETS = {
     "conversational": conversational_dataset,
     "abstract": abstract_dataset,
 }
+
+TIME_CONSTRAINT_LINE = re.compile(
+    r"^\s*(?:available time|time budget|deadline|time constraint|time window)\s*:",
+    re.IGNORECASE,
+)
+
+
+def remove_time_constraint_lines(template: str) -> str:
+    """Remove explicit time-constraint fields from a prompt template."""
+    lines = [line for line in template.splitlines() if not TIME_CONSTRAINT_LINE.match(line)]
+    return "\n".join(lines)
 
 
 def normalize_dataset_name(dataset: str) -> DatasetName:
@@ -199,6 +211,61 @@ def append_prompt_variants(
         )
 
 
+def append_unconstrained_prompt_variants(
+    records: list[PromptRecord],
+    template: str,
+    template_id: str,
+    template_metadata: dict[str, str],
+    task: str,
+    task_metadata: dict[str, str],
+    quantity: int | None,
+) -> None:
+    """Append only variants that still change an unconstrained prompt's text."""
+    number_formats: tuple[NumberFormat | None, ...] = (
+        (None,) if quantity is None else NUMBER_FORMATS
+    )
+    for number_format in number_formats:
+        quantity_text = (
+            None
+            if quantity is None
+            else str(quantity)
+            if number_format == "numeric"
+            else number_to_words(quantity)
+        )
+        records.append(
+            {
+                "text": template.format(
+                    task=task,
+                    quantity=quantity_text,
+                    value="",
+                    unit="",
+                ),
+                "template_id": template_id,
+                "template_metadata": template_metadata,
+                "task": task,
+                "task_metadata": task_metadata,
+                "quantity": quantity,
+                "quantity_text": quantity_text,
+                "base_value": None,
+                "base_unit": None,
+                "unit_variant": None,
+                "number_format": number_format,
+                "value": None,
+                "value_text": None,
+                "unit": None,
+            }
+        )
+
+
+def write_prompt_records(records: list[PromptRecord], output_path: str | Path | None) -> None:
+    """Write prompt records when an output path was requested."""
+    if output_path is None:
+        return
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(json.dumps(records, indent=2), encoding="utf-8")
+
+
 def generate_task_dataset(
     template_list: Iterable[TemplateConfig] | None = None,
     task_units: Mapping[str, TaskConfig] | None = None,
@@ -207,6 +274,7 @@ def generate_task_dataset(
     output_path: str | Path | None = None,
     randomize_template: bool = False,
     dataset: str = "conversational",
+    remove_time_constraints: bool = False,
 ) -> list[PromptRecord]:
     """Return formatted prompt records from the configured templates and tasks.
 
@@ -235,6 +303,51 @@ def generate_task_dataset(
         raise ValueError("quantity_values must contain at least one value")
     task_configs = normalize_task_configs(task_units)
 
+    if remove_time_constraints:
+        if randomize_template:
+            for task, task_config in sorted(task_configs.items()):
+                for quantity in quantity_configs:
+                    template_config = random.choice(template_configs)
+                    template_id = str(template_config["id"])
+                    template = remove_time_constraint_lines(str(template_config["template"]))
+                    template_metadata = {
+                        key: str(value)
+                        for key, value in template_config.items()
+                        if key not in {"id", "template"}
+                    }
+                    append_unconstrained_prompt_variants(
+                        records,
+                        template,
+                        template_id,
+                        template_metadata,
+                        task,
+                        task_config["metadata"],
+                        quantity,
+                    )
+        else:
+            for template_config in template_configs:
+                template_id = str(template_config["id"])
+                template = remove_time_constraint_lines(str(template_config["template"]))
+                template_metadata = {
+                    key: str(value)
+                    for key, value in template_config.items()
+                    if key not in {"id", "template"}
+                }
+                for task, task_config in sorted(task_configs.items()):
+                    for quantity in quantity_configs:
+                        append_unconstrained_prompt_variants(
+                            records,
+                            template,
+                            template_id,
+                            template_metadata,
+                            task,
+                            task_config["metadata"],
+                            quantity,
+                        )
+
+        write_prompt_records(records, output_path)
+        return records
+
     if randomize_template:
         for task, task_config in sorted(task_configs.items()):
             units = task_config["units"]
@@ -245,6 +358,8 @@ def generate_task_dataset(
                         template_config = random.choice(template_configs)
                         template_id = str(template_config["id"])
                         template = str(template_config["template"])
+                        if remove_time_constraints:
+                            template = remove_time_constraint_lines(template)
                         template_metadata = {
                             key: str(value)
                             for key, value in template_config.items()
@@ -271,6 +386,8 @@ def generate_task_dataset(
                             template_config = random.choice(template_configs)
                             template_id = str(template_config["id"])
                             template = str(template_config["template"])
+                            if remove_time_constraints:
+                                template = remove_time_constraint_lines(template)
                             template_metadata = {
                                 key: str(value)
                                 for key, value in template_config.items()
@@ -294,6 +411,8 @@ def generate_task_dataset(
         for template_config in template_configs:
             template_id = str(template_config["id"])
             template = str(template_config["template"])
+            if remove_time_constraints:
+                template = remove_time_constraint_lines(template)
             template_metadata = {
                 key: str(value)
                 for key, value in template_config.items()
@@ -338,10 +457,7 @@ def generate_task_dataset(
                                     unit_variant="smaller",
                                 )
 
-    if output_path is not None:
-        output_file = Path(output_path)
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        output_file.write_text(json.dumps(records, indent=2), encoding="utf-8")
+    write_prompt_records(records, output_path)
 
     return records
 
@@ -365,6 +481,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Choose one random template per task/time sample.",
     )
+    parser.add_argument(
+        "--remove-time-constraints",
+        action="store_true",
+        help="Remove explicit Available time, Deadline, and similar prompt fields.",
+    )
     return parser.parse_args()
 
 
@@ -374,5 +495,6 @@ if __name__ == "__main__":
         dataset=args.dataset,
         output_path=args.output_path,
         randomize_template=args.randomize_template,
+        remove_time_constraints=args.remove_time_constraints,
     )
     print(json.dumps(dataset_records, indent=2))

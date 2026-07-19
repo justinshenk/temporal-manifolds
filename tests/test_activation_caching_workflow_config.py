@@ -34,6 +34,7 @@ def config_values() -> dict:
         "attn_type": "sdpa",
         "position_selection_policy": "default",
         "max_samples": 2,
+        "remove_time_constraints": False,
         "overwrite": False,
         "save_to_gcp": False,
         "upload_worker_count": 16,
@@ -104,6 +105,19 @@ def test_after_assistant_position_policy_is_supported() -> None:
     assert config.position_selection_policy == "after_assistant"
 
 
+def test_no_constraints_flag_prefixes_generated_artifact_namespaces() -> None:
+    values = config_values()
+    values["remove_time_constraints"] = True
+
+    config = WorkflowConfig.from_mapping(values, gcs_prefix="test-prefix")
+
+    assert config.remove_time_constraints is True
+    assert config.gcs_prefix == "NC_test-prefix"
+    assert config.dataset_gcs_prefix == "NC_dataset-artifacts"
+    assert config.completions_gcs_prefix == "NC_completion-artifacts"
+    assert config.nodes_gcs_prefix == "node-artifacts"
+
+
 def test_after_assistant_residual_stream_scenario_config() -> None:
     config = WorkflowConfig.from_yaml(
         REPO_ROOT
@@ -119,6 +133,29 @@ def test_after_assistant_residual_stream_scenario_config() -> None:
     assert config.output_dir == (
         REPO_ROOT / "results" / "feature_geometry_after_assistant_residual_stream"
     )
+
+
+def test_no_constraints_scenario_config() -> None:
+    config = WorkflowConfig.from_yaml(
+        REPO_ROOT
+        / "configs"
+        / "activation_caching"
+        / "conversational_after_assistant_residual_stream_no_constraints.yaml"
+    )
+
+    assert config.remove_time_constraints is True
+    assert config.position_selection_policy == "after_assistant"
+    assert config.gcs_prefix == "NC_conversational_after_assistant_residual_stream"
+    assert config.dataset_gcs_prefix == "NC_conversational_default"
+    assert config.completions_gcs_prefix == "NC_completions"
+    assert config.prompt_records_path.name == "activation_prompts_no_constraints.json"
+    assert config.completions_path.name == "completions_no_constraints_256.jsonl"
+    assert config.output_dir == (
+        REPO_ROOT
+        / "results"
+        / "feature_geometry_after_assistant_residual_stream_no_constraints"
+    )
+    assert config.modules == ("activations",)
 
 
 @pytest.mark.parametrize("key", ["upload_worker_count", "upload_queue_capacity"])
@@ -145,11 +182,12 @@ def test_dataset_and_completion_artifacts_are_uploaded(monkeypatch: pytest.Monke
     config = WorkflowConfig.from_mapping(values, gcs_prefix="test-prefix")
     uploaded: list[Path] = []
     activation_kwargs: dict = {}
+    dataset_kwargs: dict = {}
 
     monkeypatch.setattr(
         workflow_module,
         "run_dataset_stage",
-        lambda **_kwargs: config.prompt_records_path,
+        lambda **kwargs: dataset_kwargs.update(kwargs) or config.prompt_records_path,
     )
     monkeypatch.setattr(
         workflow_module,
@@ -181,6 +219,7 @@ def test_dataset_and_completion_artifacts_are_uploaded(monkeypatch: pytest.Monke
     run_workflow(config)
 
     assert uploaded == [config.prompt_records_path, config.completions_path]
+    assert dataset_kwargs["remove_time_constraints"] is False
     assert activation_kwargs["save_to_gcp"] is True
     assert activation_kwargs["gcs_prefix"] == "test-prefix"
     assert activation_kwargs["nodes_gcs_prefix"] == "node-artifacts"

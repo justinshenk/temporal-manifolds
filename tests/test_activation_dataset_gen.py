@@ -56,6 +56,64 @@ def test_plain_task_unit_sets_remain_supported() -> None:
     assert records[0]["unit"] == "minute"
 
 
+def test_time_constraints_can_be_removed_from_generated_prompts() -> None:
+    from temporal_manifolds.dataset.generate import generate_task_dataset
+
+    records = generate_task_dataset(
+        template_list=[
+            {
+                "id": "deadline",
+                "template": "Task: {task}\nDeadline: {value} {unit} from now\n\nMake a plan.",
+            }
+        ],
+        task_units={"test task": {"minutes"}},
+        time_values=[1, 2, 3],
+        remove_time_constraints=True,
+    )
+
+    assert len(records) == 1
+    assert records[0]["text"] == "Task: test task\n\nMake a plan."
+    assert "Deadline:" not in records[0]["text"]
+    assert records[0]["base_value"] is None
+    assert records[0]["base_unit"] is None
+    assert records[0]["unit_variant"] is None
+    assert records[0]["number_format"] is None
+
+
+def test_unconstrained_conversational_dataset_has_no_redundant_variants() -> None:
+    from temporal_manifolds.dataset.generate import generate_task_dataset
+
+    records = generate_task_dataset(
+        dataset="conversational",
+        remove_time_constraints=True,
+    )
+
+    assert len(records) == 999
+    assert len({record["text"] for record in records}) == 999
+
+
+def test_unconstrained_quantity_formats_are_preserved_when_they_change_text() -> None:
+    from temporal_manifolds.dataset.generate import generate_task_dataset
+
+    records = generate_task_dataset(
+        template_list=[
+            {
+                "id": "quantity_deadline",
+                "template": "Amount: {quantity}\nDeadline: {value} {unit}\n\nAllocate it.",
+            }
+        ],
+        task_units={"attention": {"minutes", "hours"}},
+        time_values=[1, 2],
+        quantity_values=[5],
+        remove_time_constraints=True,
+    )
+
+    assert [record["text"] for record in records] == [
+        "Amount: 5\n\nAllocate it.",
+        "Amount: five\n\nAllocate it.",
+    ]
+
+
 def test_conversational_dataset_has_crossed_difficulty_controls() -> None:
     from temporal_manifolds.dataset import conversational
 
