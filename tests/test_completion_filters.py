@@ -1,4 +1,4 @@
-"""Tests for filtering completion records by template metadata."""
+"""Tests for filtering completion records by prompt metadata."""
 
 from __future__ import annotations
 
@@ -19,13 +19,27 @@ from temporal_manifolds.utils.completion_filters import (
 
 def _write_completions(path: Path) -> None:
     metadata_rows = [
-        {"prompt_framing": "task_available_time", "output_format": "strategy_steps"},
-        {"prompt_framing": "task_deadline", "output_format": "strategy_steps"},
-        {"prompt_framing": "task_available_time", "output_format": "summary_checklist"},
+        (
+            {"prompt_framing": "task_available_time", "output_format": "strategy_steps"},
+            {"difficulty": "low", "domain": "communication"},
+        ),
+        (
+            {"prompt_framing": "task_deadline", "output_format": "strategy_steps"},
+            {"difficulty": "high", "domain": "communication"},
+        ),
+        (
+            {"prompt_framing": "task_available_time", "output_format": "summary_checklist"},
+            {"difficulty": "low", "domain": "analysis"},
+        ),
     ]
     with path.open("w", encoding="utf-8") as output_file:
-        for template_metadata in metadata_rows:
-            record = {"prompt_metadata": {"template_metadata": template_metadata}}
+        for template_metadata, task_metadata in metadata_rows:
+            record = {
+                "prompt_metadata": {
+                    "template_metadata": template_metadata,
+                    "task_metadata": task_metadata,
+                }
+            }
             output_file.write(json.dumps(record) + "\n")
 
 
@@ -60,9 +74,30 @@ def test_find_activation_paths_combines_filters(tmp_path: Path) -> None:
     assert find_activation_paths(
         prompt_framing="task_available_time",
         output_format="summary_checklist",
+        task_metadata={"difficulty": "low", "domain": "analysis"},
         completions_path=completions_path,
         activations_dir=activations_dir,
     ) == [activations_dir / "activations_sample_00002.pt"]
+
+
+def test_find_activation_paths_filters_task_metadata(tmp_path: Path) -> None:
+    completions_path = tmp_path / "completions.jsonl"
+    activations_dir = tmp_path / "activations"
+    _write_completions(completions_path)
+
+    assert find_activation_paths(
+        task_metadata={"difficulty": "low"},
+        completions_path=completions_path,
+        activations_dir=activations_dir,
+    ) == [
+        activations_dir / "activations_sample_00000.pt",
+        activations_dir / "activations_sample_00002.pt",
+    ]
+    assert find_activation_paths(
+        task_metadata={"stakes": "high"},
+        completions_path=completions_path,
+        activations_dir=activations_dir,
+    ) == []
 
 
 def test_find_activation_paths_without_filters_returns_every_path(tmp_path: Path) -> None:

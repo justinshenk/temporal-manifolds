@@ -1,4 +1,4 @@
-"""Helpers for selecting completion records by prompt template metadata."""
+"""Helpers for selecting completion records by prompt metadata."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -26,10 +26,11 @@ def find_activation_paths(
     *,
     prompt_framing: str | None = None,
     output_format: str | None = None,
+    task_metadata: Mapping[str, object] | None = None,
     completions_path: str | Path = DEFAULT_COMPLETIONS_PATH,
     activations_dir: str | Path = DEFAULT_ACTIVATIONS_DIR,
 ) -> list[Path]:
-    """Return activation-cache paths whose template metadata matches all filters.
+    """Return activation-cache paths whose prompt metadata matches all filters.
 
     A filter set to ``None`` is ignored. Consequently, calling this function
     without metadata filters returns the expected activation path for every
@@ -39,6 +40,7 @@ def find_activation_paths(
     Args:
         prompt_framing: Required value of ``template_metadata.prompt_framing``.
         output_format: Required value of ``template_metadata.output_format``.
+        task_metadata: Required key-value pairs from ``prompt_metadata.task_metadata``.
         completions_path: JSONL completions file to search.
         activations_dir: Directory containing the cached ``.pt`` files.
     """
@@ -47,14 +49,24 @@ def find_activation_paths(
         "output_format": output_format,
     }
     active_filters = {key: value for key, value in filters.items() if value is not None}
+    active_task_filters = dict(task_metadata or {})
 
     activation_root = Path(activations_dir)
     matching_paths: list[Path] = []
     with Path(completions_path).open(encoding="utf-8") as completion_file:
         for index, line in enumerate(completion_file):
             record = json.loads(line)
-            template_metadata = record["prompt_metadata"]["template_metadata"]
-            if all(template_metadata.get(key) == value for key, value in active_filters.items()):
+            prompt_metadata = record["prompt_metadata"]
+            template_metadata = prompt_metadata["template_metadata"]
+            record_task_metadata = prompt_metadata.get("task_metadata", {})
+            template_matches = all(
+                template_metadata.get(key) == value for key, value in active_filters.items()
+            )
+            task_matches = all(
+                record_task_metadata.get(key) == value
+                for key, value in active_task_filters.items()
+            )
+            if template_matches and task_matches:
                 matching_paths.append(activation_root / f"activations_sample_{index:05d}.pt")
 
     return matching_paths
@@ -64,6 +76,7 @@ def find_completion_indices(
     *,
     prompt_framing: str | None = None,
     output_format: str | None = None,
+    task_metadata: Mapping[str, object] | None = None,
     completions_path: str | Path = DEFAULT_COMPLETIONS_PATH,
     activations_dir: str | Path = DEFAULT_ACTIVATIONS_DIR,
 ) -> list[Path]:
@@ -71,6 +84,7 @@ def find_completion_indices(
     return find_activation_paths(
         prompt_framing=prompt_framing,
         output_format=output_format,
+        task_metadata=task_metadata,
         completions_path=completions_path,
         activations_dir=activations_dir,
     )
