@@ -7,20 +7,11 @@ import torch
 
 from temporal_manifolds.utils.activation_aggregation import (
     activation_tensors_by_type,
+    aggregate_activation_file,
     aggregate_positions,
     aggregate_tensors_by_type,
-    find_plan_char_spans,
     nodes_for_classes,
 )
-
-
-def test_find_plan_char_spans_separates_summary_and_steps() -> None:
-    text = "user\ntask\nassistant\nSummary: concise plan\nChecklist:\n- first\n- second"
-
-    summary_span, step_spans = find_plan_char_spans(text)
-
-    assert text[slice(*summary_span)] == "concise plan"
-    assert [text[slice(*span)] for span in step_spans] == ["first", "second"]
 
 
 def test_nodes_for_classes_unions_requested_classes() -> None:
@@ -74,16 +65,47 @@ def test_residual_tensors_use_same_aggregation_policy() -> None:
     residual = torch.tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]])
     tensors = {"mlp": {}, "attn": {}, "residual": {"layer_out/0": residual}}
 
-    all_result = aggregate_tensors_by_type(tensors, [[0, 1, 2]], "all")
-    step_result = aggregate_tensors_by_type(tensors, [[0], [1, 2]], "steps")
+    all_result = aggregate_tensors_by_type(tensors, [0, 1, 2])
 
     assert torch.equal(all_result["residual"]["layer_out/0"], torch.tensor([3.0, 4.0]))
-    assert torch.equal(
-        step_result["residual"]["layer_out/0"],
-        torch.tensor([[1.0, 2.0], [4.0, 5.0]]),
-    )
 
 
 def test_aggregate_positions_rejects_empty_groups() -> None:
     with pytest.raises(ValueError, match="must be non-empty"):
-        aggregate_positions(torch.ones(1, 2, 3), [[]])
+        aggregate_positions(torch.ones(1, 2, 3), [])
+
+
+@pytest.mark.parametrize(
+    ("policy", "expected"),
+    [("assistant", 1.0), ("all", 4.0)],
+)
+def test_aggregate_activation_file_uses_requested_cached_positions(
+    tmp_path,
+    policy: str,
+    expected: float,
+) -> None:
+    path = tmp_path / "activations_7.pt"
+    torch.save(
+        {
+            "position_selection_policy": "after_assistant",
+            "positions": [4, 5, 9],
+            "metadata": [{"sample_index": 7}],
+            "activations": {
+                "mlp_hidden/1": {
+                    "node_indices": [2],
+                    "values": torch.tensor([[[1.0], [3.0], [8.0]]]),
+                },
+            },
+            "residual_stream_activations": {},
+        },
+        path,
+    )
+
+    result = aggregate_activation_file(path, policy)  # type: ignore[arg-type]
+
+    assert result["activations"]["mlp"]["mlp_hidden/1"].item() == expected
+
+
+def test_aggregate_activation_file_rejects_removed_policy() -> None:
+    with pytest.raises(ValueError, match="Unknown aggregation policy"):
+        aggregate_activation_file("unused.pt", "strategy")  # type: ignore[arg-type]

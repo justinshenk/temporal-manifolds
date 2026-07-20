@@ -108,6 +108,7 @@ def download_activation_files(
     gcs_prefix: str | None = DEFAULT_GCS_PREFIX,
     overwrite: bool = False,
     upload_root: str | Path = PROJECT_ROOT,
+    bucket_name: str | None = None,
 ) -> list[Path]:
     """Download activation-cache paths from GCS and return their local paths.
 
@@ -120,20 +121,21 @@ def download_activation_files(
         gcs_prefix: GCS prefix used by the activation-caching pipeline.
         overwrite: Download files that already exist locally when true.
         upload_root: Local root used to derive pipeline-relative GCS object names.
+        bucket_name: GCS bucket to download from. Defaults to ``GCS_BUCKET_NAME``.
     """
     load_dotenv(PROJECT_ROOT / ".env")
     project_id = os.getenv("GCP_PROJECT_ID")
     if not project_id:
         raise ValueError("GCP_PROJECT_ID must be set in the repository .env file.")
-    bucket_name = os.getenv("GCS_BUCKET_NAME")
-    if not bucket_name:
+    resolved_bucket_name = bucket_name or os.getenv("GCS_BUCKET_NAME")
+    if not resolved_bucket_name:
         raise ValueError("GCS_BUCKET_NAME must be set in the repository .env file.")
 
     local_paths = [Path(path) for path in activation_paths]
     if not local_paths:
         return []
 
-    bucket = _authenticated_gcs_client(project_id).bucket(bucket_name)
+    bucket = _authenticated_gcs_client(project_id).bucket(resolved_bucket_name)
     for local_path in local_paths:
         if local_path.is_file() and not overwrite:
             continue
