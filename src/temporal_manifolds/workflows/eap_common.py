@@ -152,8 +152,13 @@ def default_scenario_config_path(
     raise ValueError(f"No default scenario config for workflow: {definition.workflow_name}")
 
 
-def read_scenario_gcs_prefix(scenario_config: Path) -> str:
-    """Read the GCS prefix from a scenario YAML file under configs/scenarios."""
+def read_scenario_gcs_prefix(
+    scenario_config: Path,
+    *,
+    key: str = "gcs_prefix",
+    fallback_key: str | None = None,
+) -> str:
+    """Read a GCS prefix from a scenario YAML file under configs/scenarios."""
     scenario_config = scenario_config.resolve()
     scenario_root = DEFAULT_SCENARIO_DIR.resolve()
     try:
@@ -168,7 +173,14 @@ def read_scenario_gcs_prefix(scenario_config: Path) -> str:
     if not isinstance(scenario, dict):
         raise TypeError(f"Scenario config must be a mapping: {scenario_config}")
 
-    raw_prefix = scenario.get("gcs_prefix", scenario.get("gcs-prefix", ""))
+    dashed_key = key.replace("_", "-")
+    raw_prefix = scenario.get(key, scenario.get(dashed_key))
+    if raw_prefix is None and fallback_key is not None:
+        dashed_fallback_key = fallback_key.replace("_", "-")
+        raw_prefix = scenario.get(
+            fallback_key,
+            scenario.get(dashed_fallback_key, ""),
+        )
     return "" if raw_prefix is None else str(raw_prefix)
 
 
@@ -341,6 +353,15 @@ def run_workflow(config: WorkflowConfig) -> None:
         config.compute_gradient_at,
     )
     gcs_prefix = read_scenario_gcs_prefix(scenario_config) if config.save_to_gcp else ""
+    artifact_gcs_prefix = (
+        read_scenario_gcs_prefix(
+            scenario_config,
+            key="artifact_gcs_prefix",
+            fallback_key="gcs_prefix",
+        )
+        if config.save_to_gcp
+        else ""
+    )
 
     if config.includes_stage(definition.attribution_stage):
         run_attribution_stage(
@@ -370,7 +391,7 @@ def run_workflow(config: WorkflowConfig) -> None:
         upload_files_to_gcs(
             top_component_artifacts,
             enabled=config.save_to_gcp,
-            prefix=gcs_prefix,
+            prefix=artifact_gcs_prefix,
             upload_root=REPO_ROOT,
         )
 
@@ -385,7 +406,7 @@ def run_workflow(config: WorkflowConfig) -> None:
         upload_files_to_gcs(
             selected_node_artifacts,
             enabled=config.save_to_gcp,
-            prefix=gcs_prefix,
+            prefix=artifact_gcs_prefix,
             upload_root=REPO_ROOT,
         )
 

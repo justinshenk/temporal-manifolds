@@ -1,0 +1,13 @@
+workflow: eap-ig
+gcs_prefix: "eap-ig"
+artifact_gcs_prefix: "eap-ig-selected-100"
+args:
+  modules:
+  - eap-ig
+  - top-components
+  - node-selection
+  top-n: 500
+  selection-limit: 100
+  selected-nodes-dir: data/selected_nodes/eap_ig_selected_100
+  compute-completeness: true
+  save-to-gcp: true
