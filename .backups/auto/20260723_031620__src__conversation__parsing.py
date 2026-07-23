@@ -55,11 +55,8 @@ def _parse_duration_years(raw: str) -> float | None:
     text = raw.lower().strip().rstrip(".")
     text = text.replace("approximately", "").replace("about", "").replace("~", "")
     text = text.replace("–", "-").replace("—", "-")
-    # unit-first schedule window: "months 1-2" or "day 2-day 5" -> window length
-    win = re.match(
-        r"^([a-z]+)\s+(\d+(?:\.\d+)?)\s*(?:-|to)\s*(?:[a-z]+\s+)?(\d+(?:\.\d+)?)$",
-        text,
-    )
+    # unit-first schedule window: "months 1-2" -> window length 2 months
+    win = re.match(r"^([a-z]+)\s+(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)$", text)
     if win:
         unit, lo, hi = win.group(1), float(win.group(2)), float(win.group(3))
         try:

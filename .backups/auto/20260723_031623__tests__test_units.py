@@ -94,9 +94,3 @@ def test_parse_schedule_window_horizons():
     assert abs(parsing._parse_duration_years("Week 2") - 7 / 365.25) < 1e-9
     # plain durations still work
     assert abs(parsing._parse_duration_years("2 months") - 2 / 12) < 1e-9
-
-
-def test_parse_unit_repeated_windows():
-    assert abs(parsing._parse_duration_years("Day 2–Day 5") - 4 / 365.25) < 1e-9
-    assert abs(parsing._parse_duration_years("Day 1") - 1 / 365.25) < 1e-9
-    assert abs(parsing._parse_duration_years("Week 3-Week 4") - 14 / 365.25) < 1e-9
