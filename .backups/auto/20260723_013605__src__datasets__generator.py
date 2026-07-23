@@ -29,11 +29,6 @@ Time horizon: <duration of this step>
 
 <detailed plan for this step>
 
-The Time horizon line must be one exact duration for that step alone — a \
-single number and unit such as "3 days" or "6 weeks". Never a range \
-("2-6 months"), a schedule window ("Months 2-6"), or a vague word \
-("ongoing", "immediate").
-
 3. After the final step has been expanded, reply to my next "Continue." with \
 exactly: Plan Completed
 
