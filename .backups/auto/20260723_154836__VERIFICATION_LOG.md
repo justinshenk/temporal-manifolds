@@ -1,21 +1,5 @@
 # Verification Log
 
-## 2026-07-23 — Debug-explorer data/coloring verification + t-SNE
-
-- **Exported PCA coords vs independent recompute** (32B L37 think_close steps
-  slice, n=493): max abs diff 5e-4 = quantization floor, after per-component
-  sign alignment. — VERIFIED
-- **Row metadata vs ground truth**: 200 boundary rows' step_horizon_years
-  cross-checked against conversation.json turns — 0 mismatches. — VERIFIED
-- **Coloring**: example slice has 52 distinct step-horizon values → switched
-  point coloring + legend from 9 quantized bins to continuous interpolated
-  log gradient (user-reported issue confirmed real). Click-through-on-drag
-  bug fixed (drag distance guard). — VERIFIED (data); UI render not
-  re-verified in-browser
-- **t-SNE**: 252 fits exported (per kind × layer × scope × centering,
-  perplexity min(30,(n-1)/3), seed 0, PCA-50 init); index alignment with PCA
-  fits asserted. — VERIFIED
-
 ## 2026-07-23 — v2/v3 exact-step-horizon reruns (step-horizon-first)
 
 - **Protocol change**: step horizons must be one exact duration (no ranges,
