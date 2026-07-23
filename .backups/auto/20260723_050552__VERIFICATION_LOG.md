@@ -1,34 +1,5 @@
 # Verification Log
 
-## 2026-07-23 — v2/v3 exact-step-horizon reruns (step-horizon-first)
-
-- **Protocol change**: step horizons must be one exact duration (no ranges,
-  windows, frequencies). 14B/Llama/Gemma v2 ran with the first wording;
-  Qwen3-32B rebelled ("Day 2–Day 5" windows, verified by reading samples 1-3
-  of run dbee9e1f6749) and was restarted as v3 (run 864237268525) with one
-  strengthened sentence. This wording asymmetry is documented; content
-  otherwise identical. Parser extended for windows + unit-repeated windows
-  (tests added; 50→52 tests pass... final tally checked below).
-- **Format adherence verified by reading samples directly**: 14B first 3
-  samples exact; Llama sample 1 exact; Gemma mostly exact w/ "Ongoing"; 32B v3
-  samples 1-3 exact incl. degenerate 1-day prompt. Coverage counted over ALL
-  samples: 14B 142/147 (97%), Llama 149/149 (100%), Gemma 122/135 (90%),
-  32B 482/493 (98%). — VERIFIED
-- **Behavioral finding**: with exact durations forced, 32B now fits steps
-  within the 1-day total horizon ("1 day" per step) instead of multi-month
-  windows — instruction wording changed constraint-following, not just format.
-- **Step-horizon probes (headline)**: 32B v3 step grouped-CV R²=0.845/ρ=0.94
-  (p=1.3e-220, n=482, L50 think_close); 14B 0.821 (n=142); Gemma 0.796
-  (n=122); Llama 0.745 (n=149). Total-horizon: 32B R²=0.988, others ≥0.96.
-  Read from probe script outputs. — VERIFIED
-- **All four runs**: 20/20, 20/20, 20/20, 72/72, 0 failures (logs read).
-  — VERIFIED
-- **Debug explorer artifact**: re-exported from the four new run ids
-  (round-trip JSON parse checked, node --check on app JS, model/run/sample
-  counts printed and confirmed), republished at same URL. In-browser
-  rendering NOT re-verified this cycle. — VERIFIED (build); UI render
-  UNVERIFIED
-
 ## 2026-07-17 — Multi-stage conversation pipeline (refactor + validation)
 
 - **ChatMarkup registry facts** (turn/think tokens for ChatML/Qwen3/2507/SmolLM2/
