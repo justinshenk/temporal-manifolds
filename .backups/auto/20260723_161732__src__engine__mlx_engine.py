@@ -62,11 +62,6 @@ class MLXEngine(Engine):
                 messages, tokenize=False, add_generation_prompt=add_generation_prompt
             )
 
-    def set_seed(self, seed: int) -> None:
-        import mlx.core as mx
-
-        mx.random.seed(seed)
-
     def generate_ids(
         self,
         input_ids: list[int],

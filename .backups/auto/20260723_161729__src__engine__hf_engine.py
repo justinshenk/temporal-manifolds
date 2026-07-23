@@ -148,9 +148,6 @@ class HFEngine(Engine):
             raise RuntimeError(f"Capture hooks fired for no output at layers {missing}")
         return {k: v.numpy().astype(np.float32) for k, v in captured.items()}
 
-    def set_seed(self, seed: int) -> None:
-        torch.manual_seed(seed)
-
     def unload(self) -> None:
         del self._model
         self._model = None

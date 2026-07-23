@@ -170,7 +170,7 @@ def main() -> int:
             print(f"[run]   FAILED on {prompt.prompt_id}:")
             traceback.print_exc()
 
-    if n_fail == 0 and (n_done + n_skip) == len(jobs):
+    if n_fail == 0 and (n_done + n_skip) == len(prompts):
         store.mark_complete(model_id)
     print(
         f"[run] finished: done={n_done} skipped={n_skip} failed={n_fail} "

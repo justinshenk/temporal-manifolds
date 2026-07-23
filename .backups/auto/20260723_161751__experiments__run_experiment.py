@@ -111,35 +111,28 @@ def main() -> int:
     markup = detect_markup(model_id)
     marker_ids = verify_markup(markup, engine.tokenizer)
     print(f"[run] markup family={markup.family} verified: {marker_ids}")
+    driver = ConversationDriver(engine, markup, protocol)
 
-    from src.conversation.records import make_sample_uid
-
-    jobs = [
-        (prompt, r)
-        for prompt in prompts
-        for r in range(rollouts)
-    ]
     n_done = n_skip = n_fail = 0
     t0 = time.time()
-    for i, (prompt, rollout) in enumerate(jobs):
-        proto_r = ProtocolConfig.from_dict({**protocol.to_dict(), "seed": rollout})
+    for i, prompt in enumerate(prompts):
+        from src.conversation.records import make_sample_uid
+
         uid = make_sample_uid(
             prompt.prompt_id,
             model_id,
             prompt.target_horizon_years,
-            proto_r.to_dict(),
-            proto_r.seed,
+            protocol.to_dict(),
+            protocol.seed,
         )
         if not args.force and store.has_sample(model_id, uid):
             n_skip += 1
             continue
         print(
-            f"[run] ({i + 1}/{len(jobs)}) {prompt.prompt_id} r{rollout} "
+            f"[run] ({i + 1}/{len(prompts)}) {prompt.prompt_id} "
             f"(horizon={prompt.target_horizon.value} {prompt.target_horizon.unit})"
         )
         try:
-            engine.set_seed(rollout)
-            driver = ConversationDriver(engine, markup, proto_r)
             record = driver.run(prompt)
             bmap, depth_to_layer, acts = extract_boundary_activations(
                 engine, markup, record, depths
@@ -170,7 +163,7 @@ def main() -> int:
             print(f"[run]   FAILED on {prompt.prompt_id}:")
             traceback.print_exc()
 
-    if n_fail == 0 and (n_done + n_skip) == len(jobs):
+    if n_fail == 0 and (n_done + n_skip) == len(prompts):
         store.mark_complete(model_id)
     print(
         f"[run] finished: done={n_done} skipped={n_skip} failed={n_fail} "

@@ -71,8 +71,5 @@ class Engine(ABC):
         at token p (TransformerLens `resid_post` convention).
         """
 
-    def set_seed(self, seed: int) -> None:
-        """Seed the sampling RNG (reproducible temperature>0 rollouts)."""
-
     def unload(self) -> None:  # optional
         pass
