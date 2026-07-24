@@ -263,3 +263,8 @@
 - WHAT: verifier re-opened manifest, all 100 boundaries + npz programmatically, 10 conversations deep-read.
 - RESULT: VERIFIED all aspects — 100 samples 1:1 with manifest, correct prompts per sample, gemma markup token ids match token_ids[abs_pos] with 0 mismatches, activations exactly {L16,L24,L33} x boundaries, all finite float32 d=3584. Caveats (honest model behavior): 24 samples with non-numeric target lines (mostly dinner_party "Tonight"/"Tomorrow"; note "Year N" forms DO parse in our target-mode parser), 15 samples overshoot horizon, 1 completed=False. Downstream filters already exclude unparsed/zero.
 - ALSO: Gemma CONTROL run 87b32dddd585 launched; first sample re-opened and read: 9/9 steps time-silent, assignments parse 7/9 (2 "Ongoing" honestly unparsed).
+
+## 2026-07-24 — Llama control run finished + probe recovery analysis
+- WHAT: run 397e77f6a867 complete (100 samples, 746/757 steps with parsed assigned targets, 608 time-silent). probe_control.py written and run; results saved to output/runs/397e77f6a867/.../figures/probe_control_results.json.
+- HOW: re-opened all conversations/npz (100/100 non-empty); ran analysis and read full printed table; baselines computed (step-index, total-horizon, within-conversation demeaned).
+- RESULT: VERIFIED. Transfer probe (trained on stated targets) on silent steps: pooled R2=0.80/rho=0.90 (L12 turn_start), silent subset R2=0.81 > cadence subset — not driven by leaks. Caveat honestly noted: total-horizon-only baseline gets pooled R2=0.84, so pooled recovery mostly reflects the total-horizon code; the novel finding is within-conversation ordinal recovery: median Spearman 0.73, 67/79 conversations positive; magnitude calibration within-plan poor (negative demeaned R2).
