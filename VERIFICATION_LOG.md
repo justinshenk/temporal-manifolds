@@ -244,3 +244,8 @@
 - WHAT: 52 prompts x 5 rollouts each, step_mode=target, max_assistant_turns=24, MLX 4-bit, running in parallel; Qwen-32B queued for after.
 - HOW: both logs show correct run_id/model/prompt count; per-sample monitors + first-sample compliance checks armed.
 - RESULT: IN PROGRESS (outputs UNVERIFIED until runs finish and are inspected).
+
+## 2026-07-24 — Sensible-grid TARGET runs relaunched + control mode added
+- WHAT: (a) killed full-grid target runs (absurd pairings); relaunched with per-task horizons (20 prompts x 5 rollouts = 100/model): Llama run bcd154c149fb, Gemma run 19665970da25. (b) Aborted run dirs 57ea1d7cacbb, 73a3c5ec77c2 remain on disk (1 partial sample) — ignore. (c) Added step_mode=target_control (silent steps, final "Time assignments:" turn) + store backfill with horizon_source tag.
+- HOW: first sample of each relaunched run re-opened and read: both models emit parsable "Time target:" lines, non-decreasing (VERIFIED for those 2 samples; rest in progress). Control mode: 4 new unit tests pass (assignment parsing, no cross-contamination with step turns, prompt rendering); full suite 53+4 passed. Control runs NOT yet executed — store backfill on real data UNVERIFIED until first control run.
+- RESULT: runs IN PROGRESS; control code VERIFIED at unit level.
