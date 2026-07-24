@@ -235,11 +235,13 @@ class ResponseStore:
                         turn = record.turns[b.turn_index]
                         step_horizon = turn.step_horizon_years
                         if step_horizon is None and turn.step_horizon_text:
-                            # stored raw text; parser may have improved since
+                            # stored raw text; parser may have improved since.
+                            # Mode is recoverable from the prompt instructions.
                             from ..conversation.parsing import _parse_duration_years
 
+                            tmode = "Time target:" in (record.turns[0].text or "")
                             step_horizon = _parse_duration_years(
-                                turn.step_horizon_text
+                                turn.step_horizon_text, target_mode=tmode
                             )
                     for lay in wanted_layers:
                         key = f"L{lay}_p{b.abs_pos}"

@@ -120,3 +120,12 @@ def test_target_mode_and_task_horizons():
     # parser accepts the new header
     raw, years = parsing.parse_step_horizon("Time target: 5 years")
     assert raw == "5 years" and abs(years - 5) < 1e-9
+
+
+def test_mode_aware_parsing():
+    # target mode: slot form = future offset; compound values sum
+    assert abs(parsing.parse_step_horizon("Time target: Year 2")[1] - 2.0) < 1e-9
+    assert abs(parsing.parse_step_horizon("Time target: 1 year, 6 months")[1] - 1.5) < 1e-9
+    # duration mode: slot form stays a 1-unit schedule slot (old data unchanged)
+    assert abs(parsing.parse_step_horizon("Time horizon: Year 2")[1] - 1.0) < 1e-9
+    assert abs(parsing.parse_step_horizon("Time horizon: 3 weeks")[1] - 21 / 365.25) < 1e-9

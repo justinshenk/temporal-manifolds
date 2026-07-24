@@ -17,7 +17,7 @@ import re
 from ..core.time_value import TimeValue
 
 STEP_RE = re.compile(r"^\s*Step:\s*(\d+)", re.MULTILINE)
-HORIZON_RE = re.compile(r"^\s*Time (?:horizon|target):\s*(.+?)\s*$", re.MULTILINE)
+HORIZON_RE = re.compile(r"^\s*Time (horizon|target):\s*(.+?)\s*$", re.MULTILINE)
 PLAN_COMPLETED_RE = re.compile(r"plan\s+completed", re.IGNORECASE)
 # overview lines like "3. Secure funding (6 months)" or "- Step 2: ... (2 weeks)"
 OVERVIEW_STEP_RE = re.compile(r"^\s*(?:\d+[.)]|[-*])\s+", re.MULTILINE)
@@ -40,21 +40,37 @@ def parse_step_index(text: str) -> int | None:
 
 
 def parse_step_horizon(text: str) -> tuple[str | None, float | None]:
-    """Return (raw horizon text, parsed years) of the FIRST 'Time horizon:' line."""
+    """Return (raw text, parsed years) of the first 'Time horizon/target:' line.
+
+    The header word carries the semantics: 'Time target:' values are future
+    offsets, where slot-forms like 'Year 2' mean 2 years out; 'Time horizon:'
+    values are durations, where 'Year 2' is a schedule slot (1 year)."""
     m = HORIZON_RE.search(text)
     if not m:
         return None, None
-    raw = m.group(1)
-    years = _parse_duration_years(raw)
+    raw = m.group(2)
+    years = _parse_duration_years(raw, target_mode=m.group(1) == "target")
     return raw, years
 
 
-def _parse_duration_years(raw: str) -> float | None:
+def _parse_duration_years(raw: str, target_mode: bool = False) -> float | None:
     """Parse free-ish durations: '2 months', '~3 weeks', '1-2 years', '6 mo',
-    and schedule-window styles: 'Months 1–2' (=2 months), 'Year 3' (=1 year)."""
+    compounds '1 year, 6 months', and schedule-window styles: 'Months 1–2'
+    (=2 months), 'Year 3' (=1 year as a slot; =3 years as a future target)."""
     text = raw.lower().strip().rstrip(".")
     text = text.replace("approximately", "").replace("about", "").replace("~", "")
     text = text.replace("–", "-").replace("—", "-")
+    # compound: "1 year, 6 months" / "1 year and 6 months"
+    comp = re.match(
+        r"^(\d+(?:\.\d+)?)\s*([a-z]+)(?:\s*,\s*|\s+and\s+)(\d+(?:\.\d+)?)\s*([a-z]+)$",
+        text,
+    )
+    if comp:
+        try:
+            return (TimeValue(float(comp.group(1)), comp.group(2)).to_years()
+                    + TimeValue(float(comp.group(3)), comp.group(4)).to_years())
+        except ValueError:
+            pass
     # unit-first schedule window: "months 1-2" or "day 2-day 5" -> window length
     win = re.match(
         r"^([a-z]+)\s+(\d+(?:\.\d+)?)\s*(?:-|to)\s*(?:[a-z]+\s+)?(\d+(?:\.\d+)?)$",
@@ -66,11 +82,13 @@ def _parse_duration_years(raw: str) -> float | None:
             return TimeValue(max(hi - lo + 1, 1.0), unit).to_years()
         except ValueError:
             pass
-    # unit-first single slot: "month 3" -> 1 month
+    # unit-first single slot: "month 3" — duration mode: slot 3 (1 month);
+    # target mode: 3 months into the future
     slot = re.match(r"^([a-z]+)\s+(\d+(?:\.\d+)?)$", text)
     if slot:
         try:
-            return TimeValue(1.0, slot.group(1)).to_years()
+            value = float(slot.group(2)) if target_mode else 1.0
+            return TimeValue(value, slot.group(1)).to_years()
         except ValueError:
             pass
     # ranges: take the midpoint
