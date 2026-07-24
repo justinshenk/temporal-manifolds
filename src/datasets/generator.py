@@ -13,10 +13,37 @@ from .phrasings import DEFAULT_PHRASINGS, HorizonPhrasing
 from .schema import PlanningPrompt, PlanningPromptDataset, PlanningTask
 from .tasks import CORE_TASKS
 
-# The response-format contract. Kept simple and rigid so that:
-#  - step headers are trivially parsable (Step: N / Time horizon: ...),
-#  - the model closes with the literal sentinel "Plan Completed",
-#  - it reads clearly to humans.
+# The response-format contract. Two step-time semantics are supported:
+#   "duration" — Time horizon: how long the step takes (original protocol)
+#   "target"   — Time target: how far into the future the step's outcome lies,
+#                measured from the start of the plan (cumulative offset; should
+#                be non-decreasing across steps)
+RESPONSE_FORMAT_INSTRUCTIONS_TARGET = """Response format (follow it strictly):
+1. In this first reply, give only the high-level plan: a one-line goal \
+restatement, then the numbered list of step titles, each with the rough \
+point in the future it aims at, in parentheses. Do not detail any step yet.
+2. Each time I reply "Continue.", expand exactly one step, in order, using \
+this exact header format:
+
+Step: <number>
+Time target: <how far into the future this step's outcome lies>
+
+<detailed plan for this step>
+
+The Time target line states WHEN, counted from today, this step's outcome \
+is reached — not how long the step takes. It must be one exact offset with \
+a single number and unit, such as "3 weeks" or "5 years". Never a range, a \
+calendar date, a duration of work, or a vague word ("soon", "ongoing"). \
+Because steps move the plan forward, each step's time target should be at \
+or beyond the previous step's.
+
+3. After the final step has been expanded, reply to my next "Continue." with \
+exactly: Plan Completed
+
+Important: reply one message at a time and then stop. Never write "Continue." \
+yourself, never expand more than one step per message, and never write \
+"Plan Completed" in the same message as a step."""
+
 RESPONSE_FORMAT_INSTRUCTIONS = """Response format (follow it strictly):
 1. In this first reply, give only the high-level plan: a one-line goal \
 restatement, then the numbered list of step titles with the rough time \
@@ -57,13 +84,21 @@ Objective:
 
 
 def render_prompt_text(
-    task: PlanningTask, phrasing: HorizonPhrasing, horizon: TimeValue
+    task: PlanningTask,
+    phrasing: HorizonPhrasing,
+    horizon: TimeValue,
+    step_mode: str = "duration",
 ) -> str:
+    fmt = (
+        RESPONSE_FORMAT_INSTRUCTIONS_TARGET
+        if step_mode == "target"
+        else RESPONSE_FORMAT_INSTRUCTIONS
+    )
     return PROMPT_TEMPLATE.format(
         scenario=task.scenario,
         task_description=task.description,
         horizon_sentence=phrasing.render(horizon),
-        response_format=RESPONSE_FORMAT_INSTRUCTIONS,
+        response_format=fmt,
     )
 
 
@@ -73,17 +108,20 @@ def build_dataset(
     horizons: tuple[TimeValue, ...] = (),
     phrasings: tuple[HorizonPhrasing, ...] = DEFAULT_PHRASINGS[:1],
     seed: int = 0,
+    step_mode: str = "duration",
+    task_horizons: dict[str, tuple[TimeValue, ...]] | None = None,
 ) -> PlanningPromptDataset:
     """Cross tasks × horizons × phrasings into a PlanningPromptDataset.
 
+    `task_horizons` overrides `horizons` per task_id (task-appropriate sweeps).
     prompt_id = "{task_id}__{value}{unit}__{phrasing_id}" — human-readable and
     unique within a dataset.
     """
-    if not horizons:
+    if not horizons and not task_horizons:
         raise ValueError("Provide at least one target horizon")
     prompts: list[PlanningPrompt] = []
     for task in tasks:
-        for horizon in horizons:
+        for horizon in (task_horizons or {}).get(task.task_id, horizons):
             for phrasing in phrasings:
                 value_str = (
                     str(int(horizon.value))
@@ -97,7 +135,7 @@ def build_dataset(
                         task_id=task.task_id,
                         phrasing_id=phrasing.phrasing_id,
                         target_horizon=horizon,
-                        text=render_prompt_text(task, phrasing, horizon),
+                        text=render_prompt_text(task, phrasing, horizon, step_mode),
                     )
                 )
     return PlanningPromptDataset(

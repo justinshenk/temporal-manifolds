@@ -53,7 +53,13 @@ def build_prompt_dataset(cfg: dict):
         if cfg.get("tasks")
         else CORE_TASKS
     )
-    horizons = horizons_from_specs(cfg["horizons"])
+    horizons = horizons_from_specs(cfg.get("horizons", []))
+    task_horizons = None
+    if cfg.get("task_horizons"):
+        task_horizons = {
+            tid: horizons_from_specs(specs)
+            for tid, specs in cfg["task_horizons"].items()
+        }
     phrasings = (
         tuple(get_phrasing(p) for p in cfg["phrasings"])
         if cfg.get("phrasings")
@@ -65,6 +71,8 @@ def build_prompt_dataset(cfg: dict):
         horizons=horizons,
         phrasings=phrasings,
         seed=cfg.get("protocol", {}).get("seed", 0),
+        step_mode=cfg.get("step_mode", "duration"),
+        task_horizons=task_horizons,
     )
 
 
@@ -89,6 +97,7 @@ def main() -> int:
         {
             "name": cfg["name"],
             "rollouts": rollouts,
+            "step_mode": cfg.get("step_mode", "duration"),
             # hash the ACTUAL prompt texts so any template/phrasing change
             # produces a fresh run instead of silently resuming stale samples
             "prompts": {p.prompt_id: p.text for p in dataset.prompts},

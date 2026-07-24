@@ -17,7 +17,7 @@ import re
 from ..core.time_value import TimeValue
 
 STEP_RE = re.compile(r"^\s*Step:\s*(\d+)", re.MULTILINE)
-HORIZON_RE = re.compile(r"^\s*Time horizon:\s*(.+?)\s*$", re.MULTILINE)
+HORIZON_RE = re.compile(r"^\s*Time (?:horizon|target):\s*(.+?)\s*$", re.MULTILINE)
 PLAN_COMPLETED_RE = re.compile(r"plan\s+completed", re.IGNORECASE)
 # overview lines like "3. Secure funding (6 months)" or "- Step 2: ... (2 weeks)"
 OVERVIEW_STEP_RE = re.compile(r"^\s*(?:\d+[.)]|[-*])\s+", re.MULTILINE)

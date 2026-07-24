@@ -1,0 +1,21 @@
+{
+  "name": "sweep32b_target",
+  "model": "mlx-community/Qwen3-32B-4bit",
+  "backend": "mlx",
+  "tasks": ["climate_city", "marathon"],
+  "step_mode": "target",
+  "task_horizons": {
+    "climate_city": ["2 years", "5 years", "10 years", "20 years", "50 years"],
+    "marathon": ["6 weeks", "3 months", "6 months", "1 years"]
+  },
+  "phrasings": ["available_time"],
+  "depths": [0.4, 0.6, 0.8],
+  "rollouts": 5,
+  "protocol": {
+    "max_assistant_turns": 24,
+    "max_new_tokens_per_turn": 700,
+    "temperature": 0.7,
+    "thinking_mode": "disabled",
+    "seed": 0
+  }
+}

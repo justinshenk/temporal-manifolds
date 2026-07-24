@@ -100,3 +100,23 @@ def test_parse_unit_repeated_windows():
     assert abs(parsing._parse_duration_years("Day 2–Day 5") - 4 / 365.25) < 1e-9
     assert abs(parsing._parse_duration_years("Day 1") - 1 / 365.25) < 1e-9
     assert abs(parsing._parse_duration_years("Week 3-Week 4") - 14 / 365.25) < 1e-9
+
+
+def test_target_mode_and_task_horizons():
+    from src.datasets.generator import build_dataset
+    from src.datasets.tasks import get_task
+    ds = build_dataset(
+        "t2",
+        tasks=(get_task("climate_city"), get_task("marathon")),
+        step_mode="target",
+        task_horizons={
+            "climate_city": horizons_from_specs(["2 years", "5 years"]),
+            "marathon": horizons_from_specs(["6 weeks"]),
+        },
+    )
+    assert len(ds.prompts) == 3
+    assert "Time target:" in ds.prompts[0].text
+    assert "not how long the step takes" in ds.prompts[0].text
+    # parser accepts the new header
+    raw, years = parsing.parse_step_horizon("Time target: 5 years")
+    assert raw == "5 years" and abs(years - 5) < 1e-9
