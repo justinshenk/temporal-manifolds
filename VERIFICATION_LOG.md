@@ -254,3 +254,7 @@
 - WHAT: (a) run bcd154c149fb complete. (b) Llama CONTROL run 397e77f6a867 launched; first sample verified.
 - HOW: (a) re-opened all 100 conversations + npz: manifest complete, 100/100 non-empty npz, 99/100 completed, 675/703 targets parsed, monotone 85/100, last/total median 1.00; independent verifier agent also spawned (report pending). (b) read first control conversation in full: 9 step turns with ZERO time words (regex-checked), assignments turn parses; ran store.query on the real sample — step rows return backfilled horizons with horizon_source='assigned' matching the assignment turn exactly.
 - RESULT: target run VERIFIED (data-level, verifier report pending); control protocol + backfill VERIFIED on sample 1; remaining control samples IN PROGRESS.
+
+## 2026-07-24 — Independent verifier report: Llama-8B target run bcd154c149fb
+- WHAT: verifier agent re-opened manifest, 10 random conversations, all 100 boundaries.json, and every key of all 100 npz files.
+- RESULT: VERIFIED on all aspects. Manifest complete (20 prompts x 5 rollouts, 1:1 with disk); every step turn in all 100 samples has a "Time target:" line; activations all finite float32 d=4096, layers {12,18,25}, key count = 3 x boundaries everywhere. Flags: (a) depth 0.6 -> layer 18 matches the project convention round(0.6*32)-1 (my brief mis-stated 19 — the run is correct); (b) sample 3970e34ec2703601 never emitted "Plan Completed" (turn-capped, completed=false) — keep, it is honest data; (c) 21 steps in 11 samples slightly overshoot the horizon — model behavior, faithfully recorded.
