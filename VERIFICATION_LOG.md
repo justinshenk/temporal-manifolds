@@ -1,5 +1,24 @@
 # Verification Log
 
+## 2026-07-24 — Target-semantics sweep (run 383cb5f89bda)
+
+- **Run**: 45/45 done 0 failed (~97 min; log read). step_mode=target ("Time
+  target" = future offset), all steps expanded (max 24 assistant turns; plans
+  up to 12 steps fully collected), 2 tasks × task-appropriate horizons ×
+  5 rollouts @T0.7. 4/45 conversations expanded all steps but never emitted
+  "Plan Completed" and ran to the 48-turn cap (benign; steps intact).
+- **Semantics adopted** (computed from stored raw text with the mode-aware
+  parser; 53 tests pass): 93% of conversations have perfectly monotone
+  non-decreasing target sequences; median last-target/total = 1.00 with 95%
+  within ±20% — plans land on their horizon.
+- **The turn-tracking question resolved by design**: pooled corr(turn index,
+  log step target) = 0.52 (p=4e-23) vs 0.10 for duration mode — targets are
+  cumulative, so step time now tracks conversation position, as intended.
+- **Probes**: step-target grouped-CV R²=0.822/ρ=0.91 (n=316, p=4e-121, L25
+  role); total R²=1.000. Raw PCA: step target on PC2 rho=0.70 (p=2e-48,
+  n=482) — step-time now visible in raw PCA, unlike duration mode. — VERIFIED
+  (script outputs read)
+
 ## 2026-07-24 — MFA region decomposition (arXiv:2602.02464 method on our data)
 
 - **turn-vs-fraction check**: Spearman(turn index, step/total fraction) = 0.02
