@@ -268,3 +268,8 @@
 - WHAT: run 397e77f6a867 complete (100 samples, 746/757 steps with parsed assigned targets, 608 time-silent). probe_control.py written and run; results saved to output/runs/397e77f6a867/.../figures/probe_control_results.json.
 - HOW: re-opened all conversations/npz (100/100 non-empty); ran analysis and read full printed table; baselines computed (step-index, total-horizon, within-conversation demeaned).
 - RESULT: VERIFIED. Transfer probe (trained on stated targets) on silent steps: pooled R2=0.80/rho=0.90 (L12 turn_start), silent subset R2=0.81 > cadence subset — not driven by leaks. Caveat honestly noted: total-horizon-only baseline gets pooled R2=0.84, so pooled recovery mostly reflects the total-horizon code; the novel finding is within-conversation ordinal recovery: median Spearman 0.73, 67/79 conversations positive; magnitude calibration within-plan poor (negative demeaned R2).
+
+## 2026-07-24 — Gemma control finished + probe recovery replicated; 32B target launched
+- WHAT: Gemma control run 87b32dddd585 complete; probe_control run; Qwen3-32B target run 74c172105e25 started.
+- HOW: re-opened all 100 conversations + npz (100/100 non-empty, 100/100 completed); ran probe_control and read full table; within-conversation analysis run at L16 turn_start.
+- RESULT: VERIFIED. Gemma transfer probe on silent steps: R2=0.81 rho=0.92 (L16 turn_start), silent subset 0.82 >= cadence 0.69 — replicates Llama. Within-conversation ordinal recovery: median Spearman 0.64, 34/41 convs positive. LOTO negative for Gemma (task-entangled). Results JSON saved under the control run's figures dir.
