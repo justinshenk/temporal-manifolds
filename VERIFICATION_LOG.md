@@ -1,5 +1,14 @@
 # Verification Log
 
+## 2026-07-24 — Explorer: six entries published
+
+- Six-entry export verified before publish: entry order/default correct
+  (rollout default), target entry 45 samples seeds [0..4], MFA re-attached
+  (assert), JSON roundtrip + node --check; payload trimmed to 15.2MB (big
+  two entries lost '+user' fits, raw-centering fits, and assistant-scope
+  t-SNE/UMAP — first/steps scopes and all task-centered PCA intact).
+  Republished same URL. In-browser render not re-verified. — VERIFIED (build)
+
 ## 2026-07-24 — Target-semantics sweep (run 383cb5f89bda)
 
 - **Run**: 45/45 done 0 failed (~97 min; log read). step_mode=target ("Time

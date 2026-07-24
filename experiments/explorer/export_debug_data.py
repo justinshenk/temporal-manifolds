@@ -25,6 +25,8 @@ from src.conversation.parsing import _parse_duration_years
 MODELS = [
     ("Qwen3-32B ×5 @T0.7", "4-bit · MLX · T0.7 · 5 rollouts", "9ccf36267612",
      "mlx-community/Qwen3-32B-4bit", True),
+    ("Qwen3-32B targets ×5", "4-bit · MLX · T0.7 · target mode", "383cb5f89bda",
+     "mlx-community/Qwen3-32B-4bit", False),
     ("Qwen3-32B", "4-bit · MLX", "864237268525", "mlx-community/Qwen3-32B-4bit", False),
     ("Qwen3-14B", "bf16 · HF/MPS", "d196f33fb864", "Qwen/Qwen3-14B", False),
     ("Llama-3.1-8B", "bf16 · HF/MPS", "4940b5401c34", "meta-llama/Llama-3.1-8B-Instruct", False),
