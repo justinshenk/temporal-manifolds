@@ -1,5 +1,22 @@
 # Verification Log
 
+## 2026-07-24 — MFA region decomposition (arXiv:2602.02464 method on our data)
+
+- **turn-vs-fraction check**: Spearman(turn index, step/total fraction) = 0.02
+  (p=0.44, n=1752) — computed directly; the two variables are independent in
+  this data (user's tracking assumption disconfirmed with numbers).
+- **MFA fit** (authors' released implementation, cloned repo; K=24, rank 8,
+  30 epochs, k-means init per paper recipe) on 10,965 assistant boundary
+  activations at L37 of the 32B rollout run: NLL 4947→3766 (converging).
+  Results read from script output; saved to figures/mfa_regions.json +
+  mfa_assignment.npz. — VERIFIED (run + outputs read); NLL not fully
+  converged (30 epochs, small-scale adaptation of a 100M-point method)
+- **Findings**: regions are 100% pure in token kind (NMI 0.71) and organized
+  by conversation phase (NMI 0.40); task NMI 0.005, total-horizon NMI 0.004.
+  In 18/24 regions a local factor correlates with log step horizon
+  (|rho| 0.30-0.59). Region=structure, local-direction=time — consistent
+  with both the paper's claim and our probe results.
+
 ## 2026-07-24 — 32B rollout expansion (13 horizons × 4 tasks × 5 seeds @ T0.7)
 
 - **Run 9ccf36267612**: 260/260 done, 0 failed, ~7.6h (log read; per-sample
