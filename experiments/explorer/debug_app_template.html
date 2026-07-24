@@ -356,7 +356,9 @@ function uniqueHorizons(){
 }
 function glyphOf(sample){ return TASK_GLYPH[sample.task] || "circle"; }
 
-const KIND_UI_ORDER = ["turn_start","role","think_open","think_close","turn_end"];
+// order of the turn-transition sequence as the model encounters it:
+// <turn_end> -> <turn_start> -> role -> <think> -> </think>
+const KIND_UI_ORDER = ["turn_end","turn_start","role","think_open","think_close"];
 function renderGeo(){
   const g = state.geo;
   const kinds = Object.keys(M().kinds).sort(
