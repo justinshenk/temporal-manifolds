@@ -249,3 +249,8 @@
 - WHAT: (a) killed full-grid target runs (absurd pairings); relaunched with per-task horizons (20 prompts x 5 rollouts = 100/model): Llama run bcd154c149fb, Gemma run 19665970da25. (b) Aborted run dirs 57ea1d7cacbb, 73a3c5ec77c2 remain on disk (1 partial sample) — ignore. (c) Added step_mode=target_control (silent steps, final "Time assignments:" turn) + store backfill with horizon_source tag.
 - HOW: first sample of each relaunched run re-opened and read: both models emit parsable "Time target:" lines, non-decreasing (VERIFIED for those 2 samples; rest in progress). Control mode: 4 new unit tests pass (assignment parsing, no cross-contamination with step turns, prompt rendering); full suite 53+4 passed. Control runs NOT yet executed — store backfill on real data UNVERIFIED until first control run.
 - RESULT: runs IN PROGRESS; control code VERIFIED at unit level.
+
+## 2026-07-24 — Llama-8B TARGET run finished + CONTROL run validated
+- WHAT: (a) run bcd154c149fb complete. (b) Llama CONTROL run 397e77f6a867 launched; first sample verified.
+- HOW: (a) re-opened all 100 conversations + npz: manifest complete, 100/100 non-empty npz, 99/100 completed, 675/703 targets parsed, monotone 85/100, last/total median 1.00; independent verifier agent also spawned (report pending). (b) read first control conversation in full: 9 step turns with ZERO time words (regex-checked), assignments turn parses; ran store.query on the real sample — step rows return backfilled horizons with horizon_source='assigned' matching the assignment turn exactly.
+- RESULT: target run VERIFIED (data-level, verifier report pending); control protocol + backfill VERIFIED on sample 1; remaining control samples IN PROGRESS.
