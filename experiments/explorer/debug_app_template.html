@@ -242,14 +242,25 @@ function wirePrompts(){
 }
 
 /* ---------- tab 2: conversation ---------- */
+function predChip(t){
+  // activation probe's read-out of this step's horizon vs what the model wrote
+  let verdict = "";
+  if (t.shYears){
+    const r = t.predY / t.shYears;
+    if (r >= 1/1.3 && r <= 1.3) verdict = " — matches";
+    else if (r > 1) verdict = ` — ${Number(r.toPrecision(2))}× longer than written`;
+    else verdict = ` — ${Number((1/r).toPrecision(2))}× shorter than written`;
+  }
+  return `<span class="chipx" style="border-color:var(--accent)">activations decode to: <b>${fmtYears(t.predY)}</b>${verdict}</span>`;
+}
 function renderConv(){
   const s = M().samples[state.sample];
   const turns = s.turns.map(t => {
     const meta = t.role === "assistant" ? `
       <div class="turnmeta">
         ${t.step != null ? `<span class="chipx">Step ${t.step}</span>` : `<span class="chipx">${t.i===1?"overview":"—"}</span>`}
-        ${t.shText ? `<span class="chipx">stated “${esc(t.shText)}” → ${fmtYears(t.shYears)}</span>` : ""}
-        ${t.predY != null ? `<span class="chipx" style="border-color:var(--accent)">probe reads ≈ <b>${fmtYears(t.predY)}</b>${t.shYears?` (${Number((t.predY/t.shYears).toPrecision(2))}× stated)`:""}</span>` : ""}
+        ${t.shText ? `<span class="chipx">model wrote: <b>${fmtYears(t.shYears)}</b> (“${esc(t.shText)}”)</span>` : ""}
+        ${t.predY != null ? predChip(t) : ""}
         ${t.trunc ? `<span class="chipx warn">truncated</span>` : ""}
         ${t.forced ? `<span class="chipx warn">think force-closed</span>` : ""}
       </div>` : "";
