@@ -693,6 +693,11 @@ function renderMfa(){
     instead appears as a <b>local direction inside regions</b>: in most regions one of the ${mfa.rank} local
     factors correlates with log step horizon (last column). Use color = "MFA region" in the Geometry tab
     to see the regions against the horizon gradient.</p>
+    ${mfa.viz ? `<div class="panelbox" style="margin-bottom:16px"><div class="panelhead">activation space by region —
+      pooled PCA-3D of all ${mfa.n} boundary tokens · ● = region centroids · labels = step horizons written at sampled points
+      <span class="evr" style="margin-left:10px">EVR ${mfa.viz.evr.map(v=>(v*100).toFixed(0)+"%").join(" · ")}</span></div>
+      <div style="padding:8px"><canvas id="mfa3d" style="width:100%;height:440px;background:var(--surface);border-radius:6px;cursor:grab;touch-action:none"></canvas>
+      <div class="hint" style="margin-top:6px">drag to rotate · wheel to zoom — the paper-style view: each Gaussian region is one colored cloud (here: one token-kind × phase cell), and time-horizon labels scatter <i>within</i> clouds rather than across them</div></div></div>` : ""}
     <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
       <div class="panelbox"><div class="panelhead">region map — where regions live (dot area = size)</div>
         <div style="padding:10px 14px">${mfaRegionMap(mfa)}</div></div>
@@ -774,8 +779,67 @@ function drawMfaScatter(regId){
   if (rho) rho.textContent = lf ? `n=${pts.length} · Spearman ρ=${lf.rho>0?"+":""}${lf.rho.toFixed(2)} (factor z${lf.factor})` : `n=${pts.length}`;
 }
 
+let mfaRot = {x:-0.4, y:0.7}, mfaZoom = 1.0;
+function drawMfa3d(){
+  const mfa = M().mfa, cv = document.getElementById("mfa3d");
+  if (!mfa || !mfa.viz || !cv) return;
+  const viz = mfa.viz, K = mfa.K;
+  const dpr = devicePixelRatio||1, w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w*dpr){ cv.width = w*dpr; cv.height = h*dpr; }
+  const ctx = cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  const style = getComputedStyle(document.documentElement);
+  const cx=w/2, cy=h/2, S=Math.min(w,h)*0.30*mfaZoom, D=4.2;
+  const cX=Math.cos(mfaRot.x), sX=Math.sin(mfaRot.x), cY=Math.cos(mfaRot.y), sY=Math.sin(mfaRot.y);
+  const proj = ([x,y,z]) => {
+    x/=100;y/=100;z/=100;
+    const x1 = x*cY + z*sY, z1 = -x*sY + z*cY;
+    const y1 = y*cX - z1*sX, z2 = y*sX + z1*cX;
+    const f = D/(D - z2);
+    return [cx + x1*S*f, cy - y1*S*f, z2, f];
+  };
+  const hue = r => `hsl(${Math.round(r/K*360)}, 62%, 55%)`;
+  // points (depth-sorted)
+  const order = viz.pts.map((p,i)=>({i, P: proj(p)})).sort((a,b)=>a.P[2]-b.P[2]);
+  const surface = style.getPropertyValue("--surface").trim() || "#111";
+  for (const {i, P} of order){
+    ctx.beginPath(); ctx.arc(P[0], P[1], 2.4*P[3], 0, 7);
+    ctx.fillStyle = hue(viz.reg[i]); ctx.globalAlpha = 0.8; ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // centroids: black dots + R# labels
+  ctx.font = "10.5px ui-monospace, Menlo, monospace";
+  viz.cent.forEach((c, k) => {
+    const P = proj(c);
+    ctx.beginPath(); ctx.arc(P[0], P[1], 5*P[3], 0, 7);
+    ctx.fillStyle = style.getPropertyValue("--ink"); ctx.fill();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = surface; ctx.stroke();
+    ctx.fillStyle = style.getPropertyValue("--ink");
+    ctx.fillText("R"+k, P[0]+6, P[1]-5);
+  });
+  // sparse step-horizon labels
+  ctx.fillStyle = style.getPropertyValue("--ink2");
+  for (const lb of viz.labels){
+    const P = proj(viz.pts[lb.i]);
+    ctx.fillText(lb.t, P[0]+4, P[1]+3);
+  }
+}
+function wireMfa3d(){
+  const cv = document.getElementById("mfa3d");
+  if (!cv) return;
+  let drag=false, last=null;
+  cv.onpointerdown = e => { drag=true; last=[e.clientX,e.clientY]; cv.setPointerCapture(e.pointerId); cv.style.cursor="grabbing"; };
+  cv.onpointerup = () => { drag=false; cv.style.cursor="grab"; };
+  cv.onpointermove = e => { if (!drag||!last) return;
+    mfaRot.y += (e.clientX-last[0])*0.008; mfaRot.x += (e.clientY-last[1])*0.008;
+    mfaRot.x = Math.max(-1.5, Math.min(1.5, mfaRot.x));
+    last=[e.clientX,e.clientY]; drawMfa3d(); };
+  cv.onwheel = e => { e.preventDefault(); mfaZoom = Math.max(0.4, Math.min(3.5, mfaZoom*(e.deltaY<0?1.08:0.93))); drawMfa3d(); };
+  drawMfa3d();
+}
 function wireMfa(){
   const mfa = M().mfa, sel = document.getElementById("mfaRegSel");
+  wireMfa3d();
   if (!mfa || !sel) return;
   const regs = mfa.regions.filter(r => r.local_horizon_factor)
     .sort((a,b)=>Math.abs(b.local_horizon_factor.rho)-Math.abs(a.local_horizon_factor.rho));
