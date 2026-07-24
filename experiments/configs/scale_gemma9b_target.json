@@ -8,21 +8,6 @@
     "dinner_party",
     "knowledge_archive"
   ],
-  "horizons": [
-    "30 minutes",
-    "3 hours",
-    "1 days",
-    "3 days",
-    "2 weeks",
-    "2 months",
-    "6 months",
-    "2 years",
-    "5 years",
-    "20 years",
-    "50 years",
-    "200 years",
-    "1000 years"
-  ],
   "phrasings": [
     "available_time"
   ],
@@ -39,5 +24,35 @@
     "thinking_mode": "disabled",
     "seed": 0
   },
-  "step_mode": "target"
+  "step_mode": "target",
+  "task_horizons": {
+    "climate_city": [
+      "2 years",
+      "5 years",
+      "10 years",
+      "20 years",
+      "50 years"
+    ],
+    "marathon": [
+      "6 weeks",
+      "2 months",
+      "3 months",
+      "6 months",
+      "1 years"
+    ],
+    "dinner_party": [
+      "3 hours",
+      "1 days",
+      "3 days",
+      "1 weeks",
+      "2 weeks"
+    ],
+    "knowledge_archive": [
+      "2 years",
+      "5 years",
+      "20 years",
+      "50 years",
+      "100 years"
+    ]
+  }
 }

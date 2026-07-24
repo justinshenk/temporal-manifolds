@@ -63,6 +63,9 @@ class QueryRow:
     step_horizon_years: float | None
     task_id: str = ""
     phrasing_id: str = ""
+    # "stated"   — horizon verbalized in the step turn itself
+    # "assigned" — control mode: backfilled from the final "Time assignments:"
+    horizon_source: str = "stated"
 
 
 class ResponseStore:
@@ -210,6 +213,17 @@ class ResponseStore:
                 except KeyError:
                     pass
 
+            # control mode: the last assistant turn with a "Time assignments:"
+            # block carries every step's target offset retrospectively
+            assignments: dict[int, tuple[str, float | None]] = {}
+            for t in reversed(record.turns):
+                if t.role == "assistant":
+                    from ..conversation.parsing import parse_time_assignments
+
+                    assignments = parse_time_assignments(t.text)
+                    if assignments:
+                        break
+
             wanted_layers = sorted(layer_to_depth)
             if layer is not None:
                 wanted_layers = [x for x in wanted_layers if x == layer]
@@ -231,9 +245,18 @@ class ResponseStore:
                     if step_index is not None and b.step_index != step_index:
                         continue
                     step_horizon = None
+                    horizon_source = "stated"
                     if 0 <= b.turn_index < len(record.turns):
                         turn = record.turns[b.turn_index]
                         step_horizon = turn.step_horizon_years
+                        if (
+                            step_horizon is None
+                            and not turn.step_horizon_text
+                            and b.step_index is not None
+                            and b.step_index in assignments
+                        ):
+                            step_horizon = assignments[b.step_index][1]
+                            horizon_source = "assigned"
                         if step_horizon is None and turn.step_horizon_text:
                             # stored raw text; parser may have improved since.
                             # Mode is recoverable from the prompt instructions.
@@ -266,6 +289,7 @@ class ResponseStore:
                                 step_horizon_years=step_horizon,
                                 task_id=task_id,
                                 phrasing_id=phrasing_id,
+                                horizon_source=horizon_source,
                             )
                         )
         if not vectors:

@@ -1,6 +1,6 @@
 {
-  "name": "scale_qwen32b_target",
-  "model": "mlx-community/Qwen3-32B-4bit",
+  "name": "scale_llama8b_control",
+  "model": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
   "backend": "mlx",
   "tasks": [
     "climate_city",
@@ -18,13 +18,13 @@
   ],
   "rollouts": 5,
   "protocol": {
-    "max_assistant_turns": 24,
+    "max_assistant_turns": 26,
     "max_new_tokens_per_turn": 700,
     "temperature": 0.7,
     "thinking_mode": "disabled",
     "seed": 0
   },
-  "step_mode": "target",
+  "step_mode": "target_control",
   "task_horizons": {
     "climate_city": [
       "2 years",

@@ -110,6 +110,26 @@ def _parse_duration_years(raw: str, target_mode: bool = False) -> float | None:
         return None
 
 
+ASSIGNMENTS_HEADER_RE = re.compile(r"time assignments?", re.IGNORECASE)
+ASSIGNMENT_LINE_RE = re.compile(
+    r"^\s*\**\s*Step\s+(\d+)\s*\**\s*:\s*(.+?)\s*$", re.MULTILINE
+)
+
+
+def parse_time_assignments(text: str) -> dict[int, tuple[str, float | None]]:
+    """Parse a control-mode 'Time assignments:' reply into
+    {step_number: (raw text, target offset in years)}. Returns {} for turns
+    without the header, so step turns that merely mention 'Step 2: ...' are
+    never misread as assignments."""
+    if not ASSIGNMENTS_HEADER_RE.search(text):
+        return {}
+    out: dict[int, tuple[str, float | None]] = {}
+    for m in ASSIGNMENT_LINE_RE.finditer(text):
+        raw = m.group(2)
+        out[int(m.group(1))] = (raw, _parse_duration_years(raw, target_mode=True))
+    return out
+
+
 def is_plan_completed(text: str) -> bool:
     return PLAN_COMPLETED_RE.search(text) is not None
 

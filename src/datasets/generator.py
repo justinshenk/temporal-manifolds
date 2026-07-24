@@ -13,11 +13,52 @@ from .phrasings import DEFAULT_PHRASINGS, HorizonPhrasing
 from .schema import PlanningPrompt, PlanningPromptDataset, PlanningTask
 from .tasks import CORE_TASKS
 
-# The response-format contract. Two step-time semantics are supported:
+# The response-format contract. Three step-time semantics are supported:
 #   "duration" — Time horizon: how long the step takes (original protocol)
 #   "target"   — Time target: how far into the future the step's outcome lies,
 #                measured from the start of the plan (cumulative offset; should
 #                be non-decreasing across steps)
+#   "target_control" — steps are expanded with NO time information at all;
+#                only after the last step does a single "Time assignments:"
+#                reply give the target offset of every step retrospectively.
+#                Control condition: tests whether step activations encode the
+#                step's time target even when it is never verbalized.
+RESPONSE_FORMAT_INSTRUCTIONS_TARGET_CONTROL = """Response format (follow it \
+strictly):
+1. In this first reply, give only the high-level plan: a one-line goal \
+restatement, then the numbered list of step titles. Do not detail any step \
+yet, and do not mention any times, dates, durations, or deadlines anywhere.
+2. Each time I reply "Continue.", expand exactly one step, in order, using \
+this exact header format:
+
+Step: <number>
+
+<detailed plan for this step>
+
+While expanding steps, never mention times, dates, durations, deadlines, or \
+schedules of any kind. All timing is deferred to the final assignment reply \
+described next.
+3. After the final step has been expanded, reply to my next "Continue." with \
+the time assignments: for every step, state WHEN, counted from today, that \
+step's outcome is reached — not how long the step takes. Use exactly this \
+format, one line per step, covering every step:
+
+Time assignments:
+Step 1: <offset>
+Step 2: <offset>
+
+Each offset must be one exact value with a single number and unit, such as \
+"3 weeks" or "5 years". Never a range, a calendar date, a duration of work, \
+or a vague word ("soon", "ongoing"). Because steps move the plan forward, \
+each step's offset should be at or beyond the previous step's.
+
+4. After the time assignments, reply to my next "Continue." with exactly: \
+Plan Completed
+
+Important: reply one message at a time and then stop. Never write "Continue." \
+yourself, never expand more than one step per message, and never put the \
+time assignments or "Plan Completed" in the same message as a step."""
+
 RESPONSE_FORMAT_INSTRUCTIONS_TARGET = """Response format (follow it strictly):
 1. In this first reply, give only the high-level plan: a one-line goal \
 restatement, then the numbered list of step titles, each with the rough \
@@ -89,11 +130,10 @@ def render_prompt_text(
     horizon: TimeValue,
     step_mode: str = "duration",
 ) -> str:
-    fmt = (
-        RESPONSE_FORMAT_INSTRUCTIONS_TARGET
-        if step_mode == "target"
-        else RESPONSE_FORMAT_INSTRUCTIONS
-    )
+    fmt = {
+        "target": RESPONSE_FORMAT_INSTRUCTIONS_TARGET,
+        "target_control": RESPONSE_FORMAT_INSTRUCTIONS_TARGET_CONTROL,
+    }.get(step_mode, RESPONSE_FORMAT_INSTRUCTIONS)
     return PROMPT_TEMPLATE.format(
         scenario=task.scenario,
         task_description=task.description,
