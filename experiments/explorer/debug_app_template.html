@@ -173,7 +173,7 @@ const fmtYears = y => {
 const esc = s => (s??"").toString().replace(/&/g,"&amp;").replace(/</g,"&lt;");
 
 /* ---------- header ---------- */
-const TABS = [["prompts","1 · Prompts"],["conv","2 · Conversation"],["bounds","3 · Boundaries"],["geo","4 · Geometry 3D"],["stats","5 · Stats"]];
+const TABS = [["prompts","1 · Prompts"],["conv","2 · Conversation"],["bounds","3 · Boundaries"],["geo","4 · Geometry 3D"],["stats","5 · Stats"],["mfa","6 · MFA Regions"]];
 function renderHeader(){
   document.getElementById("tabs").innerHTML = TABS.map(([id,l]) =>
     `<button class="tab ${state.tab===id?"on":""}" data-tab="${id}">${l}</button>`).join("");
@@ -344,6 +344,11 @@ function pointColor(row, sample){
     if (ratio > 1) return "#C43D2C"; // step exceeds the whole plan budget
     return lerpRamp(ratio); // linear 0..1 fraction of the total horizon
   }
+  if (g.color === "region"){
+    if (row.reg == null) return null; // gray: no MFA assignment for this slice
+    const K = (M().mfa && M().mfa.K) || 24;
+    return `hsl(${Math.round(row.reg / K * 360)}, 62%, 55%)`;
+  }
   if (g.color === "task") return TASK_COLORS[sample.task] || "#888";
   if (g.color === "phrasing") return PHRASE_COLORS[sample.phrasing] || "#888";
   if (g.color === "turn"){
@@ -376,7 +381,7 @@ function renderGeo(){
           <label class="ctl">scope ${seg([["first","first turn"],["steps","step turns"],["assistant","all assistant"],["all","+user"]], g.scope, "scope")}</label>
           <label class="ctl">${seg([["c","task-centered"],["r","raw"]], g.centered?"c":"r", "cent")}</label>
           ${modelSeeds().length>1?`<label class="ctl">rollout ${seg([["all","all"],...modelSeeds().map(s=>[String(s),"r"+s])], g.rollout, "rollout")}</label>`:""}
-          <label class="ctl">color ${seg([["step","step horizon"],["nstep","step / total"],["target","total horizon"],["task","task"],["phrasing","phrasing"],["turn","turn"]], g.color, "color")}</label>
+          <label class="ctl">color ${seg([["step","step horizon"],["nstep","step / total"],["target","total horizon"],["task","task"],["phrasing","phrasing"],["turn","turn"]].concat(M().mfa?[["region","MFA region"]]:[]), g.color, "color")}</label>
           <label class="ctl">${seg([["0","spin off"],["1","spin"]], g.auto?"1":"0", "auto")}</label>
         </div>
         <canvas id="c3d"></canvas>
@@ -437,6 +442,14 @@ function drawLegend(){
       <div class="evr" style="margin-top:2px">each step's duration as a fraction of its own conversation's total horizon</div>
       <div class="lrow" style="margin-top:8px"><span class="sw" style="background:#C43D2C"></span>&gt;1 — step exceeds the whole budget (${over}/${tot})</div>
       <div class="lrow"><span class="sw" style="background:#9aa5a1"></span>no step horizon (${miss}/${tot})</div>`;
+  } else if (g.color === "region"){
+    const mfa = M().mfa;
+    el.innerHTML = mfa ? `<h4>MFA region (K=${mfa.K}, L${mfa.layer})</h4>
+      <div style="height:12px;border-radius:4px;background:linear-gradient(to right,${Array.from({length:12},(_,i)=>`hsl(${Math.round(i/11*360)},62%,55%)`).join(",")});margin-bottom:4px"></div>
+      <div class="evr">hue = region id 0..${mfa.K-1} · hover a point for its region</div>
+      <div class="lrow" style="margin-top:6px"><span class="sw" style="background:#9aa5a1"></span>no assignment (MFA fit on L${mfa.layer} assistant tokens only)</div>
+      <div class="evr" style="margin-top:4px">see tab 6 for the full region table</div>`
+      : `<h4>MFA region</h4><div class="evr">no MFA fit for this model</div>`;
   } else if (g.color === "task"){
     el.innerHTML = `<h4>task</h4>` + Object.entries(TASK_COLORS).map(([t,c])=>
       `<div class="lrow"><span class="sw" style="background:${c}"></span>${t}</div>`).join("");
@@ -579,7 +592,7 @@ function wireGeo(){
         total ${esc(hit.sample.hLabel)} · ${esc(hit.sample.phrasing)}<br>
         turn ${hit.row.turn}${hit.row.step!=null?" · step "+hit.row.step:""}
         ${hit.row.shY!=null?" · step "+fmtYears(hit.row.shY)+" ("+Number((hit.row.shY/hit.sample.hYears).toPrecision(2))+"× total)":""}<br>
-        <span class="mono">pos ${hit.row.p} · ${esc(hit.row.role)} · click to open</span>`;
+        <span class="mono">pos ${hit.row.p} · ${esc(hit.row.role)}${hit.row.reg!=null?" · region R"+hit.row.reg:""} · click to open</span>`;
       tip.style.left=(e.clientX+14)+"px"; tip.style.top=(e.clientY+10)+"px";
       cv.style.cursor="pointer";
     } else { tip.style.display="none"; if(!dragging) cv.style.cursor="grab"; }
@@ -648,6 +661,48 @@ function wireStats(){
   });
 }
 
+/* ---------- tab 6: MFA regions ---------- */
+function renderMfa(){
+  const mfa = M().mfa;
+  if (!mfa) return `<div class="pane right"><p class="hint">No MFA fit for this
+    model. The region decomposition was run on the default (rollout) entry —
+    switch models top-right, or run experiments/mfa_regions.py for another run.</p></div>`;
+  const K = mfa.K;
+  const hue = r => `hsl(${Math.round(r / K * 360)}, 62%, 55%)`;
+  const nmiRows = Object.entries(mfa.nmi).sort((a,b)=>b[1]-a[1]).map(([v,s])=>`
+    <tr><td>${esc(v)}</td>
+    <td><div class="barwrap" style="background:var(--chip);border-radius:3px;height:8px;width:160px;display:inline-block;margin-right:10px"><div style="background:var(--accent);height:100%;border-radius:3px;width:${(s*100).toFixed(0)}%"></div></div><span class="num">${s.toFixed(3)}</span></td></tr>`).join("");
+  const regRows = mfa.regions.map(r => {
+    const lf = r.local_horizon_factor;
+    return `<tr>
+      <td><span class="sw" style="background:${hue(r.region)};display:inline-block;vertical-align:-1px;margin-right:6px"></span><span class="mono">R${String(r.region).padStart(2,"0")}</span></td>
+      <td class="num">${r.n}</td><td class="mono">${esc(r.kind)}</td>
+      <td>${esc(r.phase)}</td><td>${esc(r.task)}</td>
+      <td class="num">${lf ? `z${lf.factor} · ρ=${lf.rho>0?"+":""}${lf.rho.toFixed(2)} (n=${lf.n_steps})` : "—"}</td></tr>`;
+  }).join("");
+  return `<div class="pane right">
+    <div class="kv">
+      <span class="chipx">method <b>Mixture of Factor Analyzers</b> — Shafran et al., arXiv:2602.02464 (authors' code)</span>
+      <span class="chipx">K=<b>${mfa.K}</b> regions · rank <b>${mfa.rank}</b></span>
+      <span class="chipx">n=<b>${mfa.n}</b> assistant boundary tokens · layer <b>${mfa.layer}</b></span>
+      <span class="chipx">mean assignment confidence <b>${mfa.mean_confidence.toFixed(2)}</b></span>
+    </div>
+    <p class="hint" style="max-width:80ch">Unsupervised Gaussian-region decomposition of activation space.
+    Headline: <b>regions encode structure, not time</b> — every region is pure in token kind and organized
+    by conversation phase, while task and horizon are invisible at region level (NMI table). The horizon
+    instead appears as a <b>local direction inside regions</b>: in most regions one of the ${mfa.rank} local
+    factors correlates with log step horizon (last column). Use color = "MFA region" in the Geometry tab
+    to see the regions against the horizon gradient.</p>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
+      <div class="panelbox"><div class="panelhead">region ↔ variable alignment (NMI, 0–1)</div>
+        <table><thead><tr><th>variable</th><th>NMI</th></tr></thead><tbody>${nmiRows}</tbody></table></div>
+      <div class="panelbox" style="flex:1;min-width:560px"><div class="panelhead">regions — majority composition + local horizon factor</div>
+        <div class="scrollx" style="max-height:60vh"><table>
+        <thead><tr><th>region</th><th>n</th><th>token kind</th><th>phase</th><th>top task</th><th>best local factor ~ log step horizon</th></tr></thead>
+        <tbody>${regRows}</tbody></table></div></div>
+    </div></div>`;
+}
+
 /* ---------- render ---------- */
 function render(){
   renderHeader();
@@ -656,6 +711,7 @@ function render(){
   else if (state.tab==="conv"){ main.innerHTML = renderConv(); wireSampleList(); }
   else if (state.tab==="bounds"){ main.innerHTML = renderBounds(); wireSampleList(); wireBounds(); }
   else if (state.tab==="geo"){ main.innerHTML = renderGeo(); wireGeo(); }
+  else if (state.tab==="mfa"){ main.innerHTML = renderMfa(); }
   else { main.innerHTML = renderStats(); wireStats(); }
 }
 window.addEventListener("resize", () => { if (state.tab==="geo") draw3d(); });
