@@ -1,5 +1,27 @@
 # Verification Log
 
+## 2026-07-24 — 32B rollout expansion (13 horizons × 4 tasks × 5 seeds @ T0.7)
+
+- **Run 9ccf36267612**: 260/260 done, 0 failed, ~7.6h (log read; per-sample
+  monitor + 15-min content spot-checks throughout: exact parses, boundary
+  counts, npz = boundaries×3, all finite on every check). Seeds [0..4]
+  confirmed; rollout diversity verified early (5/5 distinct plans per prompt);
+  step coverage 1752/1815 (97%). — VERIFIED
+- **Probes**: total horizon grouped-CV R²=1.000/ρ=1.00 (n=260, p≈5.5e-290),
+  LOTO R²=0.904; step horizon R²=0.878/ρ=0.94 (n=1752, p≈0, L50 think_close).
+  Raw PCA PC1 ρ=0.94 (p=1.2e-118) at d40 think_close first turns. Read from
+  script outputs. — VERIFIED
+- **Rollout-variance vs horizon**: across-seed std of mean log step horizon
+  per prompt, computed directly from stored conversations: ~0.2 (3d–6mo),
+  0.5–0.8 (30min–1d), 0.88 (20y), 1.44 (50y), 1.39 (200y), 1.99 (1000y).
+  — VERIFIED (computed, printed)
+- **Explorer**: 5 entries, rollout entry first with default:true (UI opens on
+  it), seeds present, 1752 predY chips; payload trimmed 21.5→15.2MB (dropped
+  rollout +user-scope fits and raw-centering t-SNE/UMAP, coords ×100, null
+  stripping — coordinate spot-check post-rescale OK); JSON roundtrip + node
+  --check passed; republished same URL. In-browser render NOT re-verified.
+  — VERIFIED (build)
+
 ## 2026-07-23 — Debug-explorer data/coloring verification + t-SNE
 
 - **Exported PCA coords vs independent recompute** (32B L37 think_close steps
