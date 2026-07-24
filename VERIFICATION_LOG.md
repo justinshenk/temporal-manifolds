@@ -224,3 +224,23 @@
   `git ls-tree 43b9cc9 configs/scenarios/`). — VERIFIED (failure documented, not introduced)
 - **Runtime behavior of merged code** (workflows, GCS scripts, inference backends): not
   exercised beyond imports/unit tests. — UNVERIFIED
+
+## 2026-07-24 — Explorer entry renames (DURATION label on all duration-mode entries)
+- WHAT: republished artifact with all five entries carrying explicit step-semantics labels.
+- HOW: grepped the built temporal-manifolds-results.html for `"name":...steps"` — exactly 5 entries, all with "· DURATION steps" or "· TARGET steps"; grep for tsne/umap returned 0 matches; `node --check app_check.js` passed.
+- RESULT: VERIFIED (names/data in the published file); artifact page itself not re-opened in a browser this round — visual render UNVERIFIED, structure verified.
+
+## 2026-07-24 — Restored '+user' (all-scope) PCA fits on both Qwen3-32B x5 entries
+- WHAT: 60 fits (2 entries x 5 kinds x 3 layers x centered/raw) merged back from full export with b64 Int16 coords; artifact republished (11.6MB).
+- HOW: merge script printed 'restored 60 fits'; re-opened debug_data_trim.json and confirmed all-scope keys present on both entries and decoded coord count == 3x idx count; node --check passed.
+- RESULT: VERIFIED (data-level); in-browser render of the +user scope UNVERIFIED (user will see it on reload).
+
+## 2026-07-24 — Split explorer into DURATION and TARGET artifacts
+- WHAT: main artifact (bd9903c8...) now 4 DURATION entries only (9.9MB); new artifact (748fc4a4-6eea-4e89-8c59-01b3e9bef01e) holds the Qwen3-32B x5 TARGET entry (1.6MB).
+- HOW: split script printed entry lists per file; node --check passed; both published successfully.
+- RESULT: VERIFIED (build-level); browser render UNVERIFIED.
+
+## 2026-07-24 — Launched TARGET-mode 260-runs (Llama-8B run 57ea1d7cacbb, Gemma-9B run 73a3c5ec77c2)
+- WHAT: 52 prompts x 5 rollouts each, step_mode=target, max_assistant_turns=24, MLX 4-bit, running in parallel; Qwen-32B queued for after.
+- HOW: both logs show correct run_id/model/prompt count; per-sample monitors + first-sample compliance checks armed.
+- RESULT: IN PROGRESS (outputs UNVERIFIED until runs finish and are inspected).
