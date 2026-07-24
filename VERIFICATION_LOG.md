@@ -273,3 +273,8 @@
 - WHAT: Gemma control run 87b32dddd585 complete; probe_control run; Qwen3-32B target run 74c172105e25 started.
 - HOW: re-opened all 100 conversations + npz (100/100 non-empty, 100/100 completed); ran probe_control and read full table; within-conversation analysis run at L16 turn_start.
 - RESULT: VERIFIED. Gemma transfer probe on silent steps: R2=0.81 rho=0.92 (L16 turn_start), silent subset 0.82 >= cadence 0.69 — replicates Llama. Within-conversation ordinal recovery: median Spearman 0.64, 34/41 convs positive. LOTO negative for Gemma (task-entangled). Results JSON saved under the control run's figures dir.
+
+## 2026-07-24 — Independent verifier: Qwen3-32B target run 74c172105e25; 32B control launched
+- WHAT: verifier checked ALL 100 samples programmatically + read 10 conversations.
+- RESULT: VERIFIED all aspects. Manifest 1:1 with disk; qwen3 markup with empty think blocks preserved (151667/151668 adjacent); depth_to_layer {25,37,50}, d=5120; every npz position set exactly equals boundary abs_pos set; parser cross-check 738/827 steps parse with ZERO value mismatches vs stored step_horizon_years. Caveats: 89 unparseable slot forms (mostly dinner_party 'Tonight'/'Year 0+'), 4 malformed headers, 5 samples completed=false (plan fully expanded, no terminal sentinel) — all honest model behavior, dropped by >0 filters downstream.
+- ALSO: Qwen3-32B CONTROL run launched (last in queue).
