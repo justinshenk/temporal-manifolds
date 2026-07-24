@@ -694,13 +694,95 @@ function renderMfa(){
     factors correlates with log step horizon (last column). Use color = "MFA region" in the Geometry tab
     to see the regions against the horizon gradient.</p>
     <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
+      <div class="panelbox"><div class="panelhead">region map — where regions live (dot area = size)</div>
+        <div style="padding:10px 14px">${mfaRegionMap(mfa)}</div></div>
       <div class="panelbox"><div class="panelhead">region ↔ variable alignment (NMI, 0–1)</div>
         <table><thead><tr><th>variable</th><th>NMI</th></tr></thead><tbody>${nmiRows}</tbody></table></div>
-      <div class="panelbox" style="flex:1;min-width:560px"><div class="panelhead">regions — majority composition + local horizon factor</div>
-        <div class="scrollx" style="max-height:60vh"><table>
-        <thead><tr><th>region</th><th>n</th><th>token kind</th><th>phase</th><th>top task</th><th>best local factor ~ log step horizon</th></tr></thead>
-        <tbody>${regRows}</tbody></table></div></div>
-    </div></div>`;
+    </div>
+    <div class="panelbox" style="margin-top:16px"><div class="panelhead">local time direction —
+      factor coordinate vs step horizon, per region
+      <select id="mfaRegSel" style="margin-left:12px;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:3px 8px"></select>
+      <span class="evr" id="mfaRho" style="margin-left:10px"></span></div>
+      <div style="padding:10px 14px"><canvas id="mfaScatter" style="width:100%;height:320px;background:var(--surface);border-radius:6px"></canvas>
+      <div class="hint" style="margin-top:6px">each point is one plan step in this region: x = its coordinate on the region's best local factor, y = the step horizon it wrote (log scale). A sloped cloud = this region carries a local time axis.</div></div>
+    </div>
+    <div class="panelbox" style="margin-top:16px"><div class="panelhead">regions — majority composition + local horizon factor</div>
+      <div class="scrollx" style="max-height:60vh"><table>
+      <thead><tr><th>region</th><th>n</th><th>token kind</th><th>phase</th><th>top task</th><th>best local factor ~ log step horizon</th></tr></thead>
+      <tbody>${regRows}</tbody></table></div></div>
+    </div>`;
+}
+function mfaRegionMap(mfa){
+  const K = mfa.K, hue = r => `hsl(${Math.round(r / K * 360)}, 62%, 55%)`;
+  const kinds = KIND_UI_ORDER.filter(k => mfa.regions.some(r => r.kind.startsWith(k)));
+  const phases = ["opening","early","mid","late"];
+  const maxN = Math.max(...mfa.regions.map(r=>r.n));
+  const cell = (kind, ph) => mfa.regions
+    .filter(r => r.kind.startsWith(kind) && r.phase.startsWith(ph))
+    .map(r => { const d = Math.max(10, Math.round(34*Math.sqrt(r.n/maxN)));
+      return `<span title="R${r.region} n=${r.n}" style="display:inline-block;width:${d}px;height:${d}px;border-radius:50%;background:${hue(r.region)};margin:2px;vertical-align:middle"></span>`; })
+    .join("") || `<span class="evr">—</span>`;
+  return `<table style="border-collapse:collapse">
+    <thead><tr><th></th>${phases.map(p=>`<th style="padding:4px 10px">${p}</th>`).join("")}</tr></thead>
+    <tbody>${kinds.map(k=>`<tr><td class="mono" style="padding:4px 10px;text-align:right">${k}</td>
+      ${phases.map(p=>`<td style="padding:4px 10px;text-align:center">${cell(k,p)}</td>`).join("")}</tr>`).join("")}</tbody></table>
+    <div class="hint" style="margin-top:6px">every region sits in exactly one token-kind row; columns are its dominant conversation phase — the unsupervised fit rediscovered the kind × phase grid</div>`;
+}
+function drawMfaScatter(regId){
+  const mfa = M().mfa, cv = document.getElementById("mfaScatter");
+  if (!mfa || !cv) return;
+  const pts = [];
+  for (const kd of Object.values(M().kinds))
+    for (const r of kd.rows)
+      if (r.reg === regId && r.zb != null && r.shY != null && r.shY > 0)
+        pts.push([r.zb, Math.log(r.shY)]);
+  const dpr = devicePixelRatio||1, w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w*dpr; cv.height = h*dpr;
+  const ctx = cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  const style = getComputedStyle(document.documentElement);
+  ctx.font = "11px ui-monospace, Menlo, monospace";
+  const rho = document.getElementById("mfaRho");
+  if (pts.length < 10){ ctx.fillStyle = style.getPropertyValue("--ink3");
+    ctx.fillText("not enough step points with factor coordinates in this region", 16, 24);
+    if (rho) rho.textContent = ""; return; }
+  const xs = pts.map(p=>p[0]), ys = pts.map(p=>p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const PX = v => 46 + (v-x0)/((x1-x0)||1)*(w-66);
+  const PY = v => h-28 - (v-y0)/((y1-y0)||1)*(h-48);
+  // axes + y tick labels in human time
+  ctx.strokeStyle = style.getPropertyValue("--line"); ctx.lineWidth = 1;
+  ctx.strokeRect(46, 20, w-66, h-48);
+  ctx.fillStyle = style.getPropertyValue("--ink3");
+  for (const f of [0, 0.5, 1]){
+    const v = y0 + f*(y1-y0);
+    ctx.fillText(fmtYears(Math.exp(v)), 4, PY(v)+4);
+  }
+  ctx.fillText("factor coordinate z", w/2-40, h-8);
+  // least-squares line
+  const mx = xs.reduce((a,b)=>a+b,0)/xs.length, my = ys.reduce((a,b)=>a+b,0)/ys.length;
+  let sxy=0, sxx=0;
+  for (const [x,y] of pts){ sxy += (x-mx)*(y-my); sxx += (x-mx)*(x-mx); }
+  const slope = sxy/(sxx||1), icpt = my - slope*mx;
+  ctx.strokeStyle = style.getPropertyValue("--accent"); ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(PX(x0), PY(icpt+slope*x0)); ctx.lineTo(PX(x1), PY(icpt+slope*x1)); ctx.stroke();
+  // points
+  const K = mfa.K;
+  ctx.fillStyle = `hsl(${Math.round(regId/K*360)}, 62%, 55%)`;
+  for (const [x,y] of pts){ ctx.beginPath(); ctx.arc(PX(x), PY(y), 3, 0, 7); ctx.fill(); }
+  const reg = mfa.regions.find(r=>r.region===regId), lf = reg && reg.local_horizon_factor;
+  if (rho) rho.textContent = lf ? `n=${pts.length} · Spearman ρ=${lf.rho>0?"+":""}${lf.rho.toFixed(2)} (factor z${lf.factor})` : `n=${pts.length}`;
+}
+
+function wireMfa(){
+  const mfa = M().mfa, sel = document.getElementById("mfaRegSel");
+  if (!mfa || !sel) return;
+  const regs = mfa.regions.filter(r => r.local_horizon_factor)
+    .sort((a,b)=>Math.abs(b.local_horizon_factor.rho)-Math.abs(a.local_horizon_factor.rho));
+  sel.innerHTML = regs.map(r =>
+    `<option value="${r.region}">R${r.region} — ${r.kind.split(" ")[0]} ${r.phase.split(" ")[0]} (ρ=${r.local_horizon_factor.rho>0?"+":""}${r.local_horizon_factor.rho.toFixed(2)})</option>`).join("");
+  sel.onchange = () => drawMfaScatter(+sel.value);
+  if (regs.length) drawMfaScatter(regs[0].region);
 }
 
 /* ---------- render ---------- */
@@ -711,7 +793,7 @@ function render(){
   else if (state.tab==="conv"){ main.innerHTML = renderConv(); wireSampleList(); }
   else if (state.tab==="bounds"){ main.innerHTML = renderBounds(); wireSampleList(); wireBounds(); }
   else if (state.tab==="geo"){ main.innerHTML = renderGeo(); wireGeo(); }
-  else if (state.tab==="mfa"){ main.innerHTML = renderMfa(); }
+  else if (state.tab==="mfa"){ main.innerHTML = renderMfa(); wireMfa(); }
   else { main.innerHTML = renderStats(); wireStats(); }
 }
 window.addEventListener("resize", () => { if (state.tab==="geo") draw3d(); });

@@ -191,12 +191,27 @@ def main() -> int:
         print(f"  R{k:02d} n={row['n']:5d} kind={row['kind']:22s} "
               f"phase={row['phase']:14s} task={row['task']:22s}{lf_s}")
 
+    # per-point coordinate along its region's best horizon factor (for plots)
+    best_factor = {r["region"]: r["local_horizon_factor"]["factor"]
+                   for r in results["regions"] if r.get("local_horizon_factor")}
+    z_best = np.full(n, np.nan, dtype=np.float32)
+    for i in range(n):
+        k = int(region[i])
+        if k in best_factor:
+            z_best[i] = Ez[i, k, best_factor[k]].item()
+
     out_dir = store.model_dir(args.model) / "figures"
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "mfa_regions.json", "w") as f:
         json.dump(results, f, indent=2)
-    np.savez(out_dir / "mfa_assignment.npz", region=region, confidence=conf)
-    print(f"\n[mfa] wrote {out_dir / 'mfa_regions.json'} and mfa_assignment.npz")
+    np.savez(out_dir / "mfa_assignment.npz", region=region, confidence=conf,
+             z_best=z_best, log_step=log_step)
+    sys.path_repo = str(Path(args.mfa_repo).resolve())
+    from modeling.mfa import save_mfa  # noqa: E402
+
+    save_mfa(model, str(out_dir / "mfa_model.pt"))
+    print(f"\n[mfa] wrote {out_dir / 'mfa_regions.json'}, mfa_assignment.npz, "
+          f"mfa_model.pt")
     return 0
 
 
