@@ -258,3 +258,8 @@
 ## 2026-07-24 — Independent verifier report: Llama-8B target run bcd154c149fb
 - WHAT: verifier agent re-opened manifest, 10 random conversations, all 100 boundaries.json, and every key of all 100 npz files.
 - RESULT: VERIFIED on all aspects. Manifest complete (20 prompts x 5 rollouts, 1:1 with disk); every step turn in all 100 samples has a "Time target:" line; activations all finite float32 d=4096, layers {12,18,25}, key count = 3 x boundaries everywhere. Flags: (a) depth 0.6 -> layer 18 matches the project convention round(0.6*32)-1 (my brief mis-stated 19 — the run is correct); (b) sample 3970e34ec2703601 never emitted "Plan Completed" (turn-capped, completed=false) — keep, it is honest data; (c) 21 steps in 11 samples slightly overshoot the horizon — model behavior, faithfully recorded.
+
+## 2026-07-24 — Independent verifier report: Gemma-9B target run 19665970da25 + Gemma control launch
+- WHAT: verifier re-opened manifest, all 100 boundaries + npz programmatically, 10 conversations deep-read.
+- RESULT: VERIFIED all aspects — 100 samples 1:1 with manifest, correct prompts per sample, gemma markup token ids match token_ids[abs_pos] with 0 mismatches, activations exactly {L16,L24,L33} x boundaries, all finite float32 d=3584. Caveats (honest model behavior): 24 samples with non-numeric target lines (mostly dinner_party "Tonight"/"Tomorrow"; note "Year N" forms DO parse in our target-mode parser), 15 samples overshoot horizon, 1 completed=False. Downstream filters already exclude unparsed/zero.
+- ALSO: Gemma CONTROL run 87b32dddd585 launched; first sample re-opened and read: 9/9 steps time-silent, assignments parse 7/9 (2 "Ongoing" honestly unparsed).
