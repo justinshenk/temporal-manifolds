@@ -283,3 +283,8 @@
 - WHAT: user stopped 32B control at 63/100 ("just enough to see if probe would work"). Analysis run on partial data (455 assigned step rows).
 - HOW: verified 63/63 samples have non-empty npz; ran probe_control.py and within-conversation analysis; read full tables.
 - RESULT: VERIFIED. 32B transfer: pooled rho=0.88 (R2 0.58-0.68 best combos), silent >= cadence. Within-conversation ordinal recovery STRONGEST of all models: mean Spearman 0.86, median 0.90, 50/50 convs positive (L25 turn_start). Comparison: Llama median 0.73 (67/79 pos), Gemma 0.64 (34/41 pos), Qwen3-32B 0.90 (50/50 pos) — internal temporal ordering of silent plans scales with model capability.
+
+## 2026-07-24 — TARGET artifact updated: 3 target grids + 3 control entries
+- WHAT: republished target artifact (748fc4a4...) with 6 entries: Qwen3-32B/Llama-8B/Gemma-9B TARGET grids + 3 CONTROL silent-steps entries (563 conversations total). Old 2-task sweep entry dropped (superseded; data preserved on disk). Size fixes: prompt dedupe (40 unique), idx arrays b64-packed, +user-scope fits kept on default entry only. 15.5MB.
+- HOW: node functional test re-decoded ALL 426 fits (idx lengths, ranges vs rows, xyz byte counts) and all 563 prompts (string + contains Scenario); control prompt verified to contain "Time assignments:"; node --check passed; publish succeeded.
+- RESULT: VERIFIED at data/build level; in-browser render UNVERIFIED until user loads it.

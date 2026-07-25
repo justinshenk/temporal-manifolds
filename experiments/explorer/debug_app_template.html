@@ -132,6 +132,27 @@
 <script>
 "use strict";
 const DATA = JSON.parse(document.getElementById("DATA").textContent);
+// rehydrate compact encodings: prompt-text dedupe + b64-packed idx arrays
+(function(){
+  const pt = DATA.promptTexts || [];
+  for (const m of DATA.models || []){
+    for (const s of m.samples || []){
+      if (s.turns && s.turns.length && s.turns[0].pt !== undefined){
+        s.turns[0].text = pt[s.turns[0].pt];
+        delete s.turns[0].pt;
+      }
+    }
+    for (const kd of Object.values(m.kinds || {})){
+      for (const fit of Object.values(kd.fits || {})){
+        if (fit.idxb64){
+          const bin = atob(fit.idxb64), n = bin.length >> 1, a = new Array(n);
+          for (let i = 0; i < n; i++) a[i] = bin.charCodeAt(2*i) | (bin.charCodeAt(2*i+1) << 8);
+          fit.idx = a; delete fit.idxb64;
+        }
+      }
+    }
+  }
+})();
 const DEFAULT_MODEL = Math.max(0, DATA.models.findIndex(m => m.default));
 const TASK_COLORS = {climate_city:"#3E6FD9", dinner_party:"#D6493F", marathon:"#1F8A4C", knowledge_archive:"#9B59C9"};
 const TASK_GLYPH  = {climate_city:"circle", dinner_party:"triangle", marathon:"square", knowledge_archive:"diamond"};
@@ -272,7 +293,7 @@ function renderConv(){
     <div class="pane right">
       <div class="kv">
         <span class="chipx"><b>${esc(s.task)}</b> · ${esc(s.hLabel)} · ${esc(s.phrasing)}</span>
-        <span class="chipx" style="border-color:var(--accent)">step semantics: <b>${(s.turns[0].text||"").includes("Time target:") ? "TARGET (how far in the future)" : "DURATION (how long the step takes)"}</b></span>
+        <span class="chipx" style="border-color:var(--accent)">step semantics: <b>${(s.turns[0].text||"").includes("Time assignments:") ? "CONTROL (silent steps; targets assigned in final turn)" : (s.turns[0].text||"").includes("Time target:") ? "TARGET (how far in the future)" : "DURATION (how long the step takes)"}</b></span>
         <span class="chipx">${s.turns.length} turns · ${s.nTok} tokens</span>
         <span class="chipx">${s.completed ? "reached “Plan Completed”" : "turn budget hit"}</span>
       </div>${turns}</div>`;
