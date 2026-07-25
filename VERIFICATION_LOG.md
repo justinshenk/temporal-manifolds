@@ -298,3 +298,8 @@
 - WHAT: joint entries' packed coords were 5x the scale the template projection was tuned for (fresh export quantized x1000; the published duration data had been re-quantized to x100-equivalent during earlier size trims). Rescaled all 204 fits' coords /5 in place; export_joint_data.py quantizer fixed (q x200 with the 97.5pct-radius norm).
 - HOW: measured mean-abs coordinate: duration reference 69.4, joint before 347.5, after rescale 69.5 — byte-level re-read of the packed data; republished.
 - RESULT: VERIFIED (data-level; scale now matches the artifact whose rendering was known good). Render UNVERIFIED until user reloads.
+
+## 2026-07-25 — Theme-controlled transfer (transfer-loto) added to probe_control and run for all 3 models
+- WHAT: 4th test in probe_control.py: train on TARGET rows of other tasks, test on CONTROL rows of held-out task (per-task rho recorded in results JSON). Results regenerated for all 3 control runs.
+- HOW: script rerun for all pairs; full tables read; key rows recorded below.
+- RESULT: VERIFIED. Turn_start rho pooled, transfer -> transfer-loto: Qwen32B 0.88 -> 0.87 (theme contributes ~nothing); Llama 0.90 -> 0.52; Gemma 0.92 -> 0.66 (small models ride heavily on theme/task band). 32B keeps R2=0.58 even theme-controlled at L25 turn_start.
