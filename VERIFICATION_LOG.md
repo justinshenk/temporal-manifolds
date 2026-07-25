@@ -278,3 +278,8 @@
 - WHAT: verifier checked ALL 100 samples programmatically + read 10 conversations.
 - RESULT: VERIFIED all aspects. Manifest 1:1 with disk; qwen3 markup with empty think blocks preserved (151667/151668 adjacent); depth_to_layer {25,37,50}, d=5120; every npz position set exactly equals boundary abs_pos set; parser cross-check 738/827 steps parse with ZERO value mismatches vs stored step_horizon_years. Caveats: 89 unparseable slot forms (mostly dinner_party 'Tonight'/'Year 0+'), 4 malformed headers, 5 samples completed=false (plan fully expanded, no terminal sentinel) — all honest model behavior, dropped by >0 filters downstream.
 - ALSO: Qwen3-32B CONTROL run launched (last in queue).
+
+## 2026-07-24 — 32B control stopped early per user (63 samples) + probe recovery: 3-model comparison complete
+- WHAT: user stopped 32B control at 63/100 ("just enough to see if probe would work"). Analysis run on partial data (455 assigned step rows).
+- HOW: verified 63/63 samples have non-empty npz; ran probe_control.py and within-conversation analysis; read full tables.
+- RESULT: VERIFIED. 32B transfer: pooled rho=0.88 (R2 0.58-0.68 best combos), silent >= cadence. Within-conversation ordinal recovery STRONGEST of all models: mean Spearman 0.86, median 0.90, 50/50 convs positive (L25 turn_start). Comparison: Llama median 0.73 (67/79 pos), Gemma 0.64 (34/41 pos), Qwen3-32B 0.90 (50/50 pos) — internal temporal ordering of silent plans scales with model capability.
