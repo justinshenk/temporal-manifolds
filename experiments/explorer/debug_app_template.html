@@ -202,7 +202,7 @@ function lerpDiv(f){
 }
 
 const state = { model:DEFAULT_MODEL, tab:"prompts", sample:0,
-  geo:{depth:1, kind:"turn_end", scope:"steps", centered:true, color:"step", method:"pca", rollout:"all", cshow:"both", auto:false, size:6} };
+  geo:{depth:2, kind:"role", scope:"steps", centered:false, color:"step", method:"pca", rollout:"all", cshow:"both", auto:false, size:6} };
 function condShown(row){ // condition display filter (joint entries)
   const c = state.geo.cshow;
   return c === "both" || !M().joint || row.cond === c;

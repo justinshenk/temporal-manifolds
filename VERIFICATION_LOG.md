@@ -313,3 +313,8 @@
 - WHAT: three new color modes: "timescale" (6 discrete classes from stated/assigned horizon), "pred timescale (same theme)" (predY: target=grouped-CV held-out, control=transfer from target-only probe — recomputed so control preds NEVER come from control-trained probes), "pred timescale (new theme)" (predL: probe trained on TARGET rows of the other tasks only). Legends explain each.
 - HOW: node re-read of built data: predY and predL present on 1271/1432/979 step turns (32B/Llama/Gemma), covering all parseable steps; node --check passed; published.
 - RESULT: VERIFIED (build/data level); render UNVERIFIED until reload.
+
+## 2026-07-25 — Probe predictions extended to every assistant turn
+- WHAT: predY/predL now cover ALL assistant boundaries (overview, unparsed steps, completion turns) — probes still trained only on labeled TARGET step rows; target step rows keep grouped-CV held-out predY.
+- HOW: node re-read: predY and predL present on 1837/2386/1878 of 1837/2386/1878 assistant turns (100% coverage, all 3 models); node --check passed; published.
+- RESULT: VERIFIED (data/build level).
