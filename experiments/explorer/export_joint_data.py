@@ -76,7 +76,7 @@ def step_predictions(store, model_id, kinds_available, depth_to_layer):
 
 
 def q(x):
-    return int(round(x * 1000))
+    return int(round(x * 200))  # template proj divides by 100; published scale matches duration artifact
 
 
 def norm_q(P):

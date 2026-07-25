@@ -293,3 +293,8 @@
 - WHAT: republished target artifact with 3 joint entries (PCA fit on both conditions together); new color modes tstep/cstep/cond; control conv turns backfilled with assigned horizons ("X — assigned in final turn"); norm_q fixed from global-RMS to 97.5th-pct-radius scaling (outliers no longer compress the cloud, hard cap 3.2).
 - HOW: node functional test decoded all 204 fits (idx/xyz byte-level), 563 prompts, and counted control conv steps with assigned horizons (Qwen 462/549, Llama 751/757, Gemma 361/405 — gaps are honestly-unparsed "Ongoing" forms); node --check passed; published successfully (15.8MB).
 - RESULT: VERIFIED (build/data level); in-browser render UNVERIFIED until loaded.
+
+## 2026-07-25 — Fixed 5x viewport overflow in target artifact
+- WHAT: joint entries' packed coords were 5x the scale the template projection was tuned for (fresh export quantized x1000; the published duration data had been re-quantized to x100-equivalent during earlier size trims). Rescaled all 204 fits' coords /5 in place; export_joint_data.py quantizer fixed (q x200 with the 97.5pct-radius norm).
+- HOW: measured mean-abs coordinate: duration reference 69.4, joint before 347.5, after rescale 69.5 — byte-level re-read of the packed data; republished.
+- RESULT: VERIFIED (data-level; scale now matches the artifact whose rendering was known good). Render UNVERIFIED until user reloads.
