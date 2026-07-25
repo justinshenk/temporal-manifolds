@@ -288,3 +288,8 @@
 - WHAT: republished target artifact (748fc4a4...) with 6 entries: Qwen3-32B/Llama-8B/Gemma-9B TARGET grids + 3 CONTROL silent-steps entries (563 conversations total). Old 2-task sweep entry dropped (superseded; data preserved on disk). Size fixes: prompt dedupe (40 unique), idx arrays b64-packed, +user-scope fits kept on default entry only. 15.5MB.
 - HOW: node functional test re-decoded ALL 426 fits (idx lengths, ranges vs rows, xyz byte counts) and all 563 prompts (string + contains Scenario); control prompt verified to contain "Time assignments:"; node --check passed; publish succeeded.
 - RESULT: VERIFIED at data/build level; in-browser render UNVERIFIED until user loads it.
+
+## 2026-07-25 — Target artifact rebuilt: joint TARGET+CONTROL PCA per model
+- WHAT: republished target artifact with 3 joint entries (PCA fit on both conditions together); new color modes tstep/cstep/cond; control conv turns backfilled with assigned horizons ("X — assigned in final turn"); norm_q fixed from global-RMS to 97.5th-pct-radius scaling (outliers no longer compress the cloud, hard cap 3.2).
+- HOW: node functional test decoded all 204 fits (idx/xyz byte-level), 563 prompts, and counted control conv steps with assigned horizons (Qwen 462/549, Llama 751/757, Gemma 361/405 — gaps are honestly-unparsed "Ongoing" forms); node --check passed; published successfully (15.8MB).
+- RESULT: VERIFIED (build/data level); in-browser render UNVERIFIED until loaded.

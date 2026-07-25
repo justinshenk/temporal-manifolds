@@ -354,10 +354,15 @@ function pointColor(row, sample){
     const lo = Math.log(hs[0]), hi = Math.log(hs[hs.length-1]);
     return lerpRamp((Math.log(sample.hYears)-lo)/Math.max(hi-lo,1e-9));
   }
-  if (g.color === "step"){
+  if (g.color === "step" || g.color === "tstep" || g.color === "cstep"){
+    if (g.color === "tstep" && row.cond !== "target") return null; // gray: other condition
+    if (g.color === "cstep" && row.cond !== "control") return null;
     if (row.shY == null || row.shY <= 0) return null; // gray
     const f = (Math.log(row.shY)-stepRange.lo)/Math.max(stepRange.hi-stepRange.lo,1e-9);
     return lerpRamp(f);
+  }
+  if (g.color === "cond"){
+    return row.cond === "control" ? "#f59e0b" : "#2dd4bf"; // amber=control, teal=target
   }
   if (g.color === "nstep"){
     const ratio = rowRatio(row, sample);
@@ -401,7 +406,7 @@ function renderGeo(){
           <label class="ctl">scope ${seg([["first","first turn"],["steps","step turns"],["assistant","all assistant"],["all","+user"]], g.scope, "scope")}</label>
           <label class="ctl">${seg([["c","task-centered"],["r","raw"]], g.centered?"c":"r", "cent")}</label>
           ${modelSeeds().length>1?`<label class="ctl">rollout ${seg([["all","all"],...modelSeeds().map(s=>[String(s),"r"+s])], g.rollout, "rollout")}</label>`:""}
-          <label class="ctl">color ${seg([["step","step horizon"],["nstep","step / total"],["target","total horizon"],["task","task"],["phrasing","phrasing"],["turn","turn"]].concat(M().mfa?[["region","MFA region"]]:[]), g.color, "color")}</label>
+          <label class="ctl">color ${seg([["step","step horizon"],["nstep","step / total"],["target","total horizon"],["task","task"],["phrasing","phrasing"],["turn","turn"]].concat(M().joint?[["tstep","step h · TARGET only"],["cstep","step h · CONTROL only"],["cond","condition"]]:[]).concat(M().mfa?[["region","MFA region"]]:[]), g.color, "color")}</label>
           <label class="ctl">${seg([["0","spin off"],["1","spin"]], g.auto?"1":"0", "auto")}</label>
         </div>
         <canvas id="c3d"></canvas>
