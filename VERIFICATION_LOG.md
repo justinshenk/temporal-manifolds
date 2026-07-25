@@ -303,3 +303,8 @@
 - WHAT: 4th test in probe_control.py: train on TARGET rows of other tasks, test on CONTROL rows of held-out task (per-task rho recorded in results JSON). Results regenerated for all 3 control runs.
 - HOW: script rerun for all pairs; full tables read; key rows recorded below.
 - RESULT: VERIFIED. Turn_start rho pooled, transfer -> transfer-loto: Qwen32B 0.88 -> 0.87 (theme contributes ~nothing); Llama 0.90 -> 0.52; Gemma 0.92 -> 0.66 (small models ride heavily on theme/task band). 32B keeps R2=0.58 even theme-controlled at L25 turn_start.
+
+## 2026-07-25 — Time-scale classification probe + theme-split, all 3 models
+- WHAT: probe_timescale.py (classes hours/days/weeks/months/years/decades+; multinomial logistic, inner-CV C; within-target CV, transfer to control, per-task same-theme vs held-out-theme). Results JSONs written to each control run figures dir.
+- HOW: ran for all 3 model pairs; full printed tables read (task output b5i6swhpb).
+- RESULT: VERIFIED. Within-target: exact 0.62-0.75 vs baseline 0.26-0.33, adjacent 0.95-0.99. Transfer to silent steps: exact ~0.5, adjacent 0.88-0.94. Theme-split: held-out-theme exact collapses for out-of-band themes (dinner/marathon ~0.0-0.09) but survives for climate/archive (0.17-0.56, adj up to 0.98); consistent with regression: ordinal time transfers, absolute band calibration is theme-anchored.
