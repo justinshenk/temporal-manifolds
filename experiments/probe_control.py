@@ -119,9 +119,17 @@ def main() -> int:
             preds = ridge_fit_predict(Xt, yt, Xc, alpha)
             s = score(yc, preds)
             if s:
+                per_task = {}
+                ctasks_arr = np.array([m.task_id for m in metac])
+                for task in sorted(set(ctasks_arr)):
+                    te = ctasks_arr == task
+                    if te.sum() >= 8:
+                        st = score(yc[te], preds[te])
+                        if st:
+                            per_task[task] = round(st["rho"], 2)
                 results.append(
                     dict(depth=depth, layer=layer, kind=kind,
-                         test="transfer", **s)
+                         test="transfer", per_task_rho=per_task, **s)
                 )
             # theme-controlled transfer: hold each task out of training
             # entirely (both conditions share a task's theme, so plain
