@@ -308,3 +308,8 @@
 - WHAT: probe_timescale.py (classes hours/days/weeks/months/years/decades+; multinomial logistic, inner-CV C; within-target CV, transfer to control, per-task same-theme vs held-out-theme). Results JSONs written to each control run figures dir.
 - HOW: ran for all 3 model pairs; full printed tables read (task output b5i6swhpb).
 - RESULT: VERIFIED. Within-target: exact 0.62-0.75 vs baseline 0.26-0.33, adjacent 0.95-0.99. Transfer to silent steps: exact ~0.5, adjacent 0.88-0.94. Theme-split: held-out-theme exact collapses for out-of-band themes (dinner/marathon ~0.0-0.09) but survives for climate/archive (0.17-0.56, adj up to 0.98); consistent with regression: ordinal time transfers, absolute band calibration is theme-anchored.
+
+## 2026-07-25 — Timescale colorings added to geometry view
+- WHAT: three new color modes: "timescale" (6 discrete classes from stated/assigned horizon), "pred timescale (same theme)" (predY: target=grouped-CV held-out, control=transfer from target-only probe — recomputed so control preds NEVER come from control-trained probes), "pred timescale (new theme)" (predL: probe trained on TARGET rows of the other tasks only). Legends explain each.
+- HOW: node re-read of built data: predY and predL present on 1271/1432/979 step turns (32B/Llama/Gemma), covering all parseable steps; node --check passed; published.
+- RESULT: VERIFIED (build/data level); render UNVERIFIED until reload.
