@@ -6,12 +6,18 @@ offset retrospectively. If step-boundary activations encode the step's
 temporal position, a probe should read it out even though nothing temporal
 was written in the step turn.
 
-Three tests per (layer x kind):
+Four tests per (layer x kind):
     within-control  ridge on control activations vs log(assigned target),
                     grouped-CV by conversation + leave-one-task-out
     transfer        probe TRAINED on the verbalized-target run's step rows
                     (y = stated target), TESTED on control rows
                     (y = assigned target) — the headline recovery test
+    transfer-loto   theme-controlled transfer: train on TARGET rows of the
+                    OTHER tasks only, test on CONTROL rows of the held-out
+                    task. Removes the shared task-theme confound (target and
+                    control conversations of the same task share content
+                    that correlates with time); the gap between transfer and
+                    transfer-loto measures the theme contribution.
     leak split      transfer metrics on strictly time-silent control steps
                     vs steps containing incidental time words (cadence)
 
@@ -117,6 +123,37 @@ def main() -> int:
                     dict(depth=depth, layer=layer, kind=kind,
                          test="transfer", **s)
                 )
+            # theme-controlled transfer: hold each task out of training
+            # entirely (both conditions share a task's theme, so plain
+            # transfer can ride on theme-time correlations)
+            t_tasks = np.array([m.task_id for m in metat])
+            c_tasks = np.array([m.task_id for m in metac])
+            lpreds = np.full(len(yc), np.nan)
+            for task in sorted(set(c_tasks)):
+                tr = t_tasks != task
+                te = c_tasks == task
+                if tr.sum() < 12 or te.sum() == 0:
+                    continue
+                a2 = pick_alpha(
+                    Xt[tr], yt[tr],
+                    [m.sample_uid for m, keep in zip(metat, tr) if keep],
+                )
+                lpreds[te] = ridge_fit_predict(Xt[tr], yt[tr], Xc[te], a2)
+            s = score(yc, lpreds)
+            if s:
+                per_task = {}
+                for task in sorted(set(c_tasks)):
+                    te = c_tasks == task
+                    ok = te & np.isfinite(lpreds)
+                    if ok.sum() >= 8:
+                        st = score(yc[ok], lpreds[ok])
+                        if st:
+                            per_task[task] = round(st["rho"], 2)
+                results.append(
+                    dict(depth=depth, layer=layer, kind=kind,
+                         test="transfer-loto", per_task_rho=per_task, **s)
+                )
+
             # leak split on the same transfer predictions
             is_leaky = np.array(
                 [leaks.get((m.sample_uid, m.turn_index), False) for m in metac]
