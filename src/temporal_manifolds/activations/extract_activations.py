@@ -16,7 +16,7 @@ import json
 import pickle
 import sys
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, BinaryIO, Literal
 
 from tqdm import tqdm
 
@@ -82,11 +82,8 @@ def gcs_object_name_for_file(local_file: Path, upload_root: Path) -> str:
         return local_file_abs.relative_to(upload_root.resolve()).as_posix()
 
 
-def load_selected_node_groups(nodes_path: Path) -> SelectedNodeGroups:
-    """Load selected nodes as group -> [((layer, component), node_index), ...]."""
-    with nodes_path.open("rb") as f:
-        raw_nodes = RestrictedUnpickler(f).load()
-
+def normalize_selected_node_groups(raw_nodes: Any) -> SelectedNodeGroups:
+    """Validate and normalize a deserialized selected-node mapping."""
     if not isinstance(raw_nodes, dict):
         raise ValueError(f"Expected selected nodes to be a dict, got {type(raw_nodes)}")
 
@@ -112,6 +109,17 @@ def load_selected_node_groups(nodes_path: Path) -> SelectedNodeGroups:
             selected_node_groups[group_name].append(((int(layer_text), component), node_index))
 
     return selected_node_groups
+
+
+def load_selected_node_groups_from_file(nodes_file: BinaryIO) -> SelectedNodeGroups:
+    """Load selected nodes from an open binary file without requiring a local path."""
+    return normalize_selected_node_groups(RestrictedUnpickler(nodes_file).load())
+
+
+def load_selected_node_groups(nodes_path: Path) -> SelectedNodeGroups:
+    """Load selected nodes as group -> [((layer, component), node_index), ...]."""
+    with nodes_path.open("rb") as nodes_file:
+        return load_selected_node_groups_from_file(nodes_file)
 
 
 def get_unique_layer_components(

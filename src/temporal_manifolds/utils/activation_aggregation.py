@@ -119,23 +119,25 @@ def aggregate_tensors_by_type(
     }
 
 
-def aggregate_activation_file(
-    path: str | Path,
+def aggregate_activation_payload(
+    payload: dict[str, Any],
     policy: AggregationPolicy,
     allowed_nodes: AllowedNodes = None,
     residual_stream_layers: set[int] | None = None,
+    *,
+    source_name: str = "activation payload",
 ) -> dict[str, Any]:
-    """Load and aggregate one activation-cache file over cached positions."""
+    """Aggregate an in-memory activation-cache payload over cached positions."""
     if policy not in VALID_AGGREGATION_POLICIES:
         raise ValueError(f"Unknown aggregation policy: {policy!r}.")
-    path = Path(path)
-    payload = torch.load(path, map_location="cpu", weights_only=True)
     if payload.get("position_selection_policy") != "after_assistant":
         raise ValueError(
-            f"{path.name} was not created with position_selection_policy='after_assistant'."
+            f"{source_name} was not created with position_selection_policy='after_assistant'."
         )
 
     cached_positions = [int(position) for position in payload["positions"]]
+    if not cached_positions:
+        raise ValueError(f"{source_name} does not contain any cached positions.")
     if policy == "assistant":
         position_indices = [0]
     else:
@@ -155,10 +157,30 @@ def aggregate_activation_file(
                 )
 
     return {
-        "path": path,
         "sample_index": payload["metadata"][0]["sample_index"],
         "policy": policy,
         "node_indices": retained_node_indices,
         "included_residual_streams": sorted(tensors["residual"]),
         "activations": aggregate_tensors_by_type(tensors, position_indices),
     }
+
+
+def aggregate_activation_file(
+    path: str | Path,
+    policy: AggregationPolicy,
+    allowed_nodes: AllowedNodes = None,
+    residual_stream_layers: set[int] | None = None,
+) -> dict[str, Any]:
+    """Load and aggregate one activation-cache file over cached positions."""
+    if policy not in VALID_AGGREGATION_POLICIES:
+        raise ValueError(f"Unknown aggregation policy: {policy!r}.")
+    path = Path(path)
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    aggregated = aggregate_activation_payload(
+        payload,
+        policy,
+        allowed_nodes,
+        residual_stream_layers,
+        source_name=path.name,
+    )
+    return {"path": path, **aggregated}

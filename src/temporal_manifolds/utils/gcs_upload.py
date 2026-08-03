@@ -32,7 +32,7 @@ def gcs_object_name_for_file(local_file: Path, upload_root: Path | None = None) 
         return local_file.name
 
 
-def _build_gcs_client(project_id: str) -> storage.Client:
+def _build_gcs_client(project_id: str | None) -> storage.Client:
     """Build a GCS client from credentials configured in the environment."""
     credentials_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
     if credentials_json:
