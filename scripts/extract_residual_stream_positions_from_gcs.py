@@ -10,6 +10,7 @@ import argparse
 import io
 import os
 import queue
+import tempfile
 import threading
 from typing import Any, Iterable
 
@@ -254,33 +255,42 @@ def download_extract_pipeline(
 
 
 def combine_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
-    """Stack samples without reducing the three retained token positions."""
+    """Stack samples while releasing their individual activation tensors."""
     if not samples:
         raise ValueError("At least one extracted sample is required.")
 
     first_residuals = samples[0]["residual_stream_activations"]
     layer_names = list(first_residuals)
     expected_layers = set(layer_names)
+    for sample in samples:
+        residuals = sample["residual_stream_activations"]
+        if set(residuals) != expected_layers:
+            raise ValueError(
+                f"{sample['source_object']} has an inconsistent residual-stream layer set."
+            )
+
     combined: dict[str, torch.Tensor] = {}
     for layer_name in layer_names:
-        layer_tensors: list[torch.Tensor] = []
-        expected_shape = tuple(first_residuals[layer_name].shape)
-        for sample in samples:
+        first_tensor = first_residuals[layer_name]
+        expected_shape = tuple(first_tensor.shape)
+        layer_output = torch.empty(
+            (len(samples), *expected_shape[1:]),
+            dtype=first_tensor.dtype,
+            device=first_tensor.device,
+        )
+        for sample_number, sample in enumerate(samples):
             residuals = sample["residual_stream_activations"]
-            if set(residuals) != expected_layers:
-                raise ValueError(
-                    f"{sample['source_object']} has an inconsistent residual-stream layer set."
-                )
-            tensor = residuals[layer_name]
+            tensor = residuals.pop(layer_name)
             if tuple(tensor.shape) != expected_shape:
                 raise ValueError(
                     f"{sample['source_object']}:{layer_name} has shape {tuple(tensor.shape)}; "
                     f"expected {expected_shape}."
                 )
-            layer_tensors.append(tensor)
-        # Each source tensor is (1, 3, d_model), so concatenating on its
-        # existing batch dimension produces (num_samples, 3, d_model).
-        combined[layer_name] = torch.cat(layer_tensors, dim=0)
+            layer_output[sample_number].copy_(tensor[0])
+            # pop() plus dropping this reference releases the per-sample tensor
+            # as soon as it has been copied into the chunk tensor.
+            del tensor
+        combined[layer_name] = layer_output
 
     return {
         "sample_indices": [sample["sample_index"] for sample in samples],
@@ -315,16 +325,19 @@ def upload_chunk(
     *,
     overwrite: bool,
 ) -> None:
-    """Serialize and upload one result chunk without creating a local file."""
+    """Serialize through an auto-deleted temporary file and upload one chunk."""
     blob = bucket.blob(object_name)
     if not overwrite and blob.exists():
         raise FileExistsError(
             f"gs://{bucket.name}/{object_name} already exists. Pass --overwrite to replace it."
         )
-    with io.BytesIO() as output_buffer:
-        torch.save(payload, output_buffer)
+    # A BytesIO serialization duplicates the entire chunk in RAM. A temporary
+    # file keeps peak memory bounded and is deleted automatically on close.
+    with tempfile.TemporaryFile(prefix="resid_only_0_2_", suffix=".pt") as output_file:
+        torch.save(payload, output_file)
+        output_file.flush()
         blob.upload_from_file(
-            output_buffer,
+            output_file,
             rewind=True,
             content_type="application/octet-stream",
         )
@@ -360,6 +373,14 @@ def run(
     uploaded_uris: list[str] = []
     sample_offset = 0
     for chunk_index, blob_chunk in enumerate(chunked(blobs, chunk_size)):
+        object_name = chunk_object_name(destination_prefix, chunk_index)
+        uri = f"gs://{bucket_name}/{object_name}"
+        if not overwrite and bucket.blob(object_name).exists():
+            print(f"Skipping existing chunk {uri}", flush=True)
+            uploaded_uris.append(uri)
+            sample_offset += len(blob_chunk)
+            continue
+
         samples = download_extract_pipeline(
             blob_chunk,
             download_workers=download_workers,
@@ -376,14 +397,16 @@ def run(
             "sample_count": len(samples),
             **combined,
         }
-        object_name = chunk_object_name(destination_prefix, chunk_index)
+        # combine_samples consumes the individual activation tensors. Drop the
+        # remaining per-sample metadata dictionaries before serialization.
+        del samples
         upload_chunk(bucket, object_name, result, overwrite=overwrite)
-        uri = f"gs://{bucket_name}/{object_name}"
         uploaded_uris.append(uri)
-        print(f"Uploaded {len(samples)} samples to {uri}", flush=True)
-        sample_offset += len(samples)
+        chunk_sample_count = int(result["sample_count"])
+        print(f"Uploaded {chunk_sample_count} samples to {uri}", flush=True)
+        sample_offset += chunk_sample_count
         # Drop every tensor in this chunk before downloading the next one.
-        del result, combined, samples
+        del result, combined
     return uploaded_uris
 
 
@@ -433,7 +456,7 @@ def main() -> None:
         chunk_size=args.chunk_size,
         destination_prefix=args.destination_prefix,
     )
-    print(f"Uploaded {len(uploaded_uris)} chunk(s).", flush=True)
+    print(f"Completed {len(uploaded_uris)} chunk(s).", flush=True)
 
 
 if __name__ == "__main__":

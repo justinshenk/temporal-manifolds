@@ -108,6 +108,8 @@ def test_combines_samples_as_num_samples_by_three_by_model_width() -> None:
     assert residuals["layer_out/0"].shape == (2, 3, 6)
     assert residuals["layer_out/1"].shape == (2, 3, 6)
     assert torch.equal(residuals["layer_out/0"][0], torch.arange(18).reshape(3, 6))
+    assert first["residual_stream_activations"] == {}
+    assert second["residual_stream_activations"] == {}
 
 
 def test_pipeline_preserves_order_and_closes_raw_download_buffers() -> None:
@@ -144,7 +146,7 @@ def test_uploads_one_serialized_chunk_to_gcs() -> None:
 
         def upload_from_file(
             self,
-            source: io.BytesIO,
+            source: object,
             *,
             rewind: bool,
             content_type: str,
