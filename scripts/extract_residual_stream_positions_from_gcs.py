@@ -1,4 +1,4 @@
-"""Download activation caches from GCS and retain residual-stream positions 0-2.
+"""Download GCS activation caches and upload residual positions 0-2 in chunks.
 
 This is a standalone exploration utility; it is intentionally not registered as a
 project workflow or console entry point.
@@ -11,7 +11,6 @@ import io
 import os
 import queue
 import threading
-from pathlib import Path
 from typing import Any, Iterable
 
 import torch
@@ -26,7 +25,8 @@ DEFAULT_GCS_URI = (
     "conversational_after_assistant_residual_stream/"
     "results/feature_geometry_after_assistant_residual_stream"
 )
-DEFAULT_OUTPUT = Path("data/residual_stream_positions_0_1_2.pt")
+DEFAULT_DESTINATION_PREFIX = "resid_only_0_2"
+DEFAULT_CHUNK_SIZE = 5_000
 TOKEN_POSITION_INDICES = (0, 1, 2)
 OUTPUT_FORMAT_VERSION = 1
 
@@ -292,9 +292,46 @@ def combine_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def chunked(items: list[Blob], chunk_size: int) -> Iterable[list[Blob]]:
+    """Yield consecutive chunks from an already ordered blob list."""
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be at least 1.")
+    for start in range(0, len(items), chunk_size):
+        yield items[start : start + chunk_size]
+
+
+def chunk_object_name(destination_prefix: str, chunk_index: int) -> str:
+    """Return the GCS object name for one extracted activation chunk."""
+    prefix = destination_prefix.strip("/")
+    if not prefix:
+        raise ValueError("destination_prefix must not be empty.")
+    return f"{prefix}/residual_stream_positions_0_2_chunk_{chunk_index:05d}.pt"
+
+
+def upload_chunk(
+    bucket: Bucket,
+    object_name: str,
+    payload: dict[str, Any],
+    *,
+    overwrite: bool,
+) -> None:
+    """Serialize and upload one result chunk without creating a local file."""
+    blob = bucket.blob(object_name)
+    if not overwrite and blob.exists():
+        raise FileExistsError(
+            f"gs://{bucket.name}/{object_name} already exists. Pass --overwrite to replace it."
+        )
+    with io.BytesIO() as output_buffer:
+        torch.save(payload, output_buffer)
+        blob.upload_from_file(
+            output_buffer,
+            rewind=True,
+            content_type="application/octet-stream",
+        )
+
+
 def run(
     gcs_uri: str,
-    output: Path,
     *,
     project_id: str | None = None,
     max_files: int | None = None,
@@ -302,12 +339,14 @@ def run(
     download_workers: int = 8,
     processing_workers: int = 2,
     queue_capacity: int = 16,
-) -> Path:
-    """Download matching caches, extract positions 0-2, and save one local file."""
-    if output.exists() and not overwrite:
-        raise FileExistsError(f"Output already exists: {output}. Pass --overwrite to replace it.")
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    destination_prefix: str = DEFAULT_DESTINATION_PREFIX,
+) -> list[str]:
+    """Extract matching caches and upload chunked results to the source bucket."""
     if max_files is not None and max_files < 1:
         raise ValueError("max_files must be at least 1 when provided.")
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be at least 1.")
 
     bucket_name, prefix = parse_gcs_uri(gcs_uri)
     client = storage.Client(project=project_id)
@@ -315,32 +354,42 @@ def run(
     blobs = list(activation_blobs(bucket, prefix))
     if max_files is not None:
         blobs = blobs[:max_files]
-    samples = download_extract_pipeline(
-        blobs,
-        download_workers=download_workers,
-        processing_workers=processing_workers,
-        queue_capacity=queue_capacity,
-    )
-    if not samples:
+    if not blobs:
         raise FileNotFoundError(f"No activation cache files found below {gcs_uri}.")
 
-    combined = combine_samples(samples)
-    result = {
-        "format_version": OUTPUT_FORMAT_VERSION,
-        "source_gcs_uri": gcs_uri.rstrip("/"),
-        "cached_position_indices": list(TOKEN_POSITION_INDICES),
-        "sample_count": len(samples),
-        **combined,
-    }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(result, output)
-    return output
+    uploaded_uris: list[str] = []
+    sample_offset = 0
+    for chunk_index, blob_chunk in enumerate(chunked(blobs, chunk_size)):
+        samples = download_extract_pipeline(
+            blob_chunk,
+            download_workers=download_workers,
+            processing_workers=processing_workers,
+            queue_capacity=queue_capacity,
+        )
+        combined = combine_samples(samples)
+        result = {
+            "format_version": OUTPUT_FORMAT_VERSION,
+            "source_gcs_uri": gcs_uri.rstrip("/"),
+            "cached_position_indices": list(TOKEN_POSITION_INDICES),
+            "chunk_index": chunk_index,
+            "sample_offset": sample_offset,
+            "sample_count": len(samples),
+            **combined,
+        }
+        object_name = chunk_object_name(destination_prefix, chunk_index)
+        upload_chunk(bucket, object_name, result, overwrite=overwrite)
+        uri = f"gs://{bucket_name}/{object_name}"
+        uploaded_uris.append(uri)
+        print(f"Uploaded {len(samples)} samples to {uri}", flush=True)
+        sample_offset += len(samples)
+        # Drop every tensor in this chunk before downloading the next one.
+        del result, combined, samples
+    return uploaded_uris
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gcs-uri", default=DEFAULT_GCS_URI)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(
         "--project-id",
         default=os.getenv("GCP_PROJECT_ID"),
@@ -353,6 +402,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional limit for a small exploratory download.",
     )
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
+    parser.add_argument(
+        "--destination-prefix",
+        default=DEFAULT_DESTINATION_PREFIX,
+        help="Destination folder in the source GCS bucket.",
+    )
     parser.add_argument("--download-workers", type=int, default=8)
     parser.add_argument("--processing-workers", type=int, default=2)
     parser.add_argument(
@@ -367,17 +422,18 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     load_dotenv()
     args = parse_args()
-    output = run(
+    uploaded_uris = run(
         args.gcs_uri,
-        args.output,
         project_id=args.project_id,
         max_files=args.max_files,
         overwrite=args.overwrite,
         download_workers=args.download_workers,
         processing_workers=args.processing_workers,
         queue_capacity=args.queue_capacity,
+        chunk_size=args.chunk_size,
+        destination_prefix=args.destination_prefix,
     )
-    print(f"Saved extracted residual streams to {output.resolve()}")
+    print(f"Uploaded {len(uploaded_uris)} chunk(s).", flush=True)
 
 
 if __name__ == "__main__":

@@ -20,9 +20,12 @@ SCRIPT_SPEC.loader.exec_module(SCRIPT_MODULE)
 
 download_and_extract = SCRIPT_MODULE.download_and_extract
 download_extract_pipeline = SCRIPT_MODULE.download_extract_pipeline
+chunk_object_name = SCRIPT_MODULE.chunk_object_name
+chunked = SCRIPT_MODULE.chunked
 combine_samples = SCRIPT_MODULE.combine_samples
 extract_residual_stream_positions = SCRIPT_MODULE.extract_residual_stream_positions
 parse_gcs_uri = SCRIPT_MODULE.parse_gcs_uri
+upload_chunk = SCRIPT_MODULE.upload_chunk
 
 
 def _payload() -> dict[str, object]:
@@ -119,3 +122,56 @@ def test_pipeline_preserves_order_and_closes_raw_download_buffers() -> None:
 
     assert [result["sample_index"] for result in results] == [7, 8, 9]
     assert all(blob.destination is not None and blob.destination.closed for blob in blobs)
+
+
+def test_chunks_files_and_builds_destination_object_names() -> None:
+    blobs = [FakeBlob(index) for index in range(10)]
+
+    chunks = list(chunked(blobs, 4))
+
+    assert [len(chunk) for chunk in chunks] == [4, 4, 2]
+    assert chunk_object_name("/resid_only_0_2/", 3) == (
+        "resid_only_0_2/residual_stream_positions_0_2_chunk_00003.pt"
+    )
+
+
+def test_uploads_one_serialized_chunk_to_gcs() -> None:
+    class UploadBlob:
+        uploaded: bytes | None = None
+
+        def exists(self) -> bool:
+            return False
+
+        def upload_from_file(
+            self,
+            source: io.BytesIO,
+            *,
+            rewind: bool,
+            content_type: str,
+        ) -> None:
+            assert rewind is True
+            assert content_type == "application/octet-stream"
+            source.seek(0)
+            self.uploaded = source.read()
+
+    class UploadBucket:
+        name = "test-bucket"
+
+        def __init__(self) -> None:
+            self.upload_blob = UploadBlob()
+
+        def blob(self, _name: str) -> UploadBlob:
+            return self.upload_blob
+
+    bucket = UploadBucket()
+    payload = {"residual_stream_activations": {"layer_out/0": torch.ones(2, 3, 6)}}
+
+    upload_chunk(bucket, "resid_only_0_2/chunk.pt", payload, overwrite=False)
+
+    assert bucket.upload_blob.uploaded is not None
+    loaded = torch.load(
+        io.BytesIO(bucket.upload_blob.uploaded),
+        map_location="cpu",
+        weights_only=True,
+    )
+    assert loaded["residual_stream_activations"]["layer_out/0"].shape == (2, 3, 6)
