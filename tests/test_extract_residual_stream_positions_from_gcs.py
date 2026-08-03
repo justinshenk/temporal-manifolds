@@ -19,6 +19,7 @@ SCRIPT_MODULE = importlib.util.module_from_spec(SCRIPT_SPEC)
 SCRIPT_SPEC.loader.exec_module(SCRIPT_MODULE)
 
 download_and_extract = SCRIPT_MODULE.download_and_extract
+download_extract_pipeline = SCRIPT_MODULE.download_extract_pipeline
 combine_samples = SCRIPT_MODULE.combine_samples
 extract_residual_stream_positions = SCRIPT_MODULE.extract_residual_stream_positions
 parse_gcs_uri = SCRIPT_MODULE.parse_gcs_uri
@@ -37,10 +38,16 @@ def _payload() -> dict[str, object]:
 
 
 class FakeBlob:
-    name = "prefix/activations_sample_00007.pt"
+    def __init__(self, sample_index: int = 7) -> None:
+        self.sample_index = sample_index
+        self.name = f"prefix/activations_sample_{sample_index:05d}.pt"
+        self.destination: io.BytesIO | None = None
 
     def download_to_file(self, destination: io.BytesIO) -> None:
-        torch.save(_payload(), destination)
+        self.destination = destination
+        payload = _payload()
+        payload["metadata"] = [{"sample_index": self.sample_index}]
+        torch.save(payload, destination)
 
 
 def test_parse_gcs_uri() -> None:
@@ -73,9 +80,10 @@ def test_rejects_payload_with_too_few_positions() -> None:
 
 
 def test_downloads_and_loads_payload_in_memory() -> None:
-    result = download_and_extract(FakeBlob())  # type: ignore[arg-type]
+    blob = FakeBlob()
+    result = download_and_extract(blob)  # type: ignore[arg-type]
 
-    assert result["source_object"] == FakeBlob.name
+    assert result["source_object"] == blob.name
     assert result["absolute_token_positions"] == [10, 11, 12]
 
 
@@ -97,3 +105,17 @@ def test_combines_samples_as_num_samples_by_three_by_model_width() -> None:
     assert residuals["layer_out/0"].shape == (2, 3, 6)
     assert residuals["layer_out/1"].shape == (2, 3, 6)
     assert torch.equal(residuals["layer_out/0"][0], torch.arange(18).reshape(3, 6))
+
+
+def test_pipeline_preserves_order_and_closes_raw_download_buffers() -> None:
+    blobs = [FakeBlob(7), FakeBlob(8), FakeBlob(9)]
+
+    results = download_extract_pipeline(
+        blobs,
+        download_workers=2,
+        processing_workers=2,
+        queue_capacity=1,
+    )
+
+    assert [result["sample_index"] for result in results] == [7, 8, 9]
+    assert all(blob.destination is not None and blob.destination.closed for blob in blobs)
