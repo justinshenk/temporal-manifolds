@@ -54,7 +54,7 @@ def test_load_log_targets_uses_base_10_log_months(tmp_path: Path) -> None:
     assert targets.tolist() == pytest.approx([0.0, 2.0])
 
 
-def test_load_position_features_orders_samples_and_concatenates_layers(tmp_path: Path) -> None:
+def test_load_layer_position_features_orders_samples(tmp_path: Path) -> None:
     payload = {
         "cached_position_indices": [0, 1, 2],
         "sample_indices": [4, 2],
@@ -70,10 +70,14 @@ def test_load_position_features_orders_samples_and_concatenates_layers(tmp_path:
     path = tmp_path / "chunk.pt"
     torch.save(payload, path)
 
-    features, indices = SCRIPT_MODULE.load_position_features([path], 1)
+    features, indices = SCRIPT_MODULE.load_layer_position_features([path], "layer_out/1", 1)
 
     assert indices.tolist() == [2, 4]
-    assert features.tolist() == [[5.0, 21.0], [2.0, 11.0]]
+    assert features.tolist() == [[21.0], [11.0]]
+
+    layers, inspected_indices = SCRIPT_MODULE.inspect_activation_chunks([path])
+    assert layers == ["layer_out/0", "layer_out/1"]
+    assert inspected_indices.tolist() == [2, 4]
 
 
 def test_metrics_distinguish_squared_correlation_from_R2() -> None:
@@ -83,3 +87,22 @@ def test_metrics_distinguish_squared_correlation_from_R2() -> None:
     assert metrics["r2"] == pytest.approx(1.0)
     assert metrics["R2"] < 0.0
     assert metrics["rmse"] == pytest.approx(math.sqrt(14.0 / 3.0))
+
+
+def test_model_grid_contains_only_requested_model_families() -> None:
+    names = [name for name, _model in SCRIPT_MODULE.model_grid(42, 1)]
+
+    assert names == [
+        "ols",
+        "ridge_alpha-0.01",
+        "ridge_alpha-0.1",
+        "ridge_alpha-1",
+        "ridge_alpha-10",
+        "ridge_alpha-100",
+    ]
+
+
+def test_layer_index_enforces_numeric_layer_names() -> None:
+    assert SCRIPT_MODULE.layer_index("layer_out/18") == 18
+    with pytest.raises(ValueError, match="numeric"):
+        SCRIPT_MODULE.layer_index("layer_out/final")

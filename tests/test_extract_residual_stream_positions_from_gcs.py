@@ -126,6 +126,26 @@ def test_pipeline_preserves_order_and_closes_raw_download_buffers() -> None:
     assert all(blob.destination is not None and blob.destination.closed for blob in blobs)
 
 
+def test_pipeline_can_assemble_directly_into_final_chunk_tensors() -> None:
+    blobs = [FakeBlob(7), FakeBlob(8), FakeBlob(9)]
+
+    combined = download_extract_pipeline(
+        blobs,
+        download_workers=2,
+        processing_workers=2,
+        queue_capacity=1,
+        combine_results=True,
+    )
+
+    assert isinstance(combined, dict)
+    assert combined["sample_indices"] == [7, 8, 9]
+    assert combined["source_objects"] == [blob.name for blob in blobs]
+    residuals = combined["residual_stream_activations"]
+    assert residuals["layer_out/0"].shape == (3, 3, 6)
+    assert torch.equal(residuals["layer_out/0"][0], torch.arange(18).reshape(3, 6))
+    assert all(blob.destination is not None and blob.destination.closed for blob in blobs)
+
+
 def test_chunks_files_and_builds_destination_object_names() -> None:
     blobs = [FakeBlob(index) for index in range(10)]
 

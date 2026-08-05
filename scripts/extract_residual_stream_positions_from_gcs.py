@@ -7,6 +7,7 @@ project workflow or console entry point.
 from __future__ import annotations
 
 import argparse
+import gc
 import io
 import os
 import queue
@@ -128,7 +129,8 @@ def download_extract_pipeline(
     download_workers: int,
     processing_workers: int,
     queue_capacity: int,
-) -> list[dict[str, Any]]:
+    combine_results: bool = False,
+) -> list[dict[str, Any]] | dict[str, Any]:
     """Run bounded download, extraction, and raw-buffer cleanup stages."""
     if download_workers < 1 or processing_workers < 1:
         raise ValueError("download_workers and processing_workers must be at least 1.")
@@ -147,8 +149,50 @@ def download_extract_pipeline(
     cleanup = queue.Queue(maxsize=queue_capacity)
     errors: queue.Queue[tuple[str, str, BaseException]] = queue.Queue()
     stop_event = threading.Event()
-    results: list[dict[str, Any] | None] = [None] * len(blob_list)
+    results: list[dict[str, Any] | None] | None = (
+        None if combine_results else [None] * len(blob_list)
+    )
+    combined_layers: dict[str, torch.Tensor] | None = None
+    sample_indices: list[Any] = [None] * len(blob_list)
+    source_objects: list[str | None] = [None] * len(blob_list)
+    absolute_token_positions: list[list[int] | None] = [None] * len(blob_list)
+    completed = [False] * len(blob_list)
     progress = tqdm(total=len(blob_list), desc="Extracting residual streams", unit="file")
+
+    def store_combined_result(ordinal: int, result: dict[str, Any]) -> None:
+        """Copy one result into its final chunk slot and release its tensors."""
+        nonlocal combined_layers
+        residuals = result["residual_stream_activations"]
+        if not isinstance(residuals, dict) or not residuals:
+            raise ValueError(f"{result['source_object']} has no extracted residuals.")
+
+        if combined_layers is None:
+            combined_layers = {}
+            for layer_name, tensor in residuals.items():
+                combined_layers[layer_name] = torch.empty(
+                    (len(blob_list), *tensor.shape[1:]),
+                    dtype=tensor.dtype,
+                    device=tensor.device,
+                )
+        elif set(residuals) != set(combined_layers):
+            raise ValueError(
+                f"{result['source_object']} has an inconsistent residual-stream layer set."
+            )
+
+        for layer_name, output in combined_layers.items():
+            tensor = residuals.pop(layer_name)
+            expected_shape = (1, *output.shape[1:])
+            if tuple(tensor.shape) != expected_shape:
+                raise ValueError(
+                    f"{result['source_object']}:{layer_name} has shape "
+                    f"{tuple(tensor.shape)}; expected {expected_shape}."
+                )
+            output[ordinal].copy_(tensor[0])
+
+        sample_indices[ordinal] = result["sample_index"]
+        source_objects[ordinal] = result["source_object"]
+        absolute_token_positions[ordinal] = result["absolute_token_positions"]
+        completed[ordinal] = True
 
     def download_worker() -> None:
         while True:
@@ -211,8 +255,16 @@ def download_extract_pipeline(
                 # tensors have their own storage after torch.load/index_select.
                 buffer.close()
                 if ordinal is not None and result is not None:
-                    results[ordinal] = result
-                    progress.update(1)
+                    try:
+                        if combine_results:
+                            store_combined_result(ordinal, result)
+                        else:
+                            assert results is not None
+                            results[ordinal] = result
+                        progress.update(1)
+                    except BaseException as error:
+                        errors.put(("assembly", result["source_object"], error))
+                        stop_event.set()
             finally:
                 cleanup.task_done()
 
@@ -249,6 +301,16 @@ def download_extract_pipeline(
     if not errors.empty():
         stage, object_name, error = errors.get()
         raise RuntimeError(f"Failed during {stage} of {object_name}: {error}") from error
+    if combine_results:
+        if combined_layers is None or not all(completed):
+            raise RuntimeError("The extraction pipeline finished with missing results.")
+        return {
+            "sample_indices": sample_indices,
+            "source_objects": source_objects,
+            "absolute_token_positions": absolute_token_positions,
+            "residual_stream_activations": combined_layers,
+        }
+    assert results is not None
     if any(result is None for result in results):
         raise RuntimeError("The extraction pipeline finished with missing results.")
     return [result for result in results if result is not None]
@@ -381,25 +443,23 @@ def run(
             sample_offset += len(blob_chunk)
             continue
 
-        samples = download_extract_pipeline(
+        combined = download_extract_pipeline(
             blob_chunk,
             download_workers=download_workers,
             processing_workers=processing_workers,
             queue_capacity=queue_capacity,
+            combine_results=True,
         )
-        combined = combine_samples(samples)
+        assert isinstance(combined, dict)
         result = {
             "format_version": OUTPUT_FORMAT_VERSION,
             "source_gcs_uri": gcs_uri.rstrip("/"),
             "cached_position_indices": list(TOKEN_POSITION_INDICES),
             "chunk_index": chunk_index,
             "sample_offset": sample_offset,
-            "sample_count": len(samples),
+            "sample_count": len(blob_chunk),
             **combined,
         }
-        # combine_samples consumes the individual activation tensors. Drop the
-        # remaining per-sample metadata dictionaries before serialization.
-        del samples
         upload_chunk(bucket, object_name, result, overwrite=overwrite)
         uploaded_uris.append(uri)
         chunk_sample_count = int(result["sample_count"])
@@ -407,6 +467,7 @@ def run(
         sample_offset += chunk_sample_count
         # Drop every tensor in this chunk before downloading the next one.
         del result, combined
+        gc.collect()
     return uploaded_uris
 
 
