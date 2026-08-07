@@ -36,6 +36,10 @@ DEFAULT_COMPLETIONS_URI = (
 DEFAULT_DATA_DIR = Path("data/residual_stream_regression")
 DEFAULT_OUTPUT_DIR = Path("results/residual_stream_regression")
 POSITION_INDICES = (0, 1, 2)
+EXTRACTED_FORMAT_VERSION = 1
+EXTRACTED_CHUNK_NAME_PATTERN = re.compile(
+    r"residual_stream_positions_0_2_chunk_\d{5}\.pt"
+)
 MIN_LAYER_INDEX = 18
 MONTHS_PER_UNIT = {
     "second": 1.0 / (30.4375 * 24.0 * 60.0 * 60.0),
@@ -77,12 +81,16 @@ def download_inputs(
         (
             blob
             for blob in activation_bucket.list_blobs(prefix=prefix)
-            if blob.name.endswith(".pt")
+            if EXTRACTED_CHUNK_NAME_PATTERN.fullmatch(blob.name.rsplit("/", 1)[-1])
         ),
         key=lambda blob: blob.name,
     )
     if not blobs:
-        raise FileNotFoundError(f"No .pt activation chunks found below {activations_uri}.")
+        raise FileNotFoundError(
+            "No extracted residual-stream chunks found below "
+            f"{activations_uri}; expected files named "
+            "residual_stream_positions_0_2_chunk_00000.pt, etc."
+        )
 
     activation_dir = data_dir / "activations"
     activation_dir.mkdir(parents=True, exist_ok=True)
@@ -144,6 +152,30 @@ def _layer_sort_key(name: str) -> tuple[str, int | str]:
     return (prefix, int(suffix)) if separator and suffix.isdigit() else (name, name)
 
 
+def load_extracted_chunk(path: Path) -> dict[str, Any]:
+    """Load and validate one chunk emitted by the extraction script."""
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} does not contain a mapping payload.")
+    if payload.get("format_version") != EXTRACTED_FORMAT_VERSION:
+        raise ValueError(
+            f"{path} is not an extracted residual-stream chunk with format_version "
+            f"{EXTRACTED_FORMAT_VERSION}. Run extract_residual_stream_positions_from_gcs.py "
+            "and use its output instead of a raw activation cache."
+        )
+    cached_positions = payload.get("cached_position_indices")
+    if cached_positions != list(POSITION_INDICES):
+        raise ValueError(
+            f"{path} contains cached positions {cached_positions!r}; expected "
+            f"{list(POSITION_INDICES)}."
+        )
+    sample_indices = payload.get("sample_indices")
+    sample_count = payload.get("sample_count")
+    if not isinstance(sample_indices, (list, tuple)) or sample_count != len(sample_indices):
+        raise ValueError(f"{path} has inconsistent sample_indices and sample_count metadata.")
+    return payload
+
+
 def layer_index(name: str) -> int:
     """Return the numeric suffix from a residual-stream layer name."""
     _prefix, separator, suffix = name.rpartition("/")
@@ -157,7 +189,7 @@ def inspect_activation_chunks(chunk_paths: Iterable[Path]) -> tuple[list[str], n
     expected_layers: list[str] | None = None
     index_chunks: list[np.ndarray] = []
     for path in chunk_paths:
-        payload = torch.load(path, map_location="cpu", weights_only=True)
+        payload = load_extracted_chunk(path)
         residuals = payload.get("residual_stream_activations")
         if not isinstance(residuals, dict) or not residuals:
             raise ValueError(f"{path} contains no residual_stream_activations.")
@@ -191,7 +223,7 @@ def load_layer_position_features(
     index_chunks: list[np.ndarray] = []
 
     for path in chunk_paths:
-        payload = torch.load(path, map_location="cpu", weights_only=True)
+        payload = load_extracted_chunk(path)
         residuals = payload.get("residual_stream_activations")
         sample_indices = payload.get("sample_indices")
         cached_positions = payload.get("cached_position_indices", list(POSITION_INDICES))
@@ -374,7 +406,16 @@ def write_metrics(results: list[dict[str, Any]], output_dir: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--activations-uri", default=DEFAULT_ACTIVATIONS_URI)
+    parser.add_argument(
+        "--extracted-activations-uri",
+        "--activations-uri",
+        dest="activations_uri",
+        default=DEFAULT_ACTIVATIONS_URI,
+        help=(
+            "GCS prefix containing chunks emitted by "
+            "extract_residual_stream_positions_from_gcs.py."
+        ),
+    )
     parser.add_argument("--completions-uri", default=DEFAULT_COMPLETIONS_URI)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
@@ -413,7 +454,11 @@ def main() -> None:
     load_dotenv()
     args = parse_args()
     if args.skip_download:
-        chunks = sorted((args.data_dir / "activations").glob("*.pt"))
+        chunks = sorted(
+            path
+            for path in (args.data_dir / "activations").glob("*.pt")
+            if EXTRACTED_CHUNK_NAME_PATTERN.fullmatch(path.name)
+        )
         completions_path = args.data_dir / Path(parse_gcs_uri(args.completions_uri)[1]).name
         if not chunks or not completions_path.exists():
             raise FileNotFoundError("--skip-download was used but local input files are missing.")

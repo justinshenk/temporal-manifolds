@@ -56,7 +56,9 @@ def test_load_log_targets_uses_base_10_log_months(tmp_path: Path) -> None:
 
 def test_load_layer_position_features_orders_samples(tmp_path: Path) -> None:
     payload = {
+        "format_version": 1,
         "cached_position_indices": [0, 1, 2],
+        "sample_count": 2,
         "sample_indices": [4, 2],
         "residual_stream_activations": {
             "layer_out/1": torch.tensor(
@@ -78,6 +80,23 @@ def test_load_layer_position_features_orders_samples(tmp_path: Path) -> None:
     layers, inspected_indices = SCRIPT_MODULE.inspect_activation_chunks([path])
     assert layers == ["layer_out/0", "layer_out/1"]
     assert inspected_indices.tolist() == [2, 4]
+
+
+def test_raw_activation_cache_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "activations_sample_0.pt"
+    torch.save(
+        {
+            "positions": [10, 11, 12],
+            "sample_indices": [0],
+            "residual_stream_activations": {
+                "layer_out/18": torch.zeros((1, 3, 2)),
+            },
+        },
+        path,
+    )
+
+    with pytest.raises(ValueError, match="instead of a raw activation cache"):
+        SCRIPT_MODULE.inspect_activation_chunks([path])
 
 
 def test_metrics_distinguish_squared_correlation_from_R2() -> None:
