@@ -62,6 +62,21 @@ def iter_indexed_batches(
         yield list(range(start, end)), records[start:end]
 
 
+def configure_and_tokenize_left_padded(tokenizer: Any, prompts: list[str]) -> Any:
+    """Tokenize a batch with left padding through either a chat wrapper or HF tokenizer."""
+    underlying_tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
+    if underlying_tokenizer.pad_token_id is None:
+        underlying_tokenizer.pad_token = underlying_tokenizer.eos_token
+    underlying_tokenizer.padding_side = "left"
+
+    if underlying_tokenizer is tokenizer:
+        return tokenizer(prompts, padding=True, return_tensors="pt")
+
+    # ChatTemplateTokenizer applies the model's chat template and performs padded
+    # tensor tokenization internally; its public call does not accept HF kwargs.
+    return tokenizer(prompts)
+
+
 def cache_conversational_selected_acts(
     *,
     model_name: str = DEFAULT_MODEL_NAME,
@@ -103,10 +118,6 @@ def cache_conversational_selected_acts(
             f"Model {model_name!r} has {model.config.num_hidden_layers} layers; "
             f"cannot extract {COMPONENT}/{LAYER}."
         )
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"
-
     if not save_to_gcp:
         output_dir.mkdir(parents=True, exist_ok=True)
     upload_queue, upload_threads, enqueue_upload = maybe_start_memory_gcs_upload_workers(
@@ -134,10 +145,9 @@ def cache_conversational_selected_acts(
                 continue
 
             # Left padding aligns every prompt's final non-padding token at -1.
-            tokenized = tokenizer(
+            tokenized = configure_and_tokenize_left_padded(
+                tokenizer,
                 [record["text"] for record in batch_records],
-                padding=True,
-                return_tensors="pt",
             )
             activations, _ = get_activations(
                 model,
