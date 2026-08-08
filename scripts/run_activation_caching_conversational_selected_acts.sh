@@ -21,7 +21,7 @@ env_value() {
   value="$(
     grep -E "^[[:space:]]*${key}=" "${REPO_ROOT}/.env" \
       | tail -n 1 \
-      | sed -E 's/^[^=]*=//; s/^[[:space:]]*//; s/[[:space:]]*$//; s/^['"'"']//; s/['"'"']$//'
+      | sed -E 's/^[^=]*=//; s/^[[:space:]]*//; s/[[:space:]]*$//; s/^["'"'"']//; s/["'"'"']$//'
   )"
   printf '%s\n' "${value}"
 }
@@ -104,6 +104,10 @@ authenticate_gcloud() {
     gcloud auth application-default login --no-launch-browser
   fi
   gcloud config set project "${GCP_PROJECT_ID}" >/dev/null
+  if ! gcloud auth application-default set-quota-project "${GCP_PROJECT_ID}" \
+    >/dev/null 2>&1; then
+    log "Could not set the ADC quota project; continuing with the available credentials"
+  fi
   log "Using GCP project=${GCP_PROJECT_ID} bucket=${GCS_BUCKET_NAME}"
 }
 
