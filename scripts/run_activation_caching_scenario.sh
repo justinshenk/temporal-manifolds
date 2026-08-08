@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEFAULT_SCENARIO_PATH="${REPO_ROOT}/configs/activation_caching/conversational_all.yaml"
 SCENARIO_PATH="${SCENARIO_PATH:-${DEFAULT_SCENARIO_PATH}}"
+ACTIVATION_CACHING_PYTHON_SCRIPT="${ACTIVATION_CACHING_PYTHON_SCRIPT:-}"
 GCLOUD_INSTALL_DIR="${GCLOUD_INSTALL_DIR:-${HOME}/google-cloud-sdk}"
 GCLOUD_INSTALL_TMPDIR=""
 
@@ -146,18 +147,28 @@ prepare_python_env() {
 }
 
 run_scenario() {
+  if [[ -n "${ACTIVATION_CACHING_PYTHON_SCRIPT}" ]]; then
+    log "Running ${ACTIVATION_CACHING_PYTHON_SCRIPT#${REPO_ROOT}/}"
+    uv run python "${ACTIVATION_CACHING_PYTHON_SCRIPT}" "$@"
+    return
+  fi
+
   log "Running ${SCENARIO_PATH#${REPO_ROOT}/}"
   uv run temporal-manifolds-workflow "${SCENARIO_PATH}"
 }
 
 main() {
   cd "${REPO_ROOT}"
-  require_file "${SCENARIO_PATH}" "activation-caching scenario config"
+  if [[ -n "${ACTIVATION_CACHING_PYTHON_SCRIPT}" ]]; then
+    require_file "${ACTIVATION_CACHING_PYTHON_SCRIPT}" "activation-caching Python script"
+  else
+    require_file "${SCENARIO_PATH}" "activation-caching scenario config"
+  fi
   prepare_env_file
   install_gcloud_cli
   prepare_python_env
   login_gcloud_no_browser
-  run_scenario
+  run_scenario "$@"
 }
 
 main "$@"
