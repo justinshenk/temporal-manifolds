@@ -81,6 +81,7 @@ def test_time_constraints_can_be_removed_from_generated_prompts() -> None:
 
 
 def test_unconstrained_conversational_dataset_has_no_redundant_variants() -> None:
+    from temporal_manifolds.dataset import conversational
     from temporal_manifolds.dataset.generate import generate_task_dataset
 
     records = generate_task_dataset(
@@ -88,8 +89,8 @@ def test_unconstrained_conversational_dataset_has_no_redundant_variants() -> Non
         remove_time_constraints=True,
     )
 
-    assert len(records) == 999
-    assert len({record["text"] for record in records}) == 999
+    assert len(records) == len(conversational.tasks) * len(conversational.templates)
+    assert len({record["text"] for record in records}) == len(records)
 
 
 def test_unconstrained_quantity_formats_are_preserved_when_they_change_text() -> None:
@@ -140,7 +141,17 @@ def test_conversational_dataset_has_output_format_variations() -> None:
     from temporal_manifolds.dataset import conversational
 
     output_formats = {template["output_format"] for template in conversational.templates}
-    assert output_formats == {"strategy_steps", "summary_checklist", "approach_actions"}
+    assert output_formats == {
+        "strategy_steps",
+        "strategy_checklist",
+        "strategy_actions",
+        "summary_steps",
+        "summary_checklist",
+        "summary_actions",
+        "approach_steps",
+        "approach_checklist",
+        "approach_actions",
+    }
 
     prompt_framings = {template["prompt_framing"] for template in conversational.templates}
     assert prompt_framings == {

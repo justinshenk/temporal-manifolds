@@ -99,34 +99,57 @@ Give a plan appropriate for this deadline.""",
 ]
 
 
-output_formats = [
+strategy_formats = [
     {
-        "id": "strategy_steps",
-        "instructions": """Output format:
-Strategy: <one sentence>
-Steps:
+        "id": "strategy",
+        "instruction": "Strategy: <one sentence>",
+    },
+    {
+        "id": "summary",
+        "instruction": "Summary: <one sentence>",
+    },
+    {
+        "id": "approach",
+        "instruction": "Approach: <one sentence>",
+    },
+]
+
+action_formats = [
+    {
+        "id": "steps",
+        "instruction": """Steps:
 1. ...
 2. ...
 3. ...""",
     },
     {
-        "id": "summary_checklist",
-        "instructions": """Output format:
-Summary: <one sentence>
-Checklist:
+        "id": "checklist",
+        "instruction": """Checklist:
 - ...
 - ...
 - ...""",
     },
     {
-        "id": "approach_actions",
-        "instructions": """Output format:
-Approach: <one sentence>
-Actions:
+        "id": "actions",
+        "instruction": """Actions:
 1. ...
 2. ...
 3. ...""",
     },
+]
+
+
+output_formats = [
+    {
+        "id": f"{strategy_format['id']}_{action_format['id']}",
+        "instructions": (
+            "Output format:\n"
+            f"{strategy_format['instruction']}\n"
+            f"{action_format['instruction']}"
+        ),
+    }
+    for strategy_format in strategy_formats
+    for action_format in action_formats
 ]
 
 
