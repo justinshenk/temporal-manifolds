@@ -167,3 +167,109 @@ def test_conversational_dataset_has_output_format_variations() -> None:
     }
 
     assert len(conversational.templates) == len(output_formats) * len(prompt_framings)
+
+
+def test_abstract_tasks_cover_the_complete_supported_time_range() -> None:
+    from temporal_manifolds.dataset import abstract
+    from temporal_manifolds.dataset.utils import SUPPORTED_UNITS
+
+    task_unit_sets = []
+    for config in abstract.tasks.values():
+        assert isinstance(config, dict)
+        assert config["units"] == SUPPORTED_UNITS
+        assert config["temporal_coverage"] == "full_range"
+        task_unit_sets.append(config["units"])
+
+    # A future mutation of one task's coverage must not silently affect another.
+    assert len({id(units) for units in task_unit_sets}) == len(task_unit_sets)
+
+
+def test_abstract_dataset_is_not_limited_to_quantity_optimization() -> None:
+    from temporal_manifolds.dataset import abstract
+
+    task_families = {config["task_family"] for config in abstract.tasks.values()}
+
+    assert abstract.quantities == [None]
+    assert all("{quantity}" not in template["template"] for template in abstract.templates)
+    assert len(task_families) == len(abstract.tasks)
+    assert {
+        "adaptation",
+        "coordination",
+        "knowledge_transfer",
+        "resource_allocation",
+        "state_stabilization",
+        "system_understanding",
+    } <= task_families
+
+
+def test_abstract_templates_use_the_conversational_prompt_framing_grid() -> None:
+    from temporal_manifolds.dataset import abstract, conversational
+
+    expected_framing_ids = {framing["id"] for framing in conversational.prompt_framings}
+    actual_framing_ids = {framing["id"] for framing in abstract.prompt_framings}
+
+    assert actual_framing_ids == expected_framing_ids
+    assert len(abstract.templates) == len(expected_framing_ids)
+    assert {template["prompt_framing"] for template in abstract.templates} == expected_framing_ids
+    assert {template["subject_framing"] for template in abstract.templates} == {
+        "task",
+        "goal",
+        "objective",
+    }
+    assert {template["time_framing"] for template in abstract.templates} == {
+        "available_time",
+        "time_budget",
+        "deadline",
+    }
+
+
+def test_abstract_templates_share_a_format_neutral_completion_request() -> None:
+    from temporal_manifolds.dataset import abstract
+
+    assert all("output_format" not in template for template in abstract.templates)
+    assert all("Output format:" not in template["template"] for template in abstract.templates)
+    assert all(
+        template["template"].endswith(abstract.FORMAT_NEUTRAL_COMPLETION_REQUEST)
+        for template in abstract.templates
+    )
+
+
+def test_generated_abstract_tasks_each_span_every_base_time_unit() -> None:
+    from temporal_manifolds.dataset import abstract
+    from temporal_manifolds.dataset.generate import generate_task_dataset
+
+    records = generate_task_dataset(
+        dataset="abstract",
+        template_list=[abstract.templates[0]],
+        time_values=[1],
+    )
+    base_units_by_task = {task: set() for task in abstract.tasks}
+
+    for record in records:
+        assert record["quantity"] is None
+        if record["unit_variant"] == "original" and record["number_format"] == "numeric":
+            base_units_by_task[record["task"]].add(record["base_unit"])
+
+    assert all(units == abstract.time_units for units in base_units_by_task.values())
+
+
+def test_abstract_time_values_add_at_most_twenty_log_spaced_points() -> None:
+    import math
+
+    from temporal_manifolds.dataset import abstract
+
+    original_values = {1, 2, 3, 4, 5, 10, 20, 30, 50, 70, 100}
+    added_values = set(abstract.values) - original_values
+
+    assert abstract.values == sorted(set(abstract.values))
+    assert original_values <= set(abstract.values)
+    assert 0 < len(added_values) <= 20
+
+    # Below 10 there are no integer points between adjacent small values.  In
+    # the decade where finer integer spacing is possible, avoid large log gaps.
+    values_from_ten = [value for value in abstract.values if value >= 10]
+    log_gaps = [
+        math.log10(right) - math.log10(left)
+        for left, right in zip(values_from_ten, values_from_ten[1:])
+    ]
+    assert max(log_gaps) < 0.075

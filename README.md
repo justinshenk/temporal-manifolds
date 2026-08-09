@@ -38,6 +38,30 @@ cp .env.example .env                     # fill in GCP/GCS settings, etc.
 uv run pytest -q                         # smoke tests
 ```
 
+### Local activation explorer
+
+Launch the browser-based PCA explorer, then choose the folder containing
+`activations_batch_*.pt` files:
+
+```bash
+uv run streamlit run apps/activation_explorer.py
+```
+
+The app reproduces the conversational notebook's dotted metadata filtering,
+time-horizon normalization, group-mean aggregation, and PCA order. PCA is
+refitted whenever a filter, aggregation key, component count, layer, cached
+position, or sample limit changes.
+
+For large datasets, use **Local path** instead of **Folder upload**. The app
+indexes metadata once and streams only the selected layer/position into a
+disk-backed cache under `data/activation_explorer_cache/`. Filtering and PCA
+refits then reuse that slice without reopening the `.pt` batches.
+
+Aggregation reads the disk-backed slice in bounded chunks instead of copying
+all selected rows into RAM. PCA component changes reuse the prepared aggregate;
+when aggregation is disabled, the app uses batched incremental PCA to keep peak
+memory bounded.
+
 ## Layout
 
 ```

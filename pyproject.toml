@@ -23,6 +23,9 @@ dependencies = [
     "tqdm>=4.65.0",
     "pyyaml>=6.0",
     "python-dotenv>=1.0.0",
+    "pandas>=2.2.0",
+    "plotly>=5.24.0",
+    "streamlit>=1.50.0",
 ]
 
 [project.optional-dependencies]

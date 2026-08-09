@@ -47,3 +47,11 @@ figures/*
 comparison/*
 
 data/completions_completions_256.jsonl
+
+# Local agent and workspace configuration
+.agents/
+.claude/
+.streamlit/config.toml
+
+# Local pipeline inspection notes
+docs/abstract-vs-conversational-dataset-pipelines.md
