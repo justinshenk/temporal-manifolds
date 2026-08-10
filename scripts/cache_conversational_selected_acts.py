@@ -87,9 +87,11 @@ def cache_conversational_selected_acts(
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_samples: int | None = None,
     remove_time_constraints: bool = False,
+    remove_output_format_constraints: bool = False,
     save_to_gcp: bool = True,
     gcp_project_id: str | None = None,
     gcs_bucket_name: str | None = None,
+    gcs_prefix: str = GCS_PREFIX,
     upload_worker_count: int = 16,
     upload_queue_capacity: int = 128,
     overwrite: bool = False,
@@ -103,6 +105,7 @@ def cache_conversational_selected_acts(
     records = generate_task_dataset(
         dataset="conversational",
         remove_time_constraints=remove_time_constraints,
+        remove_output_format_constraints=remove_output_format_constraints,
     )
     if max_samples is not None:
         records = records[:max_samples]
@@ -124,7 +127,7 @@ def cache_conversational_selected_acts(
         enabled=save_to_gcp,
         project_id=gcp_project_id,
         bucket_name=gcs_bucket_name,
-        prefix=GCS_PREFIX,
+        prefix=gcs_prefix,
         worker_count=upload_worker_count,
         queue_capacity=upload_queue_capacity,
     )
@@ -190,9 +193,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--remove-time-constraints", action="store_true")
+    parser.add_argument("--remove-output-format-constraints", action="store_true")
     parser.add_argument("--save-to-gcp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gcp-project-id", default=None)
     parser.add_argument("--gcs-bucket-name", default=None)
+    parser.add_argument("--gcs-prefix", default=GCS_PREFIX)
     parser.add_argument("--upload-worker-count", type=int, default=16)
     parser.add_argument("--upload-queue-capacity", type=int, default=128)
     parser.add_argument("--overwrite", action="store_true")
@@ -211,9 +216,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         batch_size=args.batch_size,
         max_samples=args.max_samples,
         remove_time_constraints=args.remove_time_constraints,
+        remove_output_format_constraints=args.remove_output_format_constraints,
         save_to_gcp=args.save_to_gcp,
         gcp_project_id=args.gcp_project_id or os.getenv("GCP_PROJECT_ID"),
         gcs_bucket_name=args.gcs_bucket_name or os.getenv("GCS_BUCKET_NAME"),
+        gcs_prefix=args.gcs_prefix,
         upload_worker_count=args.upload_worker_count,
         upload_queue_capacity=args.upload_queue_capacity,
         overwrite=args.overwrite,

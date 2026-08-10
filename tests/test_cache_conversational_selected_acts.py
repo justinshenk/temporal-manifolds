@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
 
 SCRIPT_PATH = Path.cwd() / "scripts" / "cache_conversational_selected_acts.py"
+NO_OUTPUT_FORMAT_RUNNER_PATH = (
+    Path.cwd()
+    / "scripts"
+    / "run_activation_caching_conversational_selected_acts_no_output_format.sh"
+)
 SPEC = importlib.util.spec_from_file_location("cache_conversational_selected_acts", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
 SCRIPT = importlib.util.module_from_spec(SPEC)
@@ -50,6 +56,47 @@ def test_cli_defaults_to_gcp_selected_acts_contract() -> None:
     assert SCRIPT.COMPONENT == "layer_out"
     assert SCRIPT.POSITION == -1
     assert args.batch_size == 128
+
+
+def test_no_output_format_runner_uses_an_isolated_artifact_namespace() -> None:
+    runner = NO_OUTPUT_FORMAT_RUNNER_PATH.read_text(encoding="utf-8")
+
+    assert "scripts/cache_conversational_selected_acts.py" in runner
+    assert "--remove-output-format-constraints" in runner
+    assert "--gcs-prefix NOF_selected_acts" in runner
+    assert "results/selected_acts_no_output_format" in runner
+
+
+def test_no_output_format_option_is_forwarded_to_dataset_generation(
+    monkeypatch, tmp_path: Path
+) -> None:
+    generated_with = None
+
+    def generate_task_dataset(**kwargs):
+        nonlocal generated_with
+        generated_with = kwargs
+        return []
+
+    model = SimpleNamespace(
+        config=SimpleNamespace(num_hidden_layers=22),
+        eval=lambda: None,
+    )
+    monkeypatch.setattr(SCRIPT, "generate_task_dataset", generate_task_dataset)
+    monkeypatch.setattr(
+        SCRIPT,
+        "load_model_tokenizer_config",
+        lambda **_kwargs: (model, object(), None),
+    )
+
+    SCRIPT.cache_conversational_selected_acts(
+        output_dir=tmp_path,
+        remove_output_format_constraints=True,
+        save_to_gcp=False,
+    )
+
+    assert generated_with is not None
+    assert generated_with["dataset"] == "conversational"
+    assert generated_with["remove_output_format_constraints"] is True
 
 
 def test_iter_indexed_batches_preserves_sample_indices() -> None:
