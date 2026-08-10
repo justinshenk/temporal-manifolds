@@ -116,7 +116,7 @@ def clear_visual_filters() -> None:
     for key in list(st.session_state):
         if key == "visual_filter_fields" or key.startswith("visual_filter::"):
             st.session_state.pop(key, None)
-please dont run locally
+
 
 def forget_loaded_pca() -> None:
     for key in (
@@ -1041,8 +1041,7 @@ with st.sidebar:
                 use_sources(
                     sources,
                     label=(
-                        f"{len(resolved_folders):,} local {folder_label} · "
-                        f"{len(sources):,} batches"
+                        f"{len(resolved_folders):,} local {folder_label} · {len(sources):,} batches"
                     ),
                     is_local=True,
                 )
