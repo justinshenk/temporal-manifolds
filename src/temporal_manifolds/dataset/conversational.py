@@ -153,6 +153,16 @@ output_formats = [
 ]
 
 
+format_neutral_templates = [
+    {
+        "id": framing["id"],
+        "template": framing["body"],
+        "prompt_framing": framing["id"],
+    }
+    for framing in prompt_framings
+]
+
+
 templates = [
     {
         "id": f"{framing['id']}__{output_format['id']}",

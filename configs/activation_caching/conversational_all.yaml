@@ -20,6 +20,7 @@ args:
   position_selection_policy: default
   max_samples: null
   remove_time_constraints: false
+  remove_output_format_constraints: false
   overwrite: false
   save_to_gcp: true
   upload_worker_count: 16

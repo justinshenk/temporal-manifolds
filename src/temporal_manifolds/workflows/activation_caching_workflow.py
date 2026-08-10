@@ -56,6 +56,7 @@ class WorkflowConfig:
     position_selection_policy: PositionSelectionPolicy
     max_samples: int | None
     remove_time_constraints: bool
+    remove_output_format_constraints: bool
     overwrite: bool
     save_to_gcp: bool
     upload_worker_count: int
@@ -105,7 +106,12 @@ class WorkflowConfig:
             )
         modules = tuple(cast(StageName, module) for module in raw_modules)
 
-        boolean_keys = ("remove_time_constraints", "overwrite", "save_to_gcp")
+        boolean_keys = (
+            "remove_time_constraints",
+            "remove_output_format_constraints",
+            "overwrite",
+            "save_to_gcp",
+        )
         for key in boolean_keys:
             if not isinstance(values[key], bool):
                 raise TypeError(f"{key} must be a YAML boolean")
@@ -117,6 +123,15 @@ class WorkflowConfig:
             raise ValueError("upload_queue_capacity must be at least 1")
 
         remove_time_constraints = bool(values["remove_time_constraints"])
+        remove_output_format_constraints = bool(
+            values["remove_output_format_constraints"]
+        )
+
+        def artifact_prefix(prefix: str | None) -> str | None:
+            prefix = with_no_constraints_prefix(prefix, remove_time_constraints)
+            return with_no_output_format_constraints_prefix(
+                prefix, remove_output_format_constraints
+            )
 
         return cls(
             dataset=dataset,
@@ -135,26 +150,23 @@ class WorkflowConfig:
             position_selection_policy=cast(PositionSelectionPolicy, position_selection_policy),
             max_samples=None if values["max_samples"] is None else int(values["max_samples"]),
             remove_time_constraints=remove_time_constraints,
+            remove_output_format_constraints=remove_output_format_constraints,
             overwrite=bool(values["overwrite"]),
             save_to_gcp=bool(values["save_to_gcp"]),
             upload_worker_count=upload_worker_count,
             upload_queue_capacity=upload_queue_capacity,
             gcp_project_id=GCP_PROJECT_ID,
             gcs_bucket_name=GCS_BUCKET_NAME,
-            gcs_prefix=with_no_constraints_prefix(gcs_prefix, remove_time_constraints),
+            gcs_prefix=artifact_prefix(gcs_prefix),
             dataset_gcs_prefix=(
                 None
                 if values["dataset_gcs_prefix"] is None
-                else with_no_constraints_prefix(
-                    str(values["dataset_gcs_prefix"]), remove_time_constraints
-                )
+                else artifact_prefix(str(values["dataset_gcs_prefix"]))
             ),
             completions_gcs_prefix=(
                 None
                 if values["completions_gcs_prefix"] is None
-                else with_no_constraints_prefix(
-                    str(values["completions_gcs_prefix"]), remove_time_constraints
-                )
+                else artifact_prefix(str(values["completions_gcs_prefix"]))
             ),
             nodes_gcs_prefix=(
                 None
@@ -200,17 +212,28 @@ def with_no_constraints_prefix(prefix: str | None, enabled: bool) -> str | None:
     return f"NC_{prefix}"
 
 
+def with_no_output_format_constraints_prefix(
+    prefix: str | None, enabled: bool
+) -> str | None:
+    """Namespace artifacts generated without prescribed response formatting."""
+    if not enabled or prefix is None or prefix.startswith("NOF_"):
+        return prefix
+    return f"NOF_{prefix}"
+
+
 def run_dataset_stage(
     *,
     dataset: str,
     output_path: Path,
     remove_time_constraints: bool,
+    remove_output_format_constraints: bool,
 ) -> Path:
     """Generate prompt records for the requested activation dataset."""
     generate_task_dataset(
         output_path=output_path,
         dataset=dataset,
         remove_time_constraints=remove_time_constraints,
+        remove_output_format_constraints=remove_output_format_constraints,
     )
     return output_path
 
@@ -456,6 +479,7 @@ def run_workflow(config: WorkflowConfig) -> None:
                 dataset=config.dataset,
                 output_path=config.prompt_records_path,
                 remove_time_constraints=config.remove_time_constraints,
+                remove_output_format_constraints=config.remove_output_format_constraints,
             )
             upload_stage_artifacts([dataset_artifact], config=config)
 

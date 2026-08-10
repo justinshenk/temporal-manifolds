@@ -275,18 +275,25 @@ def generate_task_dataset(
     randomize_template: bool = False,
     dataset: str = "conversational",
     remove_time_constraints: bool = False,
+    remove_output_format_constraints: bool = False,
 ) -> list[PromptRecord]:
     """Return formatted prompt records from the configured templates and tasks.
 
     When ``randomize_template`` is false, return the full cartesian product of
     templates and task parameters. When true, generate each task-parameter sample
     once and choose one template from ``template_list`` at random for that sample.
+    Format-neutral conversational templates are selected only when no explicit
+    ``template_list`` is supplied.
     """
     dataset_templates, dataset_tasks, dataset_values, dataset_quantities = load_dataset_config(
         dataset
     )
     if template_list is None:
-        template_list = dataset_templates
+        template_list = (
+            conversational_dataset.format_neutral_templates
+            if remove_output_format_constraints and dataset == "conversational"
+            else dataset_templates
+        )
     if task_units is None:
         task_units = dataset_tasks
     if time_values is None:
@@ -486,6 +493,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Remove explicit Available time, Deadline, and similar prompt fields.",
     )
+    parser.add_argument(
+        "--remove-output-format-constraints",
+        action="store_true",
+        help="Use format-neutral conversational prompts without an imposed output structure.",
+    )
     return parser.parse_args()
 
 
@@ -496,5 +508,6 @@ if __name__ == "__main__":
         output_path=args.output_path,
         randomize_template=args.randomize_template,
         remove_time_constraints=args.remove_time_constraints,
+        remove_output_format_constraints=args.remove_output_format_constraints,
     )
     print(json.dumps(dataset_records, indent=2))

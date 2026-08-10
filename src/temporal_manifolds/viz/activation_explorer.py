@@ -3,28 +3,80 @@
 from __future__ import annotations
 
 import io
+import json
 import os
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
+import joblib
 import numpy as np
 import pandas as pd
 import torch
+from sklearn import __version__ as sklearn_version
 from sklearn.decomposition import PCA, IncrementalPCA
+from pandas.api.types import is_scalar
 
 MISSING = object()
+PCA_MODEL_ARTIFACT_KIND = "temporal-manifolds.activation-pca"
+PCA_MODEL_ARTIFACT_VERSION = 1
+PCA_PROJECTION_FINGERPRINT_VERSION = 2
+MetadataValueToken = tuple[str, str, str]
 
 UNIT_TO_MONTHS = {
-    "second": 1 / (30.4375 * 86400), "minute": 1 / (30.4375 * 1440),
-    "hour": 1 / (30.4375 * 24), "day": 1 / 30.4375, "week": 7 / 30.4375,
-    "month": 1, "year": 12, "decade": 120, "century": 1200,
+    "second": 1 / (30.4375 * 86400),
+    "minute": 1 / (30.4375 * 1440),
+    "hour": 1 / (30.4375 * 24),
+    "day": 1 / 30.4375,
+    "week": 7 / 30.4375,
+    "month": 1,
+    "year": 12,
+    "decade": 120,
+    "century": 1200,
     "millennium": 12000,
 }
 UNIT_TO_MONTHS.update({f"{unit}s": value for unit, value in list(UNIT_TO_MONTHS.items())})
 UNIT_TO_MONTHS["centuries"] = 1200
 UNIT_TO_MONTHS["millennia"] = 12000
+
+
+def _update_array_fingerprint(signature, value: Any) -> None:
+    array = np.ascontiguousarray(value)
+    signature.update(str(array.shape).encode("ascii"))
+    signature.update(array.dtype.str.encode("ascii"))
+    signature.update(array.tobytes())
+
+
+def pca_projection_fingerprint(
+    pca: Any, *, version: int = PCA_PROJECTION_FINGERPRINT_VERSION
+) -> str:
+    """Fingerprint every fitted PCA field that changes transformed coordinates.
+
+    Version 1 reproduces the original components-and-mean digest so surface artifacts saved
+    before GUI loading was added remain usable. Version 2 also identifies whitening and its
+    fitted variance scale.
+    """
+
+    if version not in {1, PCA_PROJECTION_FINGERPRINT_VERSION}:
+        raise ValueError(f"Unsupported PCA projection fingerprint version: {version!r}.")
+    if not hasattr(pca, "components_") or not hasattr(pca, "mean_"):
+        raise ValueError("The PCA model must be fitted before it can be fingerprinted.")
+
+    signature = sha256()
+    if version == PCA_PROJECTION_FINGERPRINT_VERSION:
+        signature.update(b"temporal-manifolds.pca-coordinate-system.v2\0")
+    _update_array_fingerprint(signature, pca.components_)
+    _update_array_fingerprint(signature, pca.mean_)
+    if version == PCA_PROJECTION_FINGERPRINT_VERSION:
+        whiten = bool(getattr(pca, "whiten", False))
+        signature.update(b"whiten=1" if whiten else b"whiten=0")
+        if whiten:
+            if not hasattr(pca, "explained_variance_"):
+                raise ValueError("The whitened PCA model has no fitted variance scale.")
+            _update_array_fingerprint(signature, pca.explained_variance_)
+    return signature.hexdigest()
 
 
 def activation_batch_basename(name: str) -> str | None:
@@ -33,6 +85,42 @@ def activation_batch_basename(name: str) -> str | None:
     if basename.startswith("activations_batch_") and basename.endswith(".pt"):
         return basename
     return None
+
+
+def select_activation_batch_uploads(files: Iterable[Any]) -> list[Any]:
+    """Keep activation-batch uploads in order without merging duplicate filenames."""
+    return [
+        file
+        for file in files
+        if activation_batch_basename(str(getattr(file, "name", ""))) is not None
+    ]
+
+
+def discover_activation_batch_paths(
+    folders: Iterable[str | Path],
+) -> tuple[list[str], list[str]]:
+    """Discover batches across roots, deduplicating only identical resolved paths."""
+    roots: list[str] = []
+    sources: list[str] = []
+    seen_roots: set[str] = set()
+    seen_sources: set[str] = set()
+    for folder in folders:
+        path = Path(folder).expanduser()
+        if not path.is_dir():
+            raise ValueError(f"Folder does not exist or is not accessible: {path}")
+        resolved_root = str(path.resolve())
+        if resolved_root in seen_roots:
+            continue
+        seen_roots.add(resolved_root)
+        roots.append(resolved_root)
+        for item in sorted(path.rglob("activations_batch_*.pt")):
+            resolved_source = str(item.resolve())
+            if resolved_source not in seen_sources:
+                seen_sources.add(resolved_source)
+                sources.append(resolved_source)
+    if not roots:
+        raise ValueError("Enter at least one folder path.")
+    return sources, roots
 
 
 def flatten_scalar_metadata(metadata: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
@@ -61,6 +149,170 @@ def metadata_value_matches(actual_value: Any, expected_value: Any) -> bool:
         return False
     allowed_values = expected_value if isinstance(expected_value, list) else [expected_value]
     return any(actual_value == allowed_value for allowed_value in allowed_values)
+
+
+def metadata_value_token(value: Any) -> MetadataValueToken:
+    """Return a stable, typed token suitable for metadata selection widgets."""
+    if is_scalar(value):
+        try:
+            if bool(pd.isna(value)):
+                return ("missing", "", "")
+        except (TypeError, ValueError):
+            pass
+    normalized = value.tolist() if hasattr(value, "tolist") else value
+    try:
+        representation = json.dumps(
+            normalized,
+            sort_keys=True,
+            ensure_ascii=False,
+            default=repr,
+        )
+    except (TypeError, ValueError):
+        representation = repr(normalized)
+    value_type = type(value)
+    return (
+        "value",
+        f"{value_type.__module__}.{value_type.__qualname__}",
+        representation,
+    )
+
+
+def metadata_filter_choices(values: Iterable[Any]) -> list[tuple[MetadataValueToken, str]]:
+    """Return unique typed metadata tokens and unambiguous display labels."""
+    representatives: dict[MetadataValueToken, Any] = {}
+    for value in values:
+        representatives.setdefault(metadata_value_token(value), value)
+
+    base_labels = {
+        token: (
+            "<missing>"
+            if token[0] == "missing"
+            else "<empty string>"
+            if isinstance(value, str) and value == ""
+            else str(value)
+        )
+        for token, value in representatives.items()
+    }
+    label_counts = Counter(base_labels.values())
+    labels: dict[MetadataValueToken, str] = {}
+    used_labels: set[str] = set()
+    for token, base_label in base_labels.items():
+        type_label = "missing" if token[0] == "missing" else token[1].rsplit(".", 1)[-1]
+        label = f"{base_label} · {type_label}" if label_counts[base_label] > 1 else base_label
+        if label in used_labels:
+            suffix = 2
+            while f"{label} · {suffix}" in used_labels:
+                suffix += 1
+            label = f"{label} · {suffix}"
+        used_labels.add(label)
+        labels[token] = label
+    return sorted(labels.items(), key=lambda item: (item[1].casefold(), item[0]))
+
+
+def metadata_filter_mask(
+    dataframe: pd.DataFrame,
+    filters: Mapping[str, Sequence[MetadataValueToken]],
+) -> np.ndarray:
+    """Select rows with OR-within-field and AND-across-field semantics."""
+    selected = np.ones(len(dataframe), dtype=bool)
+    for field, allowed_tokens in filters.items():
+        if field not in dataframe:
+            raise ValueError(f"Metadata filter field is unavailable: {field}")
+        allowed = set(allowed_tokens)
+        if not allowed:
+            continue
+        selected &= np.fromiter(
+            (metadata_value_token(value) in allowed for value in dataframe[field]),
+            dtype=bool,
+            count=len(dataframe),
+        )
+    return selected
+
+
+def validate_pca_model(pca: Any) -> tuple[int, int]:
+    """Validate a fitted PCA estimator and return component and feature counts."""
+    if not isinstance(pca, (PCA, IncrementalPCA)):
+        raise ValueError("The selected file does not contain a PCA or IncrementalPCA model.")
+    components = getattr(pca, "components_", None)
+    explained_variance = getattr(pca, "explained_variance_ratio_", None)
+    if components is None or explained_variance is None:
+        raise ValueError("The selected PCA model has not been fitted.")
+    components = np.asarray(components)
+    explained_variance = np.asarray(explained_variance)
+    if components.ndim != 2 or not all(components.shape):
+        raise ValueError("The selected PCA model has invalid fitted components.")
+    component_count, feature_count = map(int, components.shape)
+    if explained_variance.shape != (component_count,):
+        raise ValueError("The selected PCA model has invalid explained-variance metadata.")
+    fitted_feature_count = int(getattr(pca, "n_features_in_", feature_count))
+    if fitted_feature_count != feature_count:
+        raise ValueError("The selected PCA model has inconsistent feature metadata.")
+    return component_count, feature_count
+
+
+def serialize_pca_model(
+    pca: PCA | IncrementalPCA,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> bytes:
+    """Serialize a fitted PCA estimator and provenance as a versioned joblib artifact."""
+    component_count, feature_count = validate_pca_model(pca)
+    artifact = {
+        "kind": PCA_MODEL_ARTIFACT_KIND,
+        "version": PCA_MODEL_ARTIFACT_VERSION,
+        "model": pca,
+        "sklearn_version": sklearn_version,
+        "component_count": component_count,
+        "feature_count": feature_count,
+        "metadata": dict(metadata or {}),
+    }
+    buffer = io.BytesIO()
+    joblib.dump(artifact, buffer, compress=3)
+    return buffer.getvalue()
+
+
+def load_pca_model(
+    source: str | Path | bytes | BinaryIO,
+) -> tuple[PCA | IncrementalPCA, dict[str, Any]]:
+    """Load a trusted PCA artifact or raw estimator and return its provenance.
+
+    Joblib and pickle files can execute arbitrary code while loading. Callers must
+    only pass files from trusted sources.
+    """
+    if isinstance(source, bytes):
+        source = io.BytesIO(source)
+    elif hasattr(source, "seek"):
+        source.seek(0)
+    try:
+        payload = joblib.load(source)
+    except Exception as exc:  # noqa: BLE001 - normalize artifact errors for UI callers
+        raise ValueError(f"The PCA model file could not be loaded: {exc}") from exc
+
+    if isinstance(payload, (PCA, IncrementalPCA)):
+        validate_pca_model(payload)
+        return payload, {}
+    if not isinstance(payload, Mapping) or payload.get("kind") != PCA_MODEL_ARTIFACT_KIND:
+        raise ValueError("The selected file is not a supported PCA model artifact.")
+    if payload.get("version") != PCA_MODEL_ARTIFACT_VERSION:
+        raise ValueError(f"Unsupported PCA artifact version: {payload.get('version')!r}.")
+    pca = payload.get("model")
+    component_count, feature_count = validate_pca_model(pca)
+    if payload.get("component_count") != component_count:
+        raise ValueError("The PCA artifact's component count does not match its model.")
+    if payload.get("feature_count") != feature_count:
+        raise ValueError("The PCA artifact's feature count does not match its model.")
+    metadata = payload.get("metadata", {})
+    if not isinstance(metadata, Mapping):
+        raise ValueError("The PCA artifact contains invalid provenance metadata.")
+    provenance = {
+        **dict(metadata),
+        "artifact_kind": PCA_MODEL_ARTIFACT_KIND,
+        "artifact_version": PCA_MODEL_ARTIFACT_VERSION,
+        "sklearn_version": payload.get("sklearn_version"),
+        "component_count": component_count,
+        "feature_count": feature_count,
+    }
+    return pca, provenance
 
 
 def _load(source: str | Path | bytes | BinaryIO) -> dict[str, Any]:
@@ -104,26 +356,35 @@ def inspect_sources(sources: Sequence[str | Path | bytes | BinaryIO]) -> dict[st
         ):
             flattened = flatten_scalar_metadata(metadata)
             metadata_fields.update(flattened)
-            metadata_records.append({
-                "sample_index": int(sample_index),
-                "_source_index": source_index,
-                "_row_offset": row_offset,
-                **flattened,
-            })
+            metadata_records.append(
+                {
+                    "sample_index": int(sample_index),
+                    "_source_index": source_index,
+                    "_row_offset": row_offset,
+                    **flattened,
+                }
+            )
         del payload
     if not components:
         raise ValueError("Selected batches do not share an activation component.")
     return {
-        "components": sorted(components), "positions": positions or [],
-        "metadata_fields": sorted(metadata_fields), "batch_count": len(sources),
-        "row_count": rows, "metadata_index": pd.DataFrame(metadata_records),
+        "components": sorted(components),
+        "positions": positions or [],
+        "metadata_fields": sorted(metadata_fields),
+        "batch_count": len(sources),
+        "row_count": rows,
+        "metadata_index": pd.DataFrame(metadata_records),
         "source_row_counts": source_row_counts,
     }
 
 
 def extract_activation_slice(
-    sources: Sequence[str | Path | bytes | BinaryIO], *, layer_component: str,
-    position_index: int, source_row_counts: Sequence[int], cache_dir: str | Path | None = None,
+    sources: Sequence[str | Path | bytes | BinaryIO],
+    *,
+    layer_component: str,
+    position_index: int,
+    source_row_counts: Sequence[int],
+    cache_dir: str | Path | None = None,
     progress: Callable[[int, int], None] | None = None,
 ) -> tuple[np.ndarray, Path | None]:
     """Stream one component/position into a reusable RAM or disk-backed matrix."""
@@ -165,7 +426,9 @@ def extract_activation_slice(
             if tensor.shape[0] != expected_rows:
                 raise ValueError(f"Batch {source_index + 1} changed since metadata was indexed.")
             if not 0 <= position_index < tensor.shape[1]:
-                raise ValueError(f"Position {position_index} is unavailable in batch {source_index + 1}.")
+                raise ValueError(
+                    f"Position {position_index} is unavailable in batch {source_index + 1}."
+                )
             if matrix is None:
                 shape = (total_rows, int(tensor.shape[-1]))
                 if write_path is None:
@@ -197,12 +460,17 @@ def extract_activation_slice(
 
 
 def prepare_analysis_data(
-    activation_matrix: np.ndarray, metadata_index: pd.DataFrame, *,
-    cached_position: Any, metadata_filters: Mapping[str, Any] | None,
-    aggregation_fields: Sequence[str] | None, max_samples: int | None = None,
+    activation_matrix: np.ndarray,
+    metadata_index: pd.DataFrame,
+    *,
+    cached_position: Any,
+    metadata_filters: Mapping[str, Any] | None,
+    aggregation_fields: Sequence[str] | None,
+    max_samples: int | None = None,
     chunk_size: int = 2048,
     phrasing_fields: Sequence[str] = (
-        "template_metadata.prompt_framing", "template_metadata.output_format",
+        "template_metadata.prompt_framing",
+        "template_metadata.output_format",
     ),
 ) -> tuple[np.ndarray | None, np.ndarray, pd.DataFrame, dict[str, Any]]:
     """Filter metadata and aggregate a memory map without copying all selected rows."""
@@ -221,9 +489,11 @@ def prepare_analysis_data(
     if not len(row_offsets):
         raise ValueError("No activation rows match the selected filters.")
 
-    metadata_df = metadata_index.iloc[row_offsets].drop(
-        columns=["_source_index", "_row_offset"], errors="ignore"
-    ).reset_index(drop=True)
+    metadata_df = (
+        metadata_index.iloc[row_offsets]
+        .drop(columns=["_source_index", "_row_offset"], errors="ignore")
+        .reset_index(drop=True)
+    )
     metadata_df.insert(1, "absolute_token_position", cached_position)
     _add_time_horizon_months(metadata_df)
 
@@ -237,15 +507,13 @@ def prepare_analysis_data(
     if aggregation_fields:
         records: list[pd.Series] = []
         groups = metadata_df.groupby(aggregation_fields, dropna=False, sort=False).indices
-        prepared_matrix = np.empty(
-            (len(groups), activation_matrix.shape[1]), dtype=np.float32
-        )
+        prepared_matrix = np.empty((len(groups), activation_matrix.shape[1]), dtype=np.float32)
         for group_index, offsets in enumerate(groups.values()):
             group_offsets = np.asarray(offsets, dtype=np.int64)
             source_offsets = row_offsets[group_offsets]
             vector_sum = np.zeros(activation_matrix.shape[1], dtype=np.float32)
             for start in range(0, len(source_offsets), chunk_size):
-                chunk_offsets = source_offsets[start:start + chunk_size]
+                chunk_offsets = source_offsets[start : start + chunk_size]
                 chunk = np.asarray(activation_matrix[chunk_offsets], dtype=np.float32)
                 vector_sum += chunk.sum(axis=0, dtype=np.float32)
                 del chunk
@@ -284,10 +552,45 @@ def _bounded_batches(length: int, batch_size: int, minimum_size: int) -> Iterabl
         start += size
 
 
+def _build_projection_result(
+    analysis_metadata: pd.DataFrame,
+    projections: np.ndarray,
+    pca: PCA | IncrementalPCA,
+    details: Mapping[str, Any],
+    *,
+    pca_source: str,
+    pca_solver: str,
+) -> tuple[pd.DataFrame, PCA | IncrementalPCA, dict[str, Any]]:
+    component_count, _ = validate_pca_model(pca)
+    projections = np.asarray(projections)
+    expected_shape = (len(analysis_metadata), component_count)
+    if projections.shape != expected_shape:
+        raise ValueError(
+            "PCA projections and prepared metadata are misaligned: "
+            f"expected {expected_shape}, got {projections.shape}."
+        )
+    result = analysis_metadata.copy().reset_index(drop=True)
+    for index in range(component_count):
+        result[f"PC{index + 1}"] = projections[:, index]
+    result["log10_time_horizon_months"] = np.log10(result["time_horizon_months"])
+    projection_details = {
+        **details,
+        "explained_variance": np.asarray(pca.explained_variance_ratio_),
+        "pca_solver": pca_solver,
+        "pca_source": pca_source,
+    }
+    return result, pca, projection_details
+
+
 def fit_pca_projection(
-    activation_matrix: np.ndarray, prepared_matrix: np.ndarray | None,
-    row_offsets: np.ndarray, analysis_metadata: pd.DataFrame, *, n_components: int,
-    details: Mapping[str, Any], batch_size: int = 2048,
+    activation_matrix: np.ndarray,
+    prepared_matrix: np.ndarray | None,
+    row_offsets: np.ndarray,
+    analysis_metadata: pd.DataFrame,
+    *,
+    n_components: int,
+    details: Mapping[str, Any],
+    batch_size: int = 2048,
 ) -> tuple[pd.DataFrame, PCA | IncrementalPCA, dict[str, Any]]:
     """Fit randomized PCA on aggregates or bounded-memory PCA on raw selected rows."""
     analysis_rows = len(analysis_metadata)
@@ -318,44 +621,106 @@ def fit_pca_projection(
             del values
         solver = "incremental"
 
-    result = analysis_metadata.copy().reset_index(drop=True)
-    for index in range(n_components):
-        result[f"PC{index + 1}"] = projections[:, index]
-    result["log10_time_horizon_months"] = np.log10(result["time_horizon_months"])
-    projection_details = {
-        **details,
-        "explained_variance": pca.explained_variance_ratio_,
-        "pca_solver": solver,
-    }
-    return result, pca, projection_details
+    return _build_projection_result(
+        analysis_metadata,
+        projections,
+        pca,
+        details,
+        pca_source="fitted",
+        pca_solver=solver,
+    )
+
+
+def transform_pca_projection(
+    activation_matrix: np.ndarray,
+    prepared_matrix: np.ndarray | None,
+    row_offsets: np.ndarray,
+    analysis_metadata: pd.DataFrame,
+    *,
+    pca: PCA | IncrementalPCA,
+    details: Mapping[str, Any],
+    batch_size: int = 2048,
+) -> tuple[pd.DataFrame, PCA | IncrementalPCA, dict[str, Any]]:
+    """Project prepared activations through a fitted PCA without refitting it."""
+    component_count, expected_feature_count = validate_pca_model(pca)
+    feature_count = int(activation_matrix.shape[1])
+    if feature_count != expected_feature_count:
+        raise ValueError(
+            f"The loaded PCA expects {expected_feature_count:,} activation features, "
+            f"but the selected component has {feature_count:,}."
+        )
+    if batch_size < 1:
+        raise ValueError("PCA transform batch size must be positive.")
+
+    analysis_rows = len(analysis_metadata)
+    if prepared_matrix is not None:
+        if prepared_matrix.ndim != 2 or prepared_matrix.shape != (
+            analysis_rows,
+            expected_feature_count,
+        ):
+            raise ValueError("Prepared activations and metadata are misaligned.")
+        projections = pca.transform(prepared_matrix)
+    else:
+        if len(row_offsets) != analysis_rows:
+            raise ValueError("Activation row offsets and metadata are misaligned.")
+        projection_dtype = np.result_type(np.asarray(pca.components_).dtype, np.float32)
+        projections = np.empty((analysis_rows, component_count), dtype=projection_dtype)
+        for batch in _bounded_batches(analysis_rows, batch_size, 1):
+            values = np.asarray(activation_matrix[row_offsets[batch]], dtype=np.float32)
+            projections[batch] = pca.transform(values)
+            del values
+
+    return _build_projection_result(
+        analysis_metadata,
+        projections,
+        pca,
+        details,
+        pca_source="loaded",
+        pca_solver=type(pca).__name__,
+    )
 
 
 def prepare_projection_from_matrix(
-    activation_matrix: np.ndarray, metadata_index: pd.DataFrame, *,
-    cached_position: Any, metadata_filters: Mapping[str, Any] | None,
-    aggregation_fields: Sequence[str] | None, n_components: int,
+    activation_matrix: np.ndarray,
+    metadata_index: pd.DataFrame,
+    *,
+    cached_position: Any,
+    metadata_filters: Mapping[str, Any] | None,
+    aggregation_fields: Sequence[str] | None,
+    n_components: int,
     max_samples: int | None = None,
     phrasing_fields: Sequence[str] = (
-        "template_metadata.prompt_framing", "template_metadata.output_format",
+        "template_metadata.prompt_framing",
+        "template_metadata.output_format",
     ),
 ) -> tuple[pd.DataFrame, PCA | IncrementalPCA, dict[str, Any]]:
     """Prepare filtered data and fit PCA using bounded memory."""
     prepared = prepare_analysis_data(
-        activation_matrix, metadata_index, cached_position=cached_position,
-        metadata_filters=metadata_filters, aggregation_fields=aggregation_fields,
-        max_samples=max_samples, phrasing_fields=phrasing_fields,
+        activation_matrix,
+        metadata_index,
+        cached_position=cached_position,
+        metadata_filters=metadata_filters,
+        aggregation_fields=aggregation_fields,
+        max_samples=max_samples,
+        phrasing_fields=phrasing_fields,
     )
-    return fit_pca_projection(activation_matrix, *prepared[:3], n_components=n_components,
-                              details=prepared[3])
+    return fit_pca_projection(
+        activation_matrix, *prepared[:3], n_components=n_components, details=prepared[3]
+    )
 
 
 def prepare_projection(
-    sources: Sequence[str | Path | bytes | BinaryIO], *, layer_component: str,
-    position_index: int, metadata_filters: Mapping[str, Any] | None,
-    aggregation_fields: Sequence[str] | None, n_components: int,
+    sources: Sequence[str | Path | bytes | BinaryIO],
+    *,
+    layer_component: str,
+    position_index: int,
+    metadata_filters: Mapping[str, Any] | None,
+    aggregation_fields: Sequence[str] | None,
+    n_components: int,
     max_samples: int | None = None,
     phrasing_fields: Sequence[str] = (
-        "template_metadata.prompt_framing", "template_metadata.output_format",
+        "template_metadata.prompt_framing",
+        "template_metadata.output_format",
     ),
 ) -> tuple[pd.DataFrame, PCA, dict[str, Any]]:
     """Filter, aggregate, and refit PCA in the notebook's operation order."""
@@ -372,7 +737,9 @@ def prepare_projection(
         try:
             tensor = payload["activations"][layer_component]
         except KeyError as exc:
-            raise ValueError(f"Component {layer_component!r} is missing from a selected batch.") from exc
+            raise ValueError(
+                f"Component {layer_component!r} is missing from a selected batch."
+            ) from exc
         if not (len(sample_indices) == len(prompts) == len(metadata_rows) == tensor.shape[0]):
             raise ValueError("A selected batch has misaligned activation and metadata rows.")
         positions = list(payload["positions"])
@@ -384,15 +751,20 @@ def prepare_projection(
         elif position_value != cached_position:
             raise ValueError("Selected batches have inconsistent cached positions.")
         row_offsets = [
-            offset for offset, metadata in enumerate(metadata_rows)
-            if all(metadata_value_matches(get_metadata_field(metadata, field), expected)
-                   for field, expected in (metadata_filters or {}).items())
+            offset
+            for offset, metadata in enumerate(metadata_rows)
+            if all(
+                metadata_value_matches(get_metadata_field(metadata, field), expected)
+                for field, expected in (metadata_filters or {}).items()
+            )
         ]
         if max_samples is not None:
             row_offsets = row_offsets[: max(max_samples - len(loaded_indices), 0)]
         if row_offsets:
             rows = torch.as_tensor(row_offsets, dtype=torch.long)
-            feature_parts.append(tensor[:, position_index, :].index_select(0, rows).to(torch.float32))
+            feature_parts.append(
+                tensor[:, position_index, :].index_select(0, rows).to(torch.float32)
+            )
             for offset in row_offsets:
                 loaded_indices.append(int(sample_indices[offset]))
                 metadata_records.append(flatten_scalar_metadata(metadata_rows[offset]))
@@ -422,12 +794,18 @@ def prepare_projection(
         groups = metadata_df.groupby(aggregation_fields, dropna=False, sort=False).indices
         for offsets in groups.values():
             row_offsets = list(offsets)
-            vectors.append(activation_matrix.index_select(
-                0, torch.as_tensor(row_offsets, dtype=torch.long)).mean(dim=0))
+            vectors.append(
+                activation_matrix.index_select(
+                    0, torch.as_tensor(row_offsets, dtype=torch.long)
+                ).mean(dim=0)
+            )
             row = metadata_df.iloc[row_offsets[0]].copy()
             row["source_sample_count"] = len(row_offsets)
             for field in [value_field, unit_field, *available_phrasing]:
-                if field in metadata_df and metadata_df.iloc[row_offsets][field].nunique(dropna=True) > 1:
+                if (
+                    field in metadata_df
+                    and metadata_df.iloc[row_offsets][field].nunique(dropna=True) > 1
+                ):
                     row[field] = "<averaged>"
             records.append(row)
         pca_matrix = torch.stack(vectors)
@@ -440,7 +818,9 @@ def prepare_projection(
     pca_input = pca_matrix.cpu().numpy()
     max_components = min(pca_input.shape)
     if not 1 <= n_components <= max_components:
-        raise ValueError(f"PCA components must be between 1 and {max_components} for the prepared matrix.")
+        raise ValueError(
+            f"PCA components must be between 1 and {max_components} for the prepared matrix."
+        )
     pca = PCA(n_components=n_components, svd_solver="randomized", random_state=0)
     projections = pca.fit_transform(pca_input)
     result = analysis_metadata.copy().reset_index(drop=True)
@@ -448,8 +828,10 @@ def prepare_projection(
         result[f"PC{index + 1}"] = projections[:, index]
     result["log10_time_horizon_months"] = np.log10(result["time_horizon_months"])
     details = {
-        "loaded_samples": len(loaded_indices), "analysis_rows": len(result),
-        "feature_count": int(pca_input.shape[1]), "cached_position": cached_position,
+        "loaded_samples": len(loaded_indices),
+        "analysis_rows": len(result),
+        "feature_count": int(pca_input.shape[1]),
+        "cached_position": cached_position,
         "explained_variance": pca.explained_variance_ratio_,
     }
     return result, pca, details

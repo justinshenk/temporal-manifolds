@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import sys
+
+import pytest
+
 
 def test_conversational_records_include_task_metadata() -> None:
     from temporal_manifolds.dataset.generate import generate_task_dataset
@@ -167,6 +171,78 @@ def test_conversational_dataset_has_output_format_variations() -> None:
     }
 
     assert len(conversational.templates) == len(output_formats) * len(prompt_framings)
+
+
+def test_conversational_format_neutral_templates_follow_prompt_framings() -> None:
+    from temporal_manifolds.dataset import conversational
+
+    assert conversational.format_neutral_templates == [
+        {
+            "id": framing["id"],
+            "template": framing["body"],
+            "prompt_framing": framing["id"],
+        }
+        for framing in conversational.prompt_framings
+    ]
+    assert len(conversational.format_neutral_templates) == 9
+    assert all(
+        "Output format:" not in template["template"]
+        and "output_format" not in template
+        for template in conversational.format_neutral_templates
+    )
+
+
+def test_conversational_generation_can_remove_output_format_constraints() -> None:
+    from temporal_manifolds.dataset import conversational
+    from temporal_manifolds.dataset.generate import generate_task_dataset
+
+    records = generate_task_dataset(
+        dataset="conversational",
+        task_units={"test task": {"seconds"}},
+        time_values=[1],
+        remove_output_format_constraints=True,
+    )
+
+    assert {record["template_id"] for record in records} == {
+        framing["id"] for framing in conversational.prompt_framings
+    }
+    assert all("Output format:" not in record["text"] for record in records)
+    assert all("output_format" not in record["template_metadata"] for record in records)
+
+
+def test_custom_templates_override_format_neutral_generation_mode() -> None:
+    from temporal_manifolds.dataset.generate import generate_task_dataset
+
+    records = generate_task_dataset(
+        dataset="conversational",
+        template_list=[
+            {
+                "id": "custom",
+                "template": "Task: {task}\nTime: {value} {unit}\n\nOutput format: custom",
+                "output_format": "custom",
+            }
+        ],
+        task_units={"test task": {"seconds"}},
+        time_values=[1],
+        remove_output_format_constraints=True,
+    )
+
+    assert {record["template_id"] for record in records} == {"custom"}
+    assert all("Output format: custom" in record["text"] for record in records)
+    assert all(
+        record["template_metadata"] == {"output_format": "custom"}
+        for record in records
+    )
+
+
+def test_dataset_cli_accepts_remove_output_format_constraints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from temporal_manifolds.dataset.generate import parse_args
+
+    monkeypatch.setattr(sys, "argv", ["generate", "--remove-output-format-constraints"])
+
+    assert parse_args().remove_output_format_constraints is True
 
 
 def test_abstract_tasks_cover_the_complete_supported_time_range() -> None:

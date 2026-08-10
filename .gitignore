@@ -47,6 +47,8 @@ figures/*
 comparison/*
 
 data/completions_completions_256.jsonl
+data/model_completions/activation_prompts_no_output_format.json
+completions_no_output_format_256.jsonl
 
 # Local agent and workspace configuration
 .agents/
