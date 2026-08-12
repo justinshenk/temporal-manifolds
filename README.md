@@ -26,6 +26,13 @@ Cache conversational prompts with:
 bash scripts/run_activation_caching_conversational_selected_acts.sh
 ```
 
+Cache plain-English prompts to the isolated `plain_english_selected_acts` GCS
+prefix with the same extraction settings:
+
+```bash
+bash scripts/run_activation_caching_plain_english_selected_acts.sh
+```
+
 Cache abstract prompts with:
 
 ```bash

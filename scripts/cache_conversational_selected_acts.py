@@ -1,4 +1,4 @@
-"""Cache layer 21's final-token residual activation for conversational prompts."""
+"""Cache layer 21's final-token residual activation for conversational-style prompts."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ GCS_PREFIX = "selected_acts"
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 DEFAULT_OUTPUT_DIR = Path("results/selected_acts")
 DEFAULT_BATCH_SIZE = 128
+SUPPORTED_DATASETS = ("conversational", "plain_english")
 
 
 def build_payload(
@@ -38,10 +39,11 @@ def build_payload(
     sample_indices: list[int],
     batch_index: int,
     model_name: str,
+    dataset: str = "conversational",
 ) -> dict[str, Any]:
     """Build the serialized activation payload for one prompt batch."""
     payload = {
-        "dataset": "conversational",
+        "dataset": dataset,
         "model_name": model_name,
         "batch_index": batch_index,
         "sample_indices": sample_indices,
@@ -83,6 +85,7 @@ def configure_and_tokenize_left_padded(tokenizer: Any, prompts: list[str]) -> An
 
 def cache_conversational_selected_acts(
     *,
+    dataset: str = "conversational",
     model_name: str = DEFAULT_MODEL_NAME,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     dtype: str | None = None,
@@ -100,14 +103,14 @@ def cache_conversational_selected_acts(
     upload_queue_capacity: int = 128,
     overwrite: bool = False,
 ) -> None:
-    """Generate conversational prompts and cache batched layer_out/21 at token -1."""
+    """Generate conversational-style prompts and cache layer_out/21 at token -1."""
     import torch
 
     if batch_size < 1:
         raise ValueError(f"batch_size must be at least 1, got {batch_size}")
 
     records = generate_task_dataset(
-        dataset="conversational",
+        dataset=dataset,
         remove_time_constraints=remove_time_constraints,
         remove_output_format_constraints=remove_output_format_constraints,
     )
@@ -171,6 +174,7 @@ def cache_conversational_selected_acts(
                 sample_indices=sample_indices,
                 batch_index=batch_index,
                 model_name=model_name,
+                dataset=dataset,
             )
 
             if save_to_gcp:
@@ -189,6 +193,7 @@ def cache_conversational_selected_acts(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", choices=SUPPORTED_DATASETS, default="conversational")
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--dtype", default=None)
@@ -212,6 +217,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     load_dotenv()
     args = build_parser().parse_args(argv)
     cache_conversational_selected_acts(
+        dataset=args.dataset,
         model_name=args.model_name,
         output_dir=args.output_dir,
         dtype=args.dtype,

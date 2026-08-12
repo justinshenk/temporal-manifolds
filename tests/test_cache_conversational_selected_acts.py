@@ -13,6 +13,11 @@ NO_OUTPUT_FORMAT_RUNNER_PATH = (
     / "scripts"
     / "run_activation_caching_nof_conversational_selected_acts.sh"
 )
+PLAIN_ENGLISH_RUNNER_PATH = (
+    Path.cwd()
+    / "scripts"
+    / "run_activation_caching_plain_english_selected_acts.sh"
+)
 SPEC = importlib.util.spec_from_file_location("cache_conversational_selected_acts", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
 SCRIPT = importlib.util.module_from_spec(SPEC)
@@ -128,6 +133,72 @@ def test_no_output_format_runner_uses_an_isolated_artifact_namespace() -> None:
     assert "--remove-output-format-constraints" in runner
     assert "--gcs-prefix NOF_selected_acts" in runner
     assert "results/selected_acts_no_output_format" in runner
+
+
+def test_plain_english_runner_uses_the_new_dataset_and_an_isolated_namespace() -> None:
+    runner = PLAIN_ENGLISH_RUNNER_PATH.read_text(encoding="utf-8")
+
+    assert "scripts/cache_conversational_selected_acts.py" in runner
+    assert "--dataset plain_english" in runner
+    assert "--gcs-prefix plain_english_selected_acts" in runner
+    assert "results/plain_english_selected_acts" in runner
+
+
+def test_plain_english_dataset_is_forwarded_to_generation_and_payload(
+    monkeypatch, tmp_path: Path
+) -> None:
+    generated_with = None
+    payload_dataset = None
+
+    def generate_task_dataset(**kwargs):
+        nonlocal generated_with
+        generated_with = kwargs
+        return [{"text": "Prompt", "template_id": "test"}]
+
+    class Tokenizer:
+        pad_token_id = 0
+        eos_token = "<eos>"
+        padding_side = "right"
+
+        def __call__(self, _prompts, **_kwargs):
+            return {"input_ids": torch.tensor([[1, 2]])}
+
+    model = SimpleNamespace(
+        config=SimpleNamespace(num_hidden_layers=22),
+        eval=lambda: None,
+    )
+    monkeypatch.setattr(SCRIPT, "generate_task_dataset", generate_task_dataset)
+    monkeypatch.setattr(
+        SCRIPT,
+        "load_model_tokenizer_config",
+        lambda **_kwargs: (model, Tokenizer(), None),
+    )
+    monkeypatch.setattr(
+        SCRIPT,
+        "get_activations",
+        lambda *_args, **_kwargs: ({(21, "layer_out"): torch.ones(1, 1, 4)}, None),
+    )
+
+    original_build_payload = SCRIPT.build_payload
+
+    def build_payload(**kwargs):
+        nonlocal payload_dataset
+        payload_dataset = kwargs["dataset"]
+        return original_build_payload(**kwargs)
+
+    monkeypatch.setattr(SCRIPT, "build_payload", build_payload)
+
+    SCRIPT.cache_conversational_selected_acts(
+        dataset="plain_english",
+        output_dir=tmp_path,
+        batch_size=1,
+        save_to_gcp=False,
+    )
+
+    assert generated_with is not None
+    assert generated_with["dataset"] == "plain_english"
+    assert generated_with["remove_time_constraints"] is False
+    assert payload_dataset == "plain_english"
 
 
 def test_no_output_format_option_is_forwarded_to_dataset_generation(
