@@ -14,19 +14,26 @@ import plotly.graph_objects as go
 import streamlit as st
 from pandas.api.types import is_bool_dtype, is_numeric_dtype
 from sklearn import __version__ as sklearn_version
+from sklearn.cross_decomposition import PLSRegression
 
 from temporal_manifolds.activations.extraction_policy import (
     CACHED_POSITION_INDEX,
     PROMPT_TOKEN_POSITION,
     TARGET_LAYER_COMPONENT,
 )
+from temporal_manifolds.geometry.residual_trajectory_scaler import (
+    ResidualTrajectoryScaler,
+    load_fitted_scaler,
+)
 from temporal_manifolds.viz.activation_explorer import (
     PCA_PROJECTION_FINGERPRINT_VERSION,
+    SOURCE_FOLDER_FIELD,
     discover_activation_batch_paths,
     extract_activation_slice,
     fit_pca_projection,
     inspect_sources,
     load_pca_model,
+    load_pls_model,
     metadata_filter_choices,
     metadata_filter_mask,
     pca_projection_fingerprint,
@@ -34,7 +41,28 @@ from temporal_manifolds.viz.activation_explorer import (
     projection_details_table,
     select_activation_batch_uploads,
     serialize_pca_model,
+    serialize_pls_model,
     transform_pca_projection,
+)
+from temporal_manifolds.viz.curve_fitting import (
+    CURVE_ALGORITHMS,
+    CURVE_DESCRIPTIONS,
+    CURVE_MODEL_ARTIFACT_VERSION,
+    CurveModel,
+    CurveDisplayResult,
+    CurveEvaluationResult,
+    CurveFitResult,
+    evaluate_curve_model,
+    fit_curve,
+    load_curve_model,
+    serialize_curve_model,
+)
+from temporal_manifolds.viz.extruded_spline_surface import (
+    ExtrudedSurfaceEvaluationResult,
+    evaluate_extruded_surface,
+    fit_extrusion_direction,
+    load_extruded_surface,
+    serialize_extruded_surface,
 )
 from temporal_manifolds.viz.surface_fitting import (
     ALGORITHM_POINT_CAPS,
@@ -62,7 +90,8 @@ st.caption("TEMPORAL MANIFOLDS · LOCAL ANALYSIS")
 st.title("Activation Atlas")
 st.write(
     "Filter conversational activation batches, aggregate comparable prompts, and inspect "
-    "a fitted or reusable PCA projection. Your files stay in this local app session."
+    "PCA or log-time-horizon-supervised PLS directions. Your files stay in this local app "
+    "session."
 )
 
 st.session_state.setdefault("sources", None)
@@ -93,6 +122,12 @@ def reset_loaded_data() -> None:
         "surface_benchmark_identity",
         "loaded_surface_result",
         "loaded_surface_identity",
+        "curve_result",
+        "curve_identity",
+        "loaded_curve_result",
+        "loaded_curve_identity",
+        "loaded_extruded_surface_result",
+        "loaded_extruded_surface_identity",
     ):
         st.session_state.pop(key, None)
 
@@ -114,6 +149,12 @@ def clear_surface_fits() -> None:
         "surface_benchmark_identity",
         "loaded_surface_result",
         "loaded_surface_identity",
+        "curve_result",
+        "curve_identity",
+        "loaded_curve_result",
+        "loaded_curve_identity",
+        "loaded_extruded_surface_result",
+        "loaded_extruded_surface_identity",
     ):
         st.session_state.pop(key, None)
 
@@ -135,6 +176,17 @@ def forget_loaded_pca() -> None:
         st.session_state.pop(key, None)
 
 
+def forget_loaded_pls() -> None:
+    for key in (
+        "pls_model_upload",
+        "loaded_pls_digest",
+        "loaded_pls_model",
+        "loaded_pls_provenance",
+        "loaded_pls_filename",
+    ):
+        st.session_state.pop(key, None)
+
+
 def forget_loaded_surface() -> None:
     for key in (
         "surface_model_upload",
@@ -144,6 +196,34 @@ def forget_loaded_surface() -> None:
         "loaded_surface_filename",
         "loaded_surface_result",
         "loaded_surface_identity",
+    ):
+        st.session_state.pop(key, None)
+
+
+def forget_loaded_curve() -> None:
+    for key in (
+        "curve_model_upload",
+        "loaded_curve_digest",
+        "loaded_curve_model",
+        "loaded_curve_provenance",
+        "loaded_curve_filename",
+        "loaded_curve_result",
+        "loaded_curve_identity",
+    ):
+        st.session_state.pop(key, None)
+
+
+def forget_loaded_extruded_surface() -> None:
+    for key in (
+        "extrusion_curve_upload",
+        "extruded_surface_model_upload",
+        "loaded_extruded_surface_digest",
+        "loaded_extrusion_curve_model",
+        "loaded_extruded_surface_model",
+        "loaded_extruded_surface_provenance",
+        "loaded_extruded_surface_filename",
+        "loaded_extruded_surface_result",
+        "loaded_extruded_surface_identity",
     ):
         st.session_state.pop(key, None)
 
@@ -158,6 +238,256 @@ def fit_surface_cached(
     """Cache the reusable fitted model, preview grid, and diagnostics."""
 
     return fit_surface(x_values, y_values, z_values, **options)
+
+
+@st.cache_data(max_entries=16, show_spinner=False)
+def fit_curve_cached(
+    parameter_values: np.ndarray,
+    coordinates: np.ndarray,
+    options: dict[str, Any],
+) -> CurveFitResult:
+    """Cache a reusable 3D curve model and its diagnostics."""
+
+    return fit_curve(parameter_values, coordinates, **options)
+
+
+def fit_pls_projection(
+    activation_matrix: np.ndarray,
+    prepared_matrix: np.ndarray | None,
+    row_offsets: np.ndarray,
+    analysis_metadata: pd.DataFrame,
+    *,
+    n_components: int,
+    scale: bool = True,
+    max_iter: int = 500,
+    tol: float = 1e-6,
+    details: dict[str, Any],
+) -> tuple[pd.DataFrame, PLSRegression, dict[str, Any]]:
+    """Fit PLS directions supervised by log10 time horizon in months."""
+
+    analysis_rows = len(analysis_metadata)
+    feature_count = int(activation_matrix.shape[1])
+    max_components = min(max(analysis_rows - 1, 0), feature_count)
+    if not 1 <= n_components <= max_components:
+        raise ValueError(
+            f"PLS components must be between 1 and {max_components} for the prepared matrix."
+        )
+    if max_iter < 1:
+        raise ValueError("PLS maximum iterations must be at least 1.")
+    if not np.isfinite(tol) or tol <= 0:
+        raise ValueError("PLS convergence tolerance must be positive and finite.")
+
+    if "time_horizon_months" not in analysis_metadata:
+        raise ValueError("PLS requires the derived time_horizon_months metadata field.")
+    horizons = pd.to_numeric(analysis_metadata["time_horizon_months"], errors="coerce").to_numpy(
+        dtype=np.float64
+    )
+    if not np.isfinite(horizons).all() or np.any(horizons <= 0):
+        raise ValueError("PLS requires positive, finite time horizons.")
+    target = np.log10(horizons)
+    if np.ptp(target) <= np.finfo(np.float64).eps:
+        raise ValueError("PLS requires at least two distinct log-time-horizon values.")
+
+    if prepared_matrix is not None:
+        values = np.asarray(prepared_matrix, dtype=np.float32)
+    else:
+        values = np.asarray(activation_matrix[row_offsets], dtype=np.float32)
+    expected_shape = (analysis_rows, feature_count)
+    if values.shape != expected_shape:
+        raise ValueError(
+            "Prepared activations and metadata are misaligned: "
+            f"expected {expected_shape}, got {values.shape}."
+        )
+
+    pls = PLSRegression(
+        n_components=n_components,
+        scale=scale,
+        max_iter=max_iter,
+        tol=tol,
+        copy=True,
+    )
+    scores, _ = pls.fit_transform(values, target.reshape(-1, 1))
+    scores = np.asarray(scores)
+
+    # Express each fitted rotation directly in raw activation coordinates. These aliases let
+    # the existing coordinate fingerprint protect saved surface artifacts in PLS space too.
+    x_scale = np.asarray(pls._x_std, dtype=np.float64)  # noqa: SLF001 - fitted sklearn state
+    pls.components_ = np.asarray(pls.x_rotations_).T / x_scale[np.newaxis, :]
+    pls.mean_ = np.asarray(pls._x_mean)  # noqa: SLF001 - fitted sklearn state
+
+    scaled_total = np.sum(
+        np.square((values - pls.mean_) / x_scale, dtype=np.float64), dtype=np.float64
+    )
+    component_energy = np.sum(np.square(scores), axis=0) * np.sum(
+        np.square(pls.x_loadings_), axis=0
+    )
+    explained_x_variance = (
+        np.clip(component_energy / scaled_total, 0.0, 1.0)
+        if scaled_total > np.finfo(np.float64).eps
+        else np.zeros(n_components, dtype=np.float64)
+    )
+    pls.explained_variance_ratio_ = explained_x_variance
+
+    result = analysis_metadata.copy().reset_index(drop=True)
+    for index in range(n_components):
+        result[f"PLS{index + 1}"] = scores[:, index]
+    result["log10_time_horizon_months"] = target
+    projection_details = {
+        **details,
+        "explained_variance": explained_x_variance,
+        "direction_method": "PLS",
+        "direction_source": "fitted",
+        "direction_solver": type(pls).__name__,
+        "pls_target": "log10_time_horizon_months",
+        "pls_scale": scale,
+        "pls_max_iter": max_iter,
+        "pls_tolerance": tol,
+        "pls_iterations": list(pls.n_iter_),
+    }
+    return result, pls, projection_details
+
+
+@st.cache_resource(show_spinner=False)
+def load_residual_trajectory_scaler() -> ResidualTrajectoryScaler:
+    """Load the bundled fitted trajectory scaler once per app process."""
+
+    return load_fitted_scaler()
+
+
+def scale_pls_projection(
+    activation_matrix: np.ndarray,
+    prepared_matrix: np.ndarray | None,
+    row_offsets: np.ndarray,
+    projection: pd.DataFrame,
+    *,
+    pls: PLSRegression,
+    scaler: ResidualTrajectoryScaler,
+    details: dict[str, Any],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Apply the fitted residual-RMS correction to compatible PLS coordinates."""
+
+    score_fields = [f"PLS{index}" for index in range(1, scaler.n_components_ + 1)]
+    missing_fields = [field for field in score_fields if field not in projection]
+    if missing_fields:
+        raise ValueError(
+            "Residual trajectory scaling requires the first "
+            f"{scaler.n_components_} PLS components."
+        )
+
+    raw_activations = (
+        np.asarray(prepared_matrix, dtype=np.float32)
+        if prepared_matrix is not None
+        else np.asarray(activation_matrix[row_offsets], dtype=np.float32)
+    )
+    if raw_activations.shape != (len(projection), scaler.n_features_in_):
+        raise ValueError(
+            "Residual trajectory scaling requires "
+            f"{scaler.n_features_in_:,}-feature activations; the prepared data has shape "
+            f"{raw_activations.shape}."
+        )
+
+    pls_mean = np.asarray(getattr(pls, "_x_mean", np.empty(0)), dtype=np.float64)
+    pls_std = np.asarray(getattr(pls, "_x_std", np.empty(0)), dtype=np.float64)
+    pls_loadings = np.asarray(
+        getattr(pls, "x_loadings_", np.empty((0, 0))), dtype=np.float64
+    )
+    compatible = (
+        pls_mean.shape == scaler.x_mean.shape
+        and pls_std.shape == scaler.x_std.shape
+        and pls_loadings.shape[0] == scaler.n_features_in_
+        and pls_loadings.shape[1] >= scaler.n_components_
+        and np.allclose(pls_mean, scaler.x_mean, rtol=1e-5, atol=1e-7)
+        and np.allclose(pls_std, scaler.x_std, rtol=1e-5, atol=1e-7)
+        and np.allclose(
+            pls_loadings[:, : scaler.n_components_],
+            scaler.x_loadings,
+            rtol=1e-5,
+            atol=1e-7,
+        )
+    )
+    if not compatible:
+        raise ValueError(
+            "The residual trajectory scaler is calibrated for a different PLS basis. "
+            "Load the matching supplied 3-D PLS model or turn this option off."
+        )
+
+    scores = projection[score_fields].to_numpy(dtype=np.float64)
+    corrected, predicted_scale, residual_rms = scaler.transform_with_diagnostics(
+        raw_activations,
+        scores,
+    )
+    result = projection.copy()
+    result.loc[:, score_fields] = corrected
+    result["predicted_trajectory_scale"] = predicted_scale
+    result["residual_rms"] = residual_rms
+    scaled_details = {
+        **details,
+        "residual_trajectory_scaling": True,
+        "residual_trajectory_scaling_components": score_fields,
+        "residual_trajectory_scale_min": float(np.min(predicted_scale)),
+        "residual_trajectory_scale_max": float(np.max(predicted_scale)),
+    }
+    return result, scaled_details
+
+
+def transform_pls_projection(
+    activation_matrix: np.ndarray,
+    prepared_matrix: np.ndarray | None,
+    row_offsets: np.ndarray,
+    analysis_metadata: pd.DataFrame,
+    *,
+    pls: PLSRegression,
+    details: dict[str, Any],
+) -> tuple[pd.DataFrame, PLSRegression, dict[str, Any]]:
+    """Transform prepared activations with a loaded PLS direction model."""
+
+    analysis_rows = len(analysis_metadata)
+    feature_count = int(activation_matrix.shape[1])
+    if prepared_matrix is not None:
+        values = np.asarray(prepared_matrix, dtype=np.float32)
+    else:
+        values = np.asarray(activation_matrix[row_offsets], dtype=np.float32)
+    expected_shape = (analysis_rows, feature_count)
+    if values.shape != expected_shape:
+        raise ValueError(
+            "Prepared activations and metadata are misaligned: "
+            f"expected {expected_shape}, got {values.shape}."
+        )
+
+    expected_features = int(pls.components_.shape[1])
+    if feature_count != expected_features:
+        raise ValueError(
+            f"The loaded PLS expects {expected_features:,} activation features, "
+            f"but the selected component has {feature_count:,}."
+        )
+    scores = np.asarray(pls.transform(values))
+    component_count = int(pls.components_.shape[0])
+    if scores.shape != (analysis_rows, component_count):
+        raise ValueError("The loaded PLS model returned an invalid projection shape.")
+
+    result = analysis_metadata.copy().reset_index(drop=True)
+    for index in range(component_count):
+        result[f"PLS{index + 1}"] = scores[:, index]
+    if "time_horizon_months" in result:
+        horizons = pd.to_numeric(result["time_horizon_months"], errors="coerce").to_numpy(
+            dtype=np.float64
+        )
+        if np.isfinite(horizons).all() and np.all(horizons > 0):
+            result["log10_time_horizon_months"] = np.log10(horizons)
+
+    projection_details = {
+        **details,
+        "explained_variance": np.asarray(pls.explained_variance_ratio_),
+        "direction_method": "PLS",
+        "direction_source": "loaded",
+        "direction_solver": type(pls).__name__,
+        "pls_target": "log10_time_horizon_months",
+        "pls_scale": bool(pls.scale),
+        "pls_max_iter": int(pls.max_iter),
+        "pls_tolerance": float(pls.tol),
+        "pls_iterations": list(pls.n_iter_),
+    }
+    return result, pls, projection_details
 
 
 def surface_algorithm_controls(algorithm: str, point_count: int) -> dict[str, Any]:
@@ -605,6 +935,1337 @@ def surface_appearance_controls(
     }
 
 
+def curve_appearance_controls(result: CurveDisplayResult) -> dict[str, Any]:
+    """Render appearance controls shared by fitted and loaded curves."""
+
+    with st.popover("Curve appearance", icon=":material/palette:"):
+        color = st.selectbox(
+            "Curve color",
+            ["#d81b60", "#7b1fa2", "#1565c0", "#00897b", "#ef6c00", "#263238"],
+            format_func={
+                "#d81b60": "Rose",
+                "#7b1fa2": "Purple",
+                "#1565c0": "Blue",
+                "#00897b": "Teal",
+                "#ef6c00": "Orange",
+                "#263238": "Charcoal",
+            }.__getitem__,
+            key="curve_color",
+            persist_state="page",
+        )
+        line_width = st.slider(
+            "Line width", 1, 14, 6, key="curve_line_width", persist_state="page"
+        )
+        opacity = st.slider(
+            "Curve opacity",
+            0.1,
+            1.0,
+            0.95,
+            0.05,
+            key="curve_opacity",
+            persist_state="page",
+        )
+        show_samples = st.toggle(
+            "Show sampled positions",
+            value=False,
+            key="curve_show_samples",
+            persist_state="page",
+        )
+        show_residuals = st.toggle(
+            "Show residual sticks",
+            value=False,
+            key="curve_show_residuals",
+            persist_state="page",
+        )
+        residual_count = min(100, len(result.point_parameter))
+        if show_residuals:
+            residual_maximum = min(500, len(result.point_parameter))
+            clamp_integer_widget_state(
+                "curve_residual_count",
+                minimum=1,
+                maximum=residual_maximum,
+                default=min(100, residual_maximum),
+            )
+            residual_count = st.slider(
+                "Residual sticks",
+                1,
+                residual_maximum,
+                min(100, residual_maximum),
+                key="curve_residual_count",
+                persist_state="page",
+            )
+    return {
+        "color": color,
+        "line_width": line_width,
+        "opacity": opacity,
+        "show_samples": show_samples,
+        "show_residuals": show_residuals,
+        "residual_count": residual_count,
+    }
+
+
+def extruded_surface_appearance_controls(
+    result: ExtrudedSurfaceEvaluationResult,
+) -> dict[str, Any]:
+    """Render appearance controls for a loaded parametric surface."""
+
+    with st.popover("Extruded surface appearance", icon=":material/palette:"):
+        color_mode = st.segmented_control(
+            "Surface color",
+            ["Curve parameter", "Extrusion coordinate"],
+            default="Curve parameter",
+            key="extruded_surface_color_mode",
+            persist_state="page",
+        )
+        colorscale = st.selectbox(
+            "Colorscale",
+            ["Viridis", "Cividis", "Plasma", "Magma", "Inferno", "Turbo", "RdBu"],
+            key="extruded_surface_colorscale",
+            persist_state="page",
+        )
+        opacity = st.slider(
+            "Surface opacity",
+            0.05,
+            1.0,
+            0.52,
+            0.01,
+            key="extruded_surface_opacity",
+            persist_state="page",
+        )
+        show_colorbar = st.toggle(
+            "Show surface colorbar",
+            value=False,
+            key="extruded_surface_colorbar",
+            persist_state="page",
+        )
+        reverse_scale = st.toggle(
+            "Reverse colorscale",
+            value=False,
+            key="extruded_surface_reverse",
+            persist_state="page",
+        )
+        show_wireframe = st.toggle(
+            "Show sampled grid lines",
+            value=False,
+            key="extruded_surface_wireframe",
+            persist_state="page",
+        )
+        show_residuals = st.toggle(
+            "Show projection residuals",
+            value=False,
+            key="extruded_surface_residuals",
+            persist_state="page",
+        )
+        residual_count = min(100, len(result.point_xyz))
+        if show_residuals:
+            residual_maximum = min(500, len(result.point_xyz))
+            clamp_integer_widget_state(
+                "extruded_surface_residual_count",
+                minimum=1,
+                maximum=residual_maximum,
+                default=min(100, residual_maximum),
+            )
+            residual_count = st.slider(
+                "Projection residuals",
+                1,
+                residual_maximum,
+                min(100, residual_maximum),
+                key="extruded_surface_residual_count",
+                persist_state="page",
+            )
+    return {
+        "color_mode": color_mode,
+        "colorscale": colorscale,
+        "opacity": opacity,
+        "show_colorbar": show_colorbar,
+        "reverse_scale": reverse_scale,
+        "show_wireframe": show_wireframe,
+        "show_residuals": show_residuals,
+        "residual_count": residual_count,
+    }
+
+
+def new_curve_controls(
+    *,
+    plot_data: pd.DataFrame,
+    projection: pd.DataFrame,
+    x_component: str,
+    y_component: str,
+    z_component: str,
+    active_pca: Any,
+    direction_method: str,
+    residual_trajectory_scaling: bool,
+    layer_component: str,
+    cached_position: Any,
+    aggregation_fields: list[str],
+) -> tuple[CurveFitResult | None, dict[str, Any]]:
+    """Render controls for fitting a parameterized 3D curve."""
+
+    coordinate_features = (x_component, y_component, z_component)
+    parameter_fields = [
+        field
+        for field in projection.columns
+        if field not in {"sample_index", *coordinate_features}
+        and is_numeric_dtype(projection[field])
+        and not is_bool_dtype(projection[field])
+    ]
+    with st.container(border=True):
+        st.subheader("Curve fitting")
+        st.caption(
+            "Fit a trajectory **(X(t), Y(t), Z(t))** through the projected points, where "
+            "t is a numeric field you choose. This is useful for tracing how activations move "
+            "with time horizon or another ordered quantity."
+        )
+        if not parameter_fields:
+            st.warning("A numeric non-coordinate field is required to parameterize a curve.")
+            return None, {}
+
+        default_parameter = next(
+            (
+                field
+                for field in ("log10_time_horizon_months", "time_horizon_months")
+                if field in parameter_fields
+            ),
+            parameter_fields[0],
+        )
+        if st.session_state.get("curve_parameter_feature") not in (None, *parameter_fields):
+            st.session_state.pop("curve_parameter_feature", None)
+        selectors = st.columns([1.2, 1.4, 1.0])
+        algorithm = selectors[0].selectbox(
+            "Algorithm",
+            list(CURVE_ALGORITHMS),
+            format_func=CURVE_ALGORITHMS.__getitem__,
+            key="curve_algorithm",
+            persist_state="page",
+        )
+        parameter_feature = selectors[1].selectbox(
+            "Curve parameter",
+            parameter_fields,
+            index=parameter_fields.index(default_parameter),
+            key="curve_parameter_feature",
+            help="The curve follows increasing values of this field.",
+            persist_state="page",
+        )
+        fit_scope = selectors[2].segmented_control(
+            "Fit points",
+            ["Visible", "All projected"],
+            default="Visible",
+            key="curve_scope",
+            persist_state="page",
+        )
+        st.caption(CURVE_DESCRIPTIONS[algorithm])
+
+        curve_source = plot_data if fit_scope == "Visible" else projection
+        parameter_values = pd.to_numeric(
+            curve_source[parameter_feature], errors="coerce"
+        ).to_numpy(dtype=np.float64)
+        coordinates = curve_source[list(coordinate_features)].to_numpy(dtype=np.float64)
+        finite = np.isfinite(parameter_values) & np.isfinite(coordinates).all(axis=1)
+        unique_count = int(np.unique(parameter_values[finite]).size)
+        display_coordinates = plot_data[list(coordinate_features)].to_numpy(dtype=np.float64)
+        finite_display = display_coordinates[np.isfinite(display_coordinates).all(axis=1)]
+        display_coordinate_bounds = np.column_stack(
+            [finite_display.min(axis=0), finite_display.max(axis=0)]
+        )
+        st.caption(
+            f"Current scope contains {len(curve_source):,} point(s) and {unique_count:,} "
+            f"distinct finite {parameter_feature} value(s)."
+        )
+        if unique_count < 3:
+            st.warning("At least three distinct finite parameter values are required.")
+            return None, {}
+
+        with st.form(f"curve_fit_form::{algorithm}"):
+            st.markdown("**Model controls**")
+            if algorithm == "spline":
+                model_columns = st.columns(2)
+                maximum_degree = min(5, unique_count - 1)
+                clamp_integer_widget_state(
+                    "curve_spline_degree",
+                    minimum=1,
+                    maximum=maximum_degree,
+                    default=min(3, maximum_degree),
+                )
+                spline_degree = model_columns[0].slider(
+                    "Spline degree",
+                    1,
+                    maximum_degree,
+                    min(3, maximum_degree),
+                    key="curve_spline_degree",
+                    persist_state="page",
+                )
+                smoothing = model_columns[1].slider(
+                    "Smoothing strength",
+                    0.0,
+                    2.0,
+                    0.15,
+                    0.01,
+                    key="curve_spline_smoothing",
+                    help="Zero interpolates the reduced points; larger values smooth more.",
+                    persist_state="page",
+                )
+                model_parameters = {"degree": spline_degree, "smoothing": smoothing}
+            else:
+                model_columns = st.columns(2)
+                maximum_degree = min(10, unique_count - 1)
+                clamp_integer_widget_state(
+                    "curve_polynomial_degree",
+                    minimum=1,
+                    maximum=maximum_degree,
+                    default=min(3, maximum_degree),
+                )
+                polynomial_degree = model_columns[0].slider(
+                    "Polynomial degree",
+                    1,
+                    maximum_degree,
+                    min(3, maximum_degree),
+                    key="curve_polynomial_degree",
+                    persist_state="page",
+                )
+                ridge_alpha = 10.0 ** model_columns[1].slider(
+                    "log10 ridge alpha",
+                    -8.0,
+                    4.0,
+                    -3.0,
+                    0.25,
+                    key="curve_polynomial_alpha",
+                    persist_state="page",
+                )
+                model_parameters = {"degree": polynomial_degree, "alpha": ridge_alpha}
+
+            st.markdown("**Sampling and validation**")
+            common_columns = st.columns(6)
+            max_points_key = f"curve_common::{algorithm}::max_points"
+            clamp_integer_widget_state(
+                max_points_key,
+                minimum=3,
+                maximum=unique_count,
+                default=min(unique_count, 3_000),
+            )
+            max_fit_points = int(
+                common_columns[0].number_input(
+                    "Maximum fit values",
+                    min_value=3,
+                    max_value=unique_count,
+                    value=min(unique_count, 3_000),
+                    key=max_points_key,
+                    persist_state="page",
+                )
+            )
+            validation_fraction = common_columns[1].slider(
+                "Held-out fraction",
+                0.0,
+                0.4,
+                0.2,
+                0.05,
+                key=f"curve_common::{algorithm}::validation",
+                persist_state="page",
+            )
+            random_state = int(
+                common_columns[2].number_input(
+                    "Random seed",
+                    min_value=0,
+                    max_value=2_147_483_647,
+                    value=42,
+                    key=f"curve_common::{algorithm}::seed",
+                    persist_state="page",
+                )
+            )
+            sample_count = common_columns[3].slider(
+                "Curve samples",
+                40,
+                1_000,
+                240,
+                20,
+                key=f"curve_common::{algorithm}::samples",
+                persist_state="page",
+            )
+            padding_percent = common_columns[4].slider(
+                "Curve padding",
+                0,
+                100,
+                0,
+                1,
+                format="%d%%",
+                key=f"curve_common::{algorithm}::padding",
+                help=(
+                    "At 0%, each curve end reaches the visible plot boundary. Increase this "
+                    "to extrapolate beyond that box."
+                ),
+                persist_state="page",
+            )
+            duplicate_reducer = common_columns[5].selectbox(
+                "Duplicate reducer",
+                ["mean", "median"],
+                format_func=str.capitalize,
+                key=f"curve_common::{algorithm}::duplicates",
+                help="Combines coordinates that share the same parameter value.",
+                persist_state="page",
+            )
+            fit_submitted = st.form_submit_button(
+                "Fit / update curve",
+                type="primary",
+                icon=":material/gesture:",
+                width="stretch",
+            )
+
+        fit_options = {
+            "algorithm": algorithm,
+            "parameters": model_parameters,
+            "sample_count": sample_count,
+            "padding_fraction": padding_percent / 100.0,
+            "display_coordinate_bounds": display_coordinate_bounds,
+            "duplicate_reducer": duplicate_reducer,
+            "max_fit_points": max_fit_points,
+            "validation_fraction": validation_fraction,
+            "random_state": random_state,
+            "parameter_feature": parameter_feature,
+            "coordinate_features": coordinate_features,
+        }
+        data_digest = sha256(
+            np.ascontiguousarray(np.column_stack([parameter_values, coordinates])).tobytes()
+        ).hexdigest()
+        curve_identity = (
+            data_digest,
+            parameter_feature,
+            coordinate_features,
+            fit_scope,
+            algorithm,
+            CURVE_MODEL_ARTIFACT_VERSION,
+            repr(fit_options),
+        )
+        if fit_submitted:
+            try:
+                with st.spinner(f"Fitting {CURVE_ALGORITHMS[algorithm]}…"):
+                    fitted_curve = fit_curve_cached(
+                        parameter_values, coordinates, fit_options
+                    )
+            except (ValueError, MemoryError) as exc:
+                st.session_state.pop("curve_result", None)
+                st.session_state.pop("curve_identity", None)
+                st.error(f"Curve fitting failed: {exc}")
+            else:
+                st.session_state.curve_result = fitted_curve
+                st.session_state.curve_identity = curve_identity
+
+        result = None
+        if st.session_state.get("curve_identity") == curve_identity:
+            result = st.session_state.get("curve_result")
+        elif st.session_state.get("curve_result") is not None:
+            st.info(
+                "The points, axes, parameter, or controls changed. Click "
+                "**Fit / update curve** to refresh the overlay."
+            )
+        else:
+            st.info("Choose the controls above, then fit the first curve.")
+        if result is None:
+            return None, {}
+
+        metrics = result.metrics
+        diagnostic_columns = st.columns(4)
+        diagnostic_columns[0].metric(
+            "Held-out 3D RMSE", _format_metric(metrics["validation_rmse_3d"])
+        )
+        diagnostic_columns[1].metric(
+            "Held-out R²", _format_metric(metrics["validation_r2"])
+        )
+        diagnostic_columns[2].metric(
+            "Training 3D RMSE", _format_metric(metrics["train_rmse_3d"])
+        )
+        diagnostic_columns[3].metric("Fit values", f"{int(metrics['fit_points']):,}")
+        if result.warnings:
+            st.warning(" ".join(result.warnings))
+
+        metadata = {
+            "parameter_feature": parameter_feature,
+            "coordinate_features": coordinate_features,
+            "fit_scope": fit_scope,
+            "curve_data_sha256": data_digest,
+            "pca_sha256": pca_projection_fingerprint(active_pca),
+            "pca_fingerprint_version": PCA_PROJECTION_FINGERPRINT_VERSION,
+            "direction_method": direction_method,
+            "residual_trajectory_scaling": residual_trajectory_scaling,
+            "direction_target": (
+                "log10_time_horizon_months" if direction_method == "PLS" else None
+            ),
+            "layer_component": layer_component,
+            "cached_position": cached_position,
+            "aggregation_fields": list(aggregation_fields),
+            "random_state": random_state,
+        }
+        safe_name = "-".join(
+            str(value).replace("/", "-").replace("\\", "-").replace(" ", "_")
+            for value in (*coordinate_features, "by", parameter_feature)
+        )
+        st.download_button(
+            "Download curve model",
+            data=lambda: serialize_curve_model(result.model, metadata=metadata),
+            file_name=f"activation_curve_{safe_name}_{algorithm}.joblib",
+            mime="application/octet-stream",
+            icon=":material/download:",
+            on_click="ignore",
+            help=(
+                "Versioned joblib artifact containing the fitted coordinate predictors, "
+                "parameter normalization, bounds, and projection provenance."
+            ),
+        )
+        with st.expander("Use the saved curve"):
+            st.code(
+                "from temporal_manifolds.viz.curve_fitting import load_curve_model\n\n"
+                'curve, provenance = load_curve_model("curve.joblib")\n'
+                f"{x_component.lower()}, {y_component.lower()}, {z_component.lower()} = "
+                f"curve.predict([{parameter_feature.lower()}])[0]",
+                language="python",
+            )
+        appearance = curve_appearance_controls(result)
+        return result, appearance
+
+
+def loaded_curve_controls(
+    *,
+    plot_data: pd.DataFrame,
+    projection: pd.DataFrame,
+    x_component: str,
+    y_component: str,
+    z_component: str,
+    active_pca: Any,
+    direction_method: str,
+    residual_trajectory_scaling: bool,
+    layer_component: str,
+    cached_position: Any,
+) -> tuple[CurveEvaluationResult | None, dict[str, Any]]:
+    """Load a trusted curve artifact and preview it in compatible 3D coordinates."""
+
+    load_succeeded = False
+    with st.container(border=True):
+        st.subheader("Saved curve")
+        st.warning(
+            "Only load curve files you trust. Joblib and pickle artifacts can execute code "
+            "when opened."
+        )
+        model_upload = st.file_uploader(
+            "Saved curve model",
+            type=["joblib"],
+            key="curve_model_upload",
+            help="Choose a curve artifact downloaded from Activation Atlas.",
+        )
+        model_bytes = model_upload.getvalue() if model_upload is not None else None
+        uploaded_digest = sha256(model_bytes).hexdigest() if model_bytes is not None else None
+        already_loaded = (
+            uploaded_digest is not None
+            and uploaded_digest == st.session_state.get("loaded_curve_digest")
+            and st.session_state.get("loaded_curve_model") is not None
+        )
+        if st.button(
+            "Load uploaded curve",
+            type="primary",
+            icon=":material/upload_file:",
+            width="stretch",
+            disabled=model_bytes is None or already_loaded,
+            key="load_curve_model_button",
+        ):
+            try:
+                loaded_model, loaded_provenance = load_curve_model(model_bytes)
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.session_state.loaded_curve_digest = uploaded_digest
+                st.session_state.loaded_curve_model = loaded_model
+                st.session_state.loaded_curve_provenance = loaded_provenance
+                st.session_state.loaded_curve_filename = model_upload.name
+                st.session_state.pop("loaded_curve_result", None)
+                st.session_state.pop("loaded_curve_identity", None)
+                load_succeeded = True
+
+        loaded_model = st.session_state.get("loaded_curve_model")
+        loaded_provenance = st.session_state.get("loaded_curve_provenance", {})
+        loaded_digest = st.session_state.get("loaded_curve_digest")
+        if loaded_model is None:
+            st.info("Choose a saved curve and click **Load uploaded curve**.")
+            return None, {}
+
+        loaded_filename = st.session_state.get("loaded_curve_filename", "Saved curve")
+        st.success(
+            f"{loaded_filename} · {CURVE_ALGORITHMS[loaded_model.algorithm]} · "
+            f"parameter: {loaded_model.parameter_feature}"
+        )
+        if uploaded_digest is not None and uploaded_digest != loaded_digest:
+            st.info(
+                "A different file is selected but has not been loaded. The named model above "
+                "is still active."
+            )
+        st.button(
+            "Forget loaded curve",
+            icon=":material/delete:",
+            on_click=forget_loaded_curve,
+            key="forget_loaded_curve_button",
+        )
+
+        current_coordinates = (x_component, y_component, z_component)
+        compatible = True
+        if set(loaded_model.coordinate_features) != set(current_coordinates):
+            st.error(
+                "Select the saved curve coordinates on the chart: "
+                + ", ".join(loaded_model.coordinate_features)
+                + "."
+            )
+            compatible = False
+        if loaded_model.parameter_feature not in projection:
+            st.error(
+                f"The saved parameter field {loaded_model.parameter_feature!r} is not present "
+                "in the current projection."
+            )
+            compatible = False
+        elif not is_numeric_dtype(projection[loaded_model.parameter_feature]) or is_bool_dtype(
+            projection[loaded_model.parameter_feature]
+        ):
+            st.error(
+                f"The saved parameter field {loaded_model.parameter_feature!r} is not numeric."
+            )
+            compatible = False
+
+        saved_direction_method = loaded_provenance.get("direction_method", "PCA")
+        if saved_direction_method != direction_method:
+            st.error(
+                f"This curve was fitted in {saved_direction_method} coordinates, but the "
+                f"current projection uses {direction_method}."
+            )
+            compatible = False
+        saved_scaling = bool(loaded_provenance.get("residual_trajectory_scaling", False))
+        if saved_scaling != residual_trajectory_scaling:
+            st.error(
+                "This curve was fitted with residual trajectory scaling "
+                f"{'enabled' if saved_scaling else 'disabled'}, but the current projection "
+                f"has it {'enabled' if residual_trajectory_scaling else 'disabled'}."
+            )
+            compatible = False
+        current_pca_digest = pca_projection_fingerprint(active_pca)
+        saved_pca_digest = loaded_provenance.get("pca_sha256")
+        saved_fingerprint_version = loaded_provenance.get("pca_fingerprint_version")
+        if saved_pca_digest is None:
+            st.warning(
+                "This artifact does not identify its coordinate basis, so compatibility cannot "
+                "be fully verified."
+            )
+        elif saved_fingerprint_version == PCA_PROJECTION_FINGERPRINT_VERSION:
+            if saved_pca_digest != current_pca_digest:
+                st.error(
+                    "This curve was fitted in a different coordinate system. Use the matching "
+                    "direction model."
+                )
+                compatible = False
+        elif saved_fingerprint_version in (None, 1):
+            if saved_pca_digest != pca_projection_fingerprint(active_pca, version=1):
+                st.error(
+                    "This curve was fitted in a different coordinate system. Use the matching "
+                    "direction model."
+                )
+                compatible = False
+        else:
+            st.error(
+                "This curve uses an unsupported coordinate fingerprint version: "
+                f"{saved_fingerprint_version!r}."
+            )
+            compatible = False
+
+        saved_layer = loaded_provenance.get("layer_component")
+        if saved_layer is not None and saved_layer != layer_component:
+            st.warning(f"This curve was saved for {saved_layer!r}, not {layer_component!r}.")
+        saved_position = loaded_provenance.get("cached_position")
+        if saved_position is not None and saved_position != cached_position:
+            st.warning(
+                f"This curve was saved for token position {saved_position!r}, not "
+                f"{cached_position!r}."
+            )
+        if not compatible:
+            return None, {}
+
+        with st.expander("Saved model details"):
+            st.write(
+                {
+                    "Algorithm": CURVE_ALGORITHMS[loaded_model.algorithm],
+                    "Parameter": loaded_model.parameter_feature,
+                    "Parameter bounds": loaded_model.training_parameter_bounds.tolist(),
+                    "Coordinates": loaded_model.coordinate_features,
+                    "Model parameters": loaded_model.parameters,
+                    "Artifact version": loaded_provenance.get("artifact_version"),
+                }
+            )
+
+        preview_scope = st.segmented_control(
+            "Preview points",
+            ["Visible", "All projected"],
+            default="Visible",
+            key="loaded_curve_scope",
+            persist_state="page",
+        )
+        preview_source = plot_data if preview_scope == "Visible" else projection
+        preview_columns = st.columns(2)
+        sample_count = preview_columns[0].slider(
+            "Curve samples",
+            40,
+            1_000,
+            240,
+            20,
+            key="loaded_curve_samples",
+            persist_state="page",
+        )
+        padding_percent = preview_columns[1].slider(
+            "Curve padding",
+            0,
+            100,
+            0,
+            1,
+            format="%d%%",
+            key="loaded_curve_padding",
+            help=(
+                "At 0%, each curve end reaches the visible plot boundary. Increase this to "
+                "extrapolate beyond that box."
+            ),
+            persist_state="page",
+        )
+        preview_submitted = st.button(
+            "Apply loaded curve",
+            type="primary",
+            icon=":material/preview:",
+            width="stretch",
+            key="apply_loaded_curve_button",
+        )
+        saved_coordinates = list(loaded_model.coordinate_features)
+        parameter_values = pd.to_numeric(
+            preview_source[loaded_model.parameter_feature], errors="coerce"
+        ).to_numpy(dtype=np.float64)
+        coordinates = preview_source[saved_coordinates].to_numpy(dtype=np.float64)
+        display_coordinates = plot_data[saved_coordinates].to_numpy(dtype=np.float64)
+        finite_display = display_coordinates[np.isfinite(display_coordinates).all(axis=1)]
+        display_coordinate_bounds = np.column_stack(
+            [finite_display.min(axis=0), finite_display.max(axis=0)]
+        )
+        data_digest = sha256(
+            np.ascontiguousarray(np.column_stack([parameter_values, coordinates])).tobytes()
+        ).hexdigest()
+        preview_identity = (
+            source_mode,
+            loaded_digest,
+            current_pca_digest,
+            data_digest,
+            preview_scope,
+            sample_count,
+            padding_percent,
+        )
+        if preview_submitted or load_succeeded:
+            try:
+                with st.spinner("Evaluating the saved curve…"):
+                    result = evaluate_curve_model(
+                        loaded_model,
+                        parameter_values,
+                        coordinates,
+                        sample_count=sample_count,
+                        padding_fraction=padding_percent / 100.0,
+                        display_coordinate_bounds=display_coordinate_bounds,
+                    )
+            except (ValueError, MemoryError) as exc:
+                st.session_state.pop("loaded_curve_result", None)
+                st.session_state.pop("loaded_curve_identity", None)
+                st.error(f"Saved-curve preview failed: {exc}")
+            else:
+                st.session_state.loaded_curve_result = result
+                st.session_state.loaded_curve_identity = preview_identity
+
+        result = None
+        if st.session_state.get("loaded_curve_identity") == preview_identity:
+            result = st.session_state.get("loaded_curve_result")
+        elif st.session_state.get("loaded_curve_result") is not None:
+            st.info("The preview points or controls changed. Click **Apply loaded curve**.")
+        if result is None:
+            return None, {}
+        metrics = result.metrics
+        diagnostic_columns = st.columns(3)
+        diagnostic_columns[0].metric(
+            "Current 3D RMSE", _format_metric(metrics["current_rmse_3d"])
+        )
+        diagnostic_columns[1].metric("Current R²", _format_metric(metrics["current_r2"]))
+        diagnostic_columns[2].metric(
+            "Outside fit range", f"{int(metrics['extrapolation_points']):,}"
+        )
+        if result.warnings:
+            st.warning(" ".join(result.warnings))
+        appearance = curve_appearance_controls(result)
+        return result, appearance
+
+
+def loaded_extruded_surface_controls(
+    *,
+    plot_data: pd.DataFrame,
+    projection: pd.DataFrame,
+    x_component: str,
+    y_component: str,
+    z_component: str,
+    active_pca: Any,
+    direction_method: str,
+    residual_trajectory_scaling: bool,
+    layer_component: str,
+    cached_position: Any,
+) -> tuple[ExtrudedSurfaceEvaluationResult | None, dict[str, Any]]:
+    """Load a cubic spline and fit its least-squares extrusion to displayed points."""
+
+    load_succeeded = False
+    with st.container(border=True):
+        st.subheader("Extruded spline surface")
+        st.caption(
+            "Fit **S(t, u) = C(t) + u d** from a saved cubic spline, or load a previously "
+            "downloaded extruded surface."
+        )
+        st.warning(
+            "Only load model files you trust. Joblib and pickle artifacts can "
+            "execute code when opened."
+        )
+        source_mode = st.segmented_control(
+            "Extrusion source",
+            ["Fit from cubic spline", "Load saved surface"],
+            default="Fit from cubic spline",
+            key="extruded_surface_source_mode",
+            persist_state="page",
+        )
+        fitting_direction = source_mode == "Fit from cubic spline"
+        model_upload = st.file_uploader(
+            "Cubic spline model" if fitting_direction else "Saved extruded surface",
+            type=["joblib"],
+            key=("extrusion_curve_upload" if fitting_direction else "extruded_surface_model_upload"),
+            help=(
+                "Choose a degree-3 smoothing-spline model downloaded from the curve overlay."
+                if fitting_direction
+                else "Choose an extruded-surface artifact downloaded from this overlay."
+            ),
+        )
+        uploaded_digest = None
+        model_bytes = None
+        if model_upload is not None:
+            model_bytes = model_upload.getvalue()
+            uploaded_digest = sha256(model_bytes).hexdigest()
+        already_loaded = (
+            uploaded_digest is not None
+            and uploaded_digest == st.session_state.get("loaded_extruded_surface_digest")
+            and (
+                st.session_state.get("loaded_extrusion_curve_model") is not None
+                if fitting_direction
+                else st.session_state.get("loaded_extruded_surface_model") is not None
+            )
+        )
+        if st.button(
+            "Load cubic spline" if fitting_direction else "Load extruded surface",
+            type="primary",
+            icon=":material/upload_file:",
+            width="stretch",
+            disabled=model_bytes is None or already_loaded,
+            key="load_extruded_surface_button",
+        ):
+            try:
+                if fitting_direction:
+                    loaded_model, loaded_provenance = load_curve_model(model_bytes)
+                    if (
+                        loaded_model.algorithm != "spline"
+                        or int(loaded_model.parameters.get("degree", 0)) != 3
+                    ):
+                        raise ValueError(
+                            "The extrusion input must be a degree-3 cubic spline curve model."
+                        )
+                else:
+                    loaded_model, loaded_provenance = load_extruded_surface(model_bytes)
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.session_state.loaded_extruded_surface_digest = uploaded_digest
+                if fitting_direction:
+                    st.session_state.loaded_extrusion_curve_model = loaded_model
+                    st.session_state.pop("loaded_extruded_surface_model", None)
+                else:
+                    st.session_state.loaded_extruded_surface_model = loaded_model
+                    st.session_state.pop("loaded_extrusion_curve_model", None)
+                st.session_state.loaded_extruded_surface_provenance = loaded_provenance
+                st.session_state.loaded_extruded_surface_filename = model_upload.name
+                st.session_state.pop("loaded_extruded_surface_result", None)
+                st.session_state.pop("loaded_extruded_surface_identity", None)
+                load_succeeded = True
+
+        loaded_curve_model: CurveModel | None = st.session_state.get(
+            "loaded_extrusion_curve_model"
+        ) if fitting_direction else None
+        loaded_surface_model = (
+            st.session_state.get("loaded_extruded_surface_model")
+            if not fitting_direction
+            else None
+        )
+        loaded_model = loaded_curve_model if fitting_direction else loaded_surface_model
+        loaded_provenance = st.session_state.get("loaded_extruded_surface_provenance", {})
+        loaded_digest = st.session_state.get("loaded_extruded_surface_digest")
+        if loaded_model is None:
+            if fitting_direction:
+                st.info("Choose a saved cubic spline and click **Load cubic spline**.")
+            else:
+                st.info("Choose a saved extruded surface and click **Load extruded surface**.")
+            return None, {}
+
+        loaded_filename = st.session_state.get(
+            "loaded_extruded_surface_filename",
+            "Cubic spline" if fitting_direction else "Extruded surface",
+        )
+        st.success(
+            f"{loaded_filename} · {loaded_model.parameter_feature} · "
+            f"{', '.join(loaded_model.coordinate_features)}"
+        )
+        if uploaded_digest is not None and uploaded_digest != loaded_digest:
+            st.info(
+                "A different file is selected but has not been loaded. The named model above "
+                "is still active."
+            )
+        st.button(
+            "Forget loaded model",
+            icon=":material/delete:",
+            on_click=forget_loaded_extruded_surface,
+            key="forget_extruded_surface_button",
+        )
+
+        compatible = True
+        chart_components = (x_component, y_component, z_component)
+        if set(chart_components) != set(loaded_model.coordinate_features):
+            st.error(
+                "Select the saved model coordinates on the chart: "
+                f"{', '.join(loaded_model.coordinate_features)}."
+            )
+            compatible = False
+
+        saved_direction_method = loaded_provenance.get("direction_method")
+        if saved_direction_method is not None and saved_direction_method != direction_method:
+            st.error(
+                f"This model was created in {saved_direction_method} coordinates, but the "
+                f"current projection uses {direction_method}."
+            )
+            compatible = False
+        saved_scaling = loaded_provenance.get("residual_trajectory_scaling")
+        if saved_scaling is not None and bool(saved_scaling) != residual_trajectory_scaling:
+            st.error(
+                "This model and the current projection use different residual trajectory "
+                "scaling settings."
+            )
+            compatible = False
+
+        current_pca_digest = pca_projection_fingerprint(active_pca)
+        saved_pca_digest = loaded_provenance.get("pca_sha256")
+        saved_fingerprint_version = loaded_provenance.get("pca_fingerprint_version")
+        if saved_pca_digest is None:
+            st.warning(
+                "This artifact does not identify its fitted coordinate basis. "
+                "Coordinate labels match, but basis compatibility cannot be verified."
+            )
+        elif saved_fingerprint_version == PCA_PROJECTION_FINGERPRINT_VERSION:
+            if saved_pca_digest != current_pca_digest:
+                st.error(
+                    "This model was created in a different coordinate basis. Use the "
+                    "matching direction model."
+                )
+                compatible = False
+        elif saved_fingerprint_version in (None, 1):
+            if saved_pca_digest != pca_projection_fingerprint(active_pca, version=1):
+                st.error(
+                    "This model was created in a different coordinate basis. Use the "
+                    "matching direction model."
+                )
+                compatible = False
+        else:
+            st.error(
+                "This model uses an unsupported coordinate fingerprint version: "
+                f"{saved_fingerprint_version!r}."
+            )
+            compatible = False
+
+        parameter_available = loaded_model.parameter_feature in projection
+        if fitting_direction and not parameter_available:
+            st.error(
+                f"The cubic spline parameter {loaded_model.parameter_feature!r} is not "
+                "available in the current projection."
+            )
+            compatible = False
+        elif parameter_available and (
+            not is_numeric_dtype(projection[loaded_model.parameter_feature]) or is_bool_dtype(
+            projection[loaded_model.parameter_feature]
+            )
+        ):
+            st.error(
+                f"The cubic spline parameter {loaded_model.parameter_feature!r} must be numeric."
+            )
+            compatible = False
+
+        saved_layer = loaded_provenance.get("layer_component")
+        if saved_layer is not None and saved_layer != layer_component:
+            st.warning(
+                f"This model was saved for {saved_layer!r}, not {layer_component!r}."
+            )
+        saved_position = loaded_provenance.get("cached_position")
+        if saved_position is not None and saved_position != cached_position:
+            st.warning(
+                f"This model was saved for token position {saved_position!r}, not "
+                f"{cached_position!r}."
+            )
+        if not compatible:
+            return None, {}
+
+        with st.expander("Saved model details"):
+            model_details = {
+                "Parameter": loaded_model.parameter_feature,
+                "Parameter bounds": (
+                    loaded_model.training_parameter_bounds.tolist()
+                    if fitting_direction
+                    else loaded_model.parameter_bounds.tolist()
+                ),
+                "Coordinates": loaded_model.coordinate_features,
+                "Artifact version": loaded_provenance.get("artifact_version"),
+            }
+            if fitting_direction:
+                model_details.update(
+                    {
+                        "Spline degree": loaded_model.parameters.get("degree"),
+                        "Spline smoothing": loaded_model.parameters.get("smoothing"),
+                    }
+                )
+            else:
+                model_details["Extrusion degree"] = loaded_model.extrusion_degree
+                model_details["Linear coefficient"] = {
+                    feature: float(value)
+                    for feature, value in zip(
+                        loaded_model.coordinate_features, loaded_model.direction, strict=True
+                    )
+                }
+                if loaded_model.quadratic_direction is not None:
+                    model_details["Quadratic coefficient"] = {
+                        feature: float(value)
+                        for feature, value in zip(
+                            loaded_model.coordinate_features,
+                            loaded_model.quadratic_direction,
+                            strict=True,
+                        )
+                    }
+            st.write(model_details)
+
+        preview_scope = st.segmented_control(
+            "Fit points" if fitting_direction else "Preview points",
+            ["Visible", "All projected"],
+            default="Visible",
+            key="extruded_surface_scope",
+            help=(
+                "The selected points determine the RMSE-minimizing direction, automatic "
+                "extrusion width, and diagnostics."
+                if fitting_direction
+                else "The selected points determine the automatic width and current-data diagnostics."
+            ),
+            persist_state="page",
+        )
+        preview_source = plot_data if preview_scope == "Visible" else projection
+        saved_coordinates = list(loaded_model.coordinate_features)
+        point_xyz = preview_source[saved_coordinates].to_numpy(dtype=np.float64)
+        point_parameter = (
+            pd.to_numeric(
+                preview_source[loaded_model.parameter_feature], errors="coerce"
+            ).to_numpy(dtype=np.float64)
+            if parameter_available
+            else None
+        )
+        fit_data = (
+            np.column_stack([point_parameter, point_xyz])
+            if point_parameter is not None
+            else point_xyz
+        )
+        data_digest = sha256(np.ascontiguousarray(fit_data).tobytes()).hexdigest()
+
+        with st.form("extruded_surface_preview_form"):
+            if fitting_direction:
+                extrusion_degree_label = st.segmented_control(
+                    "Extrusion degree",
+                    ["Linear", "Quadratic"],
+                    default="Linear",
+                    key="extruded_surface_degree",
+                    help=(
+                        "Quadratic fits C(t) + u·d₁ + u²·d₂ using alternating "
+                        "least-squares optimization."
+                    ),
+                    persist_state="page",
+                )
+                extrusion_degree = 1 if extrusion_degree_label == "Linear" else 2
+                quadratic_max_iterations = (
+                    st.slider(
+                        "Quadratic optimization iterations",
+                        50,
+                        1_000,
+                        200,
+                        50,
+                        key="extruded_surface_quadratic_iterations",
+                        help=(
+                            "Higher values can reduce RMSE for difficult curved cross-sections "
+                            "but take longer."
+                        ),
+                        persist_state="page",
+                    )
+                    if extrusion_degree == 2
+                    else 0
+                )
+            else:
+                extrusion_degree = loaded_model.extrusion_degree
+                quadratic_max_iterations = 0
+                st.caption(
+                    f"Saved extrusion degree: "
+                    f"{'linear' if extrusion_degree == 1 else 'quadratic'}"
+                )
+            sample_columns = st.columns(4)
+            parameter_samples = sample_columns[0].slider(
+                "Curve samples",
+                20,
+                500,
+                120,
+                20,
+                key="extruded_surface_parameter_samples",
+                persist_state="page",
+            )
+            extrusion_samples = sample_columns[1].slider(
+                "Extrusion samples",
+                2,
+                120,
+                30,
+                2,
+                key="extruded_surface_extrusion_samples",
+                persist_state="page",
+            )
+            parameter_padding = sample_columns[2].slider(
+                "Curve padding",
+                0,
+                100,
+                0,
+                1,
+                format="%d%%",
+                key="extruded_surface_parameter_padding",
+                persist_state="page",
+            )
+            extrusion_padding = sample_columns[3].slider(
+                "Width padding",
+                0,
+                200,
+                10,
+                5,
+                format="%d%%",
+                key="extruded_surface_width_padding",
+                help="Extends the sheet beyond the current points along the extrusion axis.",
+                persist_state="page",
+            )
+            extent_mode = st.segmented_control(
+                "Extrusion extent",
+                ["Current points", "Manual"],
+                default="Current points",
+                key="extruded_surface_extent_mode",
+                help="Current points derives the u range by projecting the selected points.",
+                persist_state="page",
+            )
+            manual_bounds = None
+            if extent_mode == "Manual":
+                bound_columns = st.columns(2)
+                extrusion_minimum = bound_columns[0].number_input(
+                    "Minimum u",
+                    value=-1.0,
+                    key="extruded_surface_minimum_u",
+                    persist_state="page",
+                )
+                extrusion_maximum = bound_columns[1].number_input(
+                    "Maximum u",
+                    value=1.0,
+                    key="extruded_surface_maximum_u",
+                    persist_state="page",
+                )
+                manual_bounds = (extrusion_minimum, extrusion_maximum)
+            preview_submitted = st.form_submit_button(
+                "Fit / update extrusion" if fitting_direction else "Apply loaded surface",
+                type="primary",
+                icon=":material/fit_screen:",
+                width="stretch",
+            )
+
+        preview_identity = (
+            source_mode,
+            extrusion_degree,
+            quadratic_max_iterations,
+            loaded_digest,
+            current_pca_digest,
+            data_digest,
+            preview_scope,
+            parameter_samples,
+            extrusion_samples,
+            parameter_padding,
+            extrusion_padding,
+            extent_mode,
+            manual_bounds,
+        )
+        if preview_submitted or load_succeeded:
+            try:
+                spinner_text = (
+                    "Fitting the minimum-RMSE direction and sampling the surface…"
+                    if fitting_direction
+                    else "Evaluating the loaded extruded surface…"
+                )
+                with st.spinner(spinner_text):
+                    if fitting_direction:
+                        direction_fit = fit_extrusion_direction(
+                            loaded_model,
+                            point_parameter,
+                            point_xyz,
+                            degree=extrusion_degree,
+                            max_iterations=(
+                                quadratic_max_iterations if extrusion_degree == 2 else 200
+                            ),
+                        )
+                        surface_model = direction_fit.model
+                    else:
+                        direction_fit = None
+                        surface_model = loaded_model
+                    result = evaluate_extruded_surface(
+                        surface_model,
+                        point_xyz,
+                        point_parameter=point_parameter,
+                        parameter_samples=parameter_samples,
+                        extrusion_samples=extrusion_samples,
+                        parameter_padding_fraction=parameter_padding / 100.0,
+                        extrusion_padding_fraction=extrusion_padding / 100.0,
+                        extrusion_bounds=manual_bounds,
+                    )
+                    if direction_fit is not None:
+                        result.metrics.update(direction_fit.metrics)
+            except (ValueError, MemoryError) as exc:
+                st.session_state.pop("loaded_extruded_surface_result", None)
+                st.session_state.pop("loaded_extruded_surface_identity", None)
+                action = "fit" if fitting_direction else "preview"
+                st.error(f"Extruded-surface {action} failed: {exc}")
+            else:
+                st.session_state.loaded_extruded_surface_model = surface_model
+                st.session_state.loaded_extruded_surface_result = result
+                st.session_state.loaded_extruded_surface_identity = preview_identity
+
+        result = None
+        if st.session_state.get("loaded_extruded_surface_identity") == preview_identity:
+            result = st.session_state.get("loaded_extruded_surface_result")
+        elif st.session_state.get("loaded_extruded_surface_result") is not None:
+            action_label = (
+                "Fit / update extrusion" if fitting_direction else "Apply loaded surface"
+            )
+            st.info(f"The points or controls changed. Click **{action_label}**.")
+        if result is None:
+            return None, {}
+
+        metrics = result.metrics
+        diagnostic_columns = st.columns(3)
+        if fitting_direction:
+            diagnostic_columns[0].metric(
+                "Curve RMSE", _format_metric(metrics["curve_rmse_3d"])
+            )
+            diagnostic_columns[1].metric(
+                "Fitted surface RMSE",
+                _format_metric(metrics["surface_rmse_3d"]),
+                help=(
+                    "The linear solution is globally optimal. Quadratic fitting uses "
+                    "multi-start alternating optimization."
+                ),
+            )
+            diagnostic_columns[2].metric(
+                "Residual captured",
+                _format_metric(metrics["captured_residual_variance"], percent=True),
+                help=(
+                    "Fraction of point-to-spline squared residual captured by the "
+                    "extrusion curve."
+                ),
+            )
+        else:
+            diagnostic_columns[0].metric(
+                "Current surface RMSE", _format_metric(metrics["current_rmse_3d"])
+            )
+            diagnostic_columns[1].metric(
+                "Current surface MAE", _format_metric(metrics["current_mae_3d"])
+            )
+            diagnostic_columns[2].metric(
+                "Maximum error", _format_metric(metrics["current_max_error_3d"])
+            )
+        linear_coefficient = {
+            feature: float(value)
+            for feature, value in zip(
+                result.model.coordinate_features, result.model.direction, strict=True
+            )
+        }
+        coefficient_text = f"d₁: {linear_coefficient}"
+        if result.model.quadratic_direction is not None:
+            quadratic_coefficient = {
+                feature: float(value)
+                for feature, value in zip(
+                    result.model.coordinate_features,
+                    result.model.quadratic_direction,
+                    strict=True,
+                )
+            }
+            coefficient_text += f" · d₂: {quadratic_coefficient}"
+        st.caption(
+            f"Degree {result.model.extrusion_degree} · {coefficient_text} · "
+            f"t ∈ [{metrics['display_parameter_bounds'][0]:.4g}, "
+            f"{metrics['display_parameter_bounds'][1]:.4g}] · "
+            f"u ∈ [{metrics['display_extrusion_bounds'][0]:.4g}, "
+            f"{metrics['display_extrusion_bounds'][1]:.4g}]"
+        )
+        if result.warnings:
+            st.warning(" ".join(result.warnings))
+        artifact_metadata = {
+            key: value
+            for key, value in loaded_provenance.items()
+            if key not in {"artifact_kind", "artifact_version"}
+        }
+        artifact_metadata.update(
+            {
+                "direction_method": direction_method,
+                "residual_trajectory_scaling": residual_trajectory_scaling,
+                "pca_sha256": current_pca_digest,
+                "pca_fingerprint_version": PCA_PROJECTION_FINGERPRINT_VERSION,
+                "layer_component": layer_component,
+                "cached_position": cached_position,
+                "extrusion_degree": result.model.extrusion_degree,
+                "fit_scope": (
+                    preview_scope
+                    if fitting_direction
+                    else artifact_metadata.get("fit_scope")
+                ),
+                "fit_metrics": {
+                    key: metrics[key]
+                    for key in (
+                        "curve_rmse_3d",
+                        "surface_rmse_3d",
+                        "surface_mae_3d",
+                        "surface_max_error_3d",
+                        "captured_residual_variance",
+                        "extrusion_degree",
+                        "optimization_iterations",
+                        "optimization_converged",
+                    )
+                    if key in metrics
+                },
+            }
+        )
+        safe_coordinates = "-".join(result.model.coordinate_features).replace("/", "-")
+        st.download_button(
+            "Download extruded surface",
+            data=lambda: serialize_extruded_surface(result.model, metadata=artifact_metadata),
+            file_name=f"activation_extruded_surface_{safe_coordinates}.joblib",
+            mime="application/octet-stream",
+            icon=":material/download:",
+            on_click="ignore",
+            help=(
+                "Download the cubic spline, polynomial extrusion coefficients, parameter "
+                "bounds, coordinate labels, and projection provenance."
+            ),
+        )
+        appearance = extruded_surface_appearance_controls(result)
+        return result, appearance
+
+
 def loaded_surface_controls(
     *,
     plot_data: pd.DataFrame,
@@ -613,10 +2274,12 @@ def loaded_surface_controls(
     y_component: str,
     z_component: str,
     active_pca: Any,
+    direction_method: str,
+    residual_trajectory_scaling: bool,
     layer_component: str,
     cached_position: Any,
 ) -> tuple[SurfaceEvaluationResult | None, dict[str, Any]]:
-    """Load a trusted surface artifact and build a preview in the current PCA space."""
+    """Load a trusted surface artifact and build a preview in the current projection space."""
 
     load_succeeded = False
     with st.container(border=True):
@@ -707,20 +2370,36 @@ def loaded_surface_controls(
             )
             compatible = False
 
+        saved_direction_method = loaded_provenance.get("direction_method", "PCA")
+        if saved_direction_method != direction_method:
+            st.error(
+                f"This surface was fitted in {saved_direction_method} coordinates, but the "
+                f"current projection uses {direction_method}."
+            )
+            compatible = False
+        saved_scaling = bool(loaded_provenance.get("residual_trajectory_scaling", False))
+        if saved_scaling != residual_trajectory_scaling:
+            st.error(
+                "This surface was fitted with residual trajectory scaling "
+                f"{'enabled' if saved_scaling else 'disabled'}, but the current projection "
+                f"has it {'enabled' if residual_trajectory_scaling else 'disabled'}."
+            )
+            compatible = False
+
         current_pca_digest = pca_projection_fingerprint(active_pca)
         saved_pca_digest = loaded_provenance.get("pca_sha256")
         saved_pca_fingerprint_version = loaded_provenance.get("pca_fingerprint_version")
         if saved_pca_digest is None:
             st.warning(
-                "This artifact does not identify its PCA basis. Component labels match, but "
+                "This artifact does not identify its coordinate basis. Component labels match, but "
                 "coordinate compatibility cannot be verified."
             )
         elif saved_pca_fingerprint_version in (None, 1):
             legacy_pca_digest = pca_projection_fingerprint(active_pca, version=1)
             if saved_pca_digest != legacy_pca_digest:
                 st.error(
-                    "This surface was fitted in a different PCA coordinate system. Load the "
-                    "matching saved PCA before applying the surface."
+                    "This surface was fitted in a different coordinate system. Use the matching "
+                    "direction fit before applying the surface."
                 )
                 compatible = False
             elif bool(getattr(active_pca, "whiten", False)):
@@ -732,13 +2411,13 @@ def loaded_surface_controls(
         elif saved_pca_fingerprint_version == PCA_PROJECTION_FINGERPRINT_VERSION:
             if saved_pca_digest != current_pca_digest:
                 st.error(
-                    "This surface was fitted in a different PCA coordinate system. Load the "
-                    "matching saved PCA before applying the surface."
+                    "This surface was fitted in a different coordinate system. Use the matching "
+                    "direction fit before applying the surface."
                 )
                 compatible = False
         else:
             st.error(
-                "This surface uses an unsupported PCA fingerprint version: "
+                "This surface uses an unsupported coordinate fingerprint version: "
                 f"{saved_pca_fingerprint_version!r}."
             )
             compatible = False
@@ -1089,13 +2768,17 @@ with st.sidebar:
     st.caption("Fixed extraction slice")
     st.write(f"`{component}` · final prompt token (`{PROMPT_TOKEN_POSITION}`)")
     candidate_fields = inspection["metadata_fields"]
-    default_filter = (
-        ["template_metadata.prompt_framing"]
-        if "template_metadata.prompt_framing" in candidate_fields
-        else []
-    )
-    filter_fields = st.multiselect("Filter fields", candidate_fields, default=default_filter)
     metadata_index = inspection["metadata_index"]
+    multiple_source_folders = (
+        SOURCE_FOLDER_FIELD in metadata_index
+        and metadata_index[SOURCE_FOLDER_FIELD].nunique(dropna=False) > 1
+    )
+    default_filter = []
+    if "template_metadata.prompt_framing" in candidate_fields:
+        default_filter.append("template_metadata.prompt_framing")
+    if multiple_source_folders:
+        default_filter.append(SOURCE_FOLDER_FIELD)
+    filter_fields = st.multiselect("Filter fields", candidate_fields, default=default_filter)
     filter_options = {
         field: sorted(metadata_index[field].dropna().unique().tolist(), key=str)
         for field in filter_fields
@@ -1114,11 +2797,14 @@ with st.sidebar:
     aggregation_candidates = [*candidate_fields]
     if "time_horizon_months" not in aggregation_candidates:
         aggregation_candidates.append("time_horizon_months")
+    default_aggregation_fields = ["time_horizon_months"]
+    if multiple_source_folders:
+        default_aggregation_fields.append(SOURCE_FOLDER_FIELD)
     aggregation_fields = st.multiselect(
         "Aggregate by",
         aggregation_candidates,
-        default=["time_horizon_months"],
-        help="Rows in each group are averaged before PCA, matching the notebook.",
+        default=default_aggregation_fields,
+        help="Rows in each group are averaged before fitting the selected directions.",
     )
     max_samples_enabled = st.toggle("Limit source samples", value=False)
     max_samples = (
@@ -1126,95 +2812,291 @@ with st.sidebar:
         if max_samples_enabled
         else None
     )
-    pca_mode = st.segmented_control(
-        "PCA model", ["Fit new", "Use saved"], default="Fit new", key="pca_mode"
+    direction_method = st.segmented_control(
+        "Direction method",
+        ["PCA", "PLS"],
+        default="PCA",
+        key="direction_method",
+        help=(
+            "PCA finds unsupervised variance directions. PLS finds directions supervised "
+            "by log10(time_horizon_months)."
+        ),
     )
     loaded_pca_model = None
     loaded_pca_provenance: dict = {}
-    if pca_mode == "Fit new":
-        n_components = int(st.number_input("PCA components", min_value=2, max_value=50, value=3))
-        pca_identity = ("fit", n_components)
-        st.caption(
-            "Filter and aggregation changes rebuild the prepared data; component-count "
-            "changes refit PCA only."
+    loaded_pls_model = None
+    loaded_pls_provenance: dict = {}
+    if direction_method == "PLS":
+        pca_mode = "Fit new"
+        pls_mode = st.segmented_control(
+            "PLS model", ["Fit new", "Use saved"], default="Fit new", key="pls_mode"
         )
-    else:
-        st.warning(
-            "Only load PCA files you trust. Joblib and pickle files can execute code when opened."
-        )
-        model_upload = st.file_uploader(
-            "Saved PCA model",
-            type=["joblib", "pkl", "pickle"],
-            key="pca_model_upload",
-            help="Accepts Activation Atlas artifacts and raw fitted PCA/IncrementalPCA files.",
-        )
-        uploaded_digest = None
-        if model_upload is not None:
-            model_bytes = model_upload.getvalue()
-            uploaded_digest = sha256(model_bytes).hexdigest()
-            if (
-                st.session_state.get("loaded_pca_digest") != uploaded_digest
-                or "loaded_pca_model" not in st.session_state
-            ):
-                if st.button(
-                    "Load uploaded PCA",
-                    type="primary",
-                    icon=":material/upload_file:",
+        if pls_mode == "Fit new":
+            with st.form("pls_fit_configuration"):
+                n_components = int(
+                    st.number_input(
+                        "PLS components",
+                        min_value=2,
+                        max_value=50,
+                        value=3,
+                        key="pls_components",
+                        help="Number of supervised latent directions to fit.",
+                        persist_state="page",
+                    )
+                )
+                with st.expander("Advanced configuration"):
+                    pls_scale = st.toggle(
+                        "Scale activations and target",
+                        value=True,
+                        key="pls_scale",
+                        help="Standardize X and log-time-horizon y before fitting.",
+                        persist_state="page",
+                    )
+                    pls_max_iter = int(
+                        st.number_input(
+                            "Maximum iterations",
+                            min_value=1,
+                            max_value=100_000,
+                            value=500,
+                            step=100,
+                            key="pls_max_iter",
+                            help="Maximum NIPALS power-method iterations per component.",
+                            persist_state="page",
+                        )
+                    )
+                    pls_tolerance = float(
+                        st.number_input(
+                            "Convergence tolerance",
+                            min_value=1e-12,
+                            max_value=1e-1,
+                            value=1e-6,
+                            step=1e-6,
+                            format="%.1e",
+                            key="pls_tolerance",
+                            help=(
+                                "Stop when the squared change in the left singular vector "
+                                "is smaller."
+                            ),
+                            persist_state="page",
+                        )
+                    )
+                st.form_submit_button(
+                    "Apply PLS configuration",
+                    icon=":material/tune:",
                     width="stretch",
+                )
+            pca_identity = (
+                "pls",
+                "fit",
+                n_components,
+                pls_scale,
+                pls_max_iter,
+                pls_tolerance,
+                "log10_time_horizon_months",
+            )
+            st.caption(
+                "Target: `log10(time_horizon_months)` (fixed). PLS is refitted when the "
+                "prepared data or any configuration value changes."
+            )
+        else:
+            st.warning(
+                "Only load PLS files you trust. Joblib and pickle files can execute code when "
+                "opened."
+            )
+            model_upload = st.file_uploader(
+                "Saved PLS model",
+                type=["joblib"],
+                key="pls_model_upload",
+                help="Accepts PLS artifacts downloaded from Activation Atlas.",
+            )
+            uploaded_digest = None
+            if model_upload is not None:
+                model_bytes = model_upload.getvalue()
+                uploaded_digest = sha256(model_bytes).hexdigest()
+                if (
+                    st.session_state.get("loaded_pls_digest") != uploaded_digest
+                    or "loaded_pls_model" not in st.session_state
                 ):
-                    try:
-                        loaded_pca_model, loaded_pca_provenance = load_pca_model(model_bytes)
-                    except ValueError as exc:
-                        st.error(str(exc))
-                        st.stop()
-                    st.session_state.loaded_pca_digest = uploaded_digest
-                    st.session_state.loaded_pca_model = loaded_pca_model
-                    st.session_state.loaded_pca_provenance = loaded_pca_provenance
-                    st.session_state.loaded_pca_filename = model_upload.name
-            else:
+                    if st.button(
+                        "Load uploaded PLS",
+                        type="primary",
+                        icon=":material/upload_file:",
+                        width="stretch",
+                    ):
+                        try:
+                            loaded_pls_model, loaded_pls_provenance = load_pls_model(model_bytes)
+                        except ValueError as exc:
+                            st.error(str(exc))
+                            st.stop()
+                        st.session_state.loaded_pls_digest = uploaded_digest
+                        st.session_state.loaded_pls_model = loaded_pls_model
+                        st.session_state.loaded_pls_provenance = loaded_pls_provenance
+                        st.session_state.loaded_pls_filename = model_upload.name
+                else:
+                    loaded_pls_model = st.session_state.loaded_pls_model
+                    loaded_pls_provenance = st.session_state.get("loaded_pls_provenance", {})
+            elif "loaded_pls_model" in st.session_state:
+                uploaded_digest = st.session_state.get("loaded_pls_digest")
+                loaded_pls_model = st.session_state.loaded_pls_model
+                loaded_pls_provenance = st.session_state.get("loaded_pls_provenance", {})
+
+            if loaded_pls_model is None:
+                st.info("Choose a saved model and click **Load uploaded PLS** to continue.")
+                st.stop()
+            n_components = int(loaded_pls_model.components_.shape[0])
+            if n_components < 2:
+                st.error("The loaded PLS needs at least two components for this explorer.")
+                st.stop()
+            pca_identity = ("pls", "loaded", uploaded_digest)
+            st.success(
+                f"{st.session_state.get('loaded_pls_filename', 'Saved PLS')} · "
+                f"{n_components:,} components"
+            )
+            st.caption(
+                f"Scale: {'on' if loaded_pls_model.scale else 'off'} · "
+                f"Maximum iterations: {loaded_pls_model.max_iter:,} · "
+                f"Tolerance: {loaded_pls_model.tol:.1e}"
+            )
+            st.button(
+                "Forget loaded PLS",
+                icon=":material/delete:",
+                on_click=forget_loaded_pls,
+                width="stretch",
+            )
+            saved_component = loaded_pls_provenance.get("layer_component")
+            if saved_component is not None and saved_component != component:
+                st.warning(f"This model was saved for {saved_component!r}, not {component!r}.")
+            saved_position = loaded_pls_provenance.get("cached_position")
+            current_position = inspection["positions"][position_index]
+            if saved_position is not None and saved_position != current_position:
+                st.warning(
+                    f"This model was saved for token position {saved_position!r}, "
+                    f"not {current_position!r}."
+                )
+            saved_sklearn_version = loaded_pls_provenance.get("sklearn_version")
+            if saved_sklearn_version and saved_sklearn_version != sklearn_version:
+                st.warning(
+                    f"This model was saved with scikit-learn {saved_sklearn_version}; "
+                    f"the app is running {sklearn_version}."
+                )
+            st.caption(
+                "Preparation changes retransform the selected points without refitting the model."
+            )
+    else:
+        pls_mode = "Fit new"
+        pca_mode = st.segmented_control(
+            "PCA model", ["Fit new", "Use saved"], default="Fit new", key="pca_mode"
+        )
+        if pca_mode == "Fit new":
+            n_components = int(
+                st.number_input("PCA components", min_value=2, max_value=50, value=3)
+            )
+            pca_identity = ("fit", n_components)
+            st.caption(
+                "Filter and aggregation changes rebuild the prepared data; component-count "
+                "changes refit PCA only."
+            )
+        else:
+            st.warning(
+                "Only load PCA files you trust. Joblib and pickle files can execute code when "
+                "opened."
+            )
+            model_upload = st.file_uploader(
+                "Saved PCA model",
+                type=["joblib", "pkl", "pickle"],
+                key="pca_model_upload",
+                help="Accepts Activation Atlas artifacts and raw fitted PCA/IncrementalPCA files.",
+            )
+            uploaded_digest = None
+            if model_upload is not None:
+                model_bytes = model_upload.getvalue()
+                uploaded_digest = sha256(model_bytes).hexdigest()
+                if (
+                    st.session_state.get("loaded_pca_digest") != uploaded_digest
+                    or "loaded_pca_model" not in st.session_state
+                ):
+                    if st.button(
+                        "Load uploaded PCA",
+                        type="primary",
+                        icon=":material/upload_file:",
+                        width="stretch",
+                    ):
+                        try:
+                            loaded_pca_model, loaded_pca_provenance = load_pca_model(model_bytes)
+                        except ValueError as exc:
+                            st.error(str(exc))
+                            st.stop()
+                        st.session_state.loaded_pca_digest = uploaded_digest
+                        st.session_state.loaded_pca_model = loaded_pca_model
+                        st.session_state.loaded_pca_provenance = loaded_pca_provenance
+                        st.session_state.loaded_pca_filename = model_upload.name
+                else:
+                    loaded_pca_model = st.session_state.loaded_pca_model
+                    loaded_pca_provenance = st.session_state.get("loaded_pca_provenance", {})
+            elif "loaded_pca_model" in st.session_state:
+                uploaded_digest = st.session_state.get("loaded_pca_digest")
                 loaded_pca_model = st.session_state.loaded_pca_model
                 loaded_pca_provenance = st.session_state.get("loaded_pca_provenance", {})
-        elif "loaded_pca_model" in st.session_state:
-            uploaded_digest = st.session_state.get("loaded_pca_digest")
-            loaded_pca_model = st.session_state.loaded_pca_model
-            loaded_pca_provenance = st.session_state.get("loaded_pca_provenance", {})
 
-        if loaded_pca_model is None:
-            st.info("Choose a saved model and click **Load uploaded PCA** to continue.")
-            st.stop()
-        n_components = int(loaded_pca_model.components_.shape[0])
-        if n_components < 2:
-            st.error("The loaded PCA needs at least two components for this explorer.")
-            st.stop()
-        pca_identity = ("loaded", uploaded_digest)
-        st.success(
-            f"{st.session_state.get('loaded_pca_filename', 'Saved PCA')} · "
-            f"{n_components:,} components"
-        )
-        st.button(
-            "Forget loaded PCA",
-            icon=":material/delete:",
-            on_click=forget_loaded_pca,
-            width="stretch",
-        )
-        saved_component = loaded_pca_provenance.get("layer_component")
-        if saved_component is not None and saved_component != component:
-            st.warning(f"This model was saved for {saved_component!r}, not {component!r}.")
-        saved_position = loaded_pca_provenance.get("cached_position")
-        current_position = inspection["positions"][position_index]
-        if saved_position is not None and saved_position != current_position:
-            st.warning(
-                f"This model was saved for token position {saved_position!r}, "
-                f"not {current_position!r}."
+            if loaded_pca_model is None:
+                st.info("Choose a saved model and click **Load uploaded PCA** to continue.")
+                st.stop()
+            n_components = int(loaded_pca_model.components_.shape[0])
+            if n_components < 2:
+                st.error("The loaded PCA needs at least two components for this explorer.")
+                st.stop()
+            pca_identity = ("loaded", uploaded_digest)
+            st.success(
+                f"{st.session_state.get('loaded_pca_filename', 'Saved PCA')} · "
+                f"{n_components:,} components"
             )
-        saved_sklearn_version = loaded_pca_provenance.get("sklearn_version")
-        if saved_sklearn_version and saved_sklearn_version != sklearn_version:
-            st.warning(
-                f"This model was saved with scikit-learn {saved_sklearn_version}; "
-                f"the app is running {sklearn_version}."
+            st.button(
+                "Forget loaded PCA",
+                icon=":material/delete:",
+                on_click=forget_loaded_pca,
+                width="stretch",
             )
-        st.caption(
-            "Preparation changes retransform the selected points without refitting the model."
+            saved_component = loaded_pca_provenance.get("layer_component")
+            if saved_component is not None and saved_component != component:
+                st.warning(f"This model was saved for {saved_component!r}, not {component!r}.")
+            saved_position = loaded_pca_provenance.get("cached_position")
+            current_position = inspection["positions"][position_index]
+            if saved_position is not None and saved_position != current_position:
+                st.warning(
+                    f"This model was saved for token position {saved_position!r}, "
+                    f"not {current_position!r}."
+                )
+            saved_sklearn_version = loaded_pca_provenance.get("sklearn_version")
+            if saved_sklearn_version and saved_sklearn_version != sklearn_version:
+                st.warning(
+                    f"This model was saved with scikit-learn {saved_sklearn_version}; "
+                    f"the app is running {sklearn_version}."
+                )
+            st.caption(
+                "Preparation changes retransform the selected points without refitting the model."
+            )
+
+    residual_trajectory_scaling = False
+    if direction_method == "PLS":
+        residual_trajectory_scaling = st.toggle(
+            "Residual trajectory scaling",
+            value=False,
+            key="residual_trajectory_scaling",
+            help=(
+                "Correct magnification in the bundled 3-D PLS space using each raw activation's "
+                "standardized reconstruction-residual RMS. The fitted correction is only "
+                "compatible with its matching 2,560-feature PLS basis."
+            ),
+        )
+        if residual_trajectory_scaling:
+            st.caption(
+                "Corrects PLS1-PLS3 about the scaler's fixed global center and clips residual "
+                "RMS to its training range."
+            )
+        pca_identity = (
+            *pca_identity,
+            "residual_trajectory_scaling",
+            residual_trajectory_scaling,
         )
 
 slice_key = (component, position_index, st.session_state.get("source_revision", 0))
@@ -1251,12 +3133,22 @@ if st.session_state.get("slice_key") != slice_key:
 
 activation_matrix = st.session_state.activation_matrix
 if st.session_state.get("activation_cache_path") is not None:
-    st.caption("Using a disk-backed activation slice; source batches stay closed during PCA work.")
+    st.caption(
+        "Using a disk-backed activation slice; source batches stay closed during direction work."
+    )
 if loaded_pca_model is not None and int(loaded_pca_model.components_.shape[1]) != int(
     activation_matrix.shape[1]
 ):
     st.error(
         f"The loaded PCA expects {loaded_pca_model.components_.shape[1]:,} activation "
+        f"features, but {component!r} has {activation_matrix.shape[1]:,}."
+    )
+    st.stop()
+if loaded_pls_model is not None and int(loaded_pls_model.components_.shape[1]) != int(
+    activation_matrix.shape[1]
+):
+    st.error(
+        f"The loaded PLS expects {loaded_pls_model.components_.shape[1]:,} activation "
         f"features, but {component!r} has {activation_matrix.shape[1]:,}."
     )
     st.stop()
@@ -1307,13 +3199,37 @@ if st.session_state.get("pca_key") != pca_key:
         for key in ("projection", "pca", "details"):
             st.session_state.pop(key, None)
         gc.collect()
-        spinner_text = (
-            "Fitting a new bounded-memory PCA model…"
-            if pca_mode == "Fit new"
-            else "Projecting with the loaded PCA model…"
-        )
+        if direction_method == "PLS" and pls_mode == "Fit new":
+            spinner_text = "Fitting PLS directions against log-time-horizon…"
+        elif direction_method == "PLS":
+            spinner_text = "Projecting with the loaded PLS model…"
+        elif pca_mode == "Fit new":
+            spinner_text = "Fitting a new bounded-memory PCA model…"
+        else:
+            spinner_text = "Projecting with the loaded PCA model…"
         with st.spinner(spinner_text):
-            if pca_mode == "Fit new":
+            if direction_method == "PLS" and pls_mode == "Fit new":
+                projection, pca, details = fit_pls_projection(
+                    activation_matrix,
+                    st.session_state.get("prepared_matrix"),
+                    st.session_state["prepared_row_offsets"],
+                    st.session_state["prepared_metadata"],
+                    n_components=n_components,
+                    scale=pls_scale,
+                    max_iter=pls_max_iter,
+                    tol=pls_tolerance,
+                    details=st.session_state["prepared_details"],
+                )
+            elif direction_method == "PLS":
+                projection, pca, details = transform_pls_projection(
+                    activation_matrix,
+                    st.session_state.get("prepared_matrix"),
+                    st.session_state["prepared_row_offsets"],
+                    st.session_state["prepared_metadata"],
+                    pls=loaded_pls_model,
+                    details=st.session_state["prepared_details"],
+                )
+            elif pca_mode == "Fit new":
                 projection, pca, details = fit_pca_projection(
                     activation_matrix,
                     st.session_state.get("prepared_matrix"),
@@ -1331,20 +3247,31 @@ if st.session_state.get("pca_key") != pca_key:
                     pca=loaded_pca_model,
                     details=st.session_state["prepared_details"],
                 )
+            if direction_method == "PLS" and residual_trajectory_scaling:
+                projection, details = scale_pls_projection(
+                    activation_matrix,
+                    st.session_state.get("prepared_matrix"),
+                    st.session_state["prepared_row_offsets"],
+                    projection,
+                    pls=pca,
+                    scaler=load_residual_trajectory_scaler(),
+                    details=details,
+                )
         st.session_state.pca_key = pca_key
         st.session_state.projection = projection
         st.session_state.pca = pca
         st.session_state.details = details
         clear_surface_fits()
     except Exception as exc:  # noqa: BLE001 - surface analysis/data errors in the UI
-        st.error(f"PCA projection could not be prepared: {exc}")
+        st.error(f"{direction_method} projection could not be prepared: {exc}")
         st.stop()
 
 projection: pd.DataFrame = st.session_state.projection
 details = st.session_state.details
 active_pca = st.session_state.pca
 component_count = int(active_pca.components_.shape[0])
-pc_fields = [f"PC{index}" for index in range(1, component_count + 1)]
+direction_prefix = "PC" if direction_method == "PCA" else "PLS"
+pc_fields = [f"{direction_prefix}{index}" for index in range(1, component_count + 1)]
 metadata_fields = sorted(
     column for column in projection if column not in {*pc_fields, "sample_index"}
 )
@@ -1357,10 +3284,17 @@ metric_columns = st.columns(4)
 metric_columns[0].metric("Source samples", f"{details['loaded_samples']:,}")
 metric_columns[1].metric("Projected points", f"{details['analysis_rows']:,}")
 metric_columns[2].metric("Activation width", f"{details['feature_count']:,}")
-metric_columns[3].metric("Variance captured", f"{sum(details['explained_variance']):.1%}")
+variance_metric_label = (
+    "Variance captured" if direction_method == "PCA" else "X variance represented"
+)
+metric_columns[3].metric(variance_metric_label, f"{sum(details['explained_variance']):.1%}")
 if details.get("pca_source") == "loaded":
     st.caption("Explained variance describes the loaded model's original training data.")
-
+if residual_trajectory_scaling:
+    st.caption(
+        "Residual trajectory scaling is active for PLS1-PLS3. Predicted scale and residual RMS "
+        "are included in plot controls and downloads."
+    )
 st.subheader("Projection")
 controls = st.columns([1.1, 1.25, 1.25, 2])
 plot_mode = controls[0].segmented_control(
@@ -1368,7 +3302,9 @@ plot_mode = controls[0].segmented_control(
 )
 required_axes = 3 if plot_mode == "3D" else 2
 if len(pc_fields) < required_axes:
-    st.warning(f"Fit at least {required_axes} PCA components for a {plot_mode} plot.")
+    st.warning(
+        f"Fit at least {required_axes} {direction_method} components for a {plot_mode} plot."
+    )
     st.stop()
 x_component = controls[1].selectbox("X component", pc_fields, index=0)
 y_choices = [field for field in pc_fields if field != x_component]
@@ -1411,7 +3347,7 @@ visual_filters = {}
 with st.popover(
     "Filter visible points",
     icon=":material/filter_alt:",
-    help="These filters change the chart only; they do not refit PCA.",
+    help="These filters change the chart only; they do not refit the selected directions.",
 ):
     st.caption(
         "Values within a field are combined with OR; fields are combined with AND. "
@@ -1459,17 +3395,42 @@ plot_data = projection.loc[visual_mask].copy()
 st.caption(f"Visible {len(plot_data):,} of {len(projection):,} projected points.")
 surface_result: SurfaceDisplayResult | None = None
 surface_appearance: dict[str, Any] = {}
+curve_result: CurveDisplayResult | None = None
+curve_appearance: dict[str, Any] = {}
+extruded_surface_result: ExtrudedSurfaceEvaluationResult | None = None
+extruded_surface_appearance: dict[str, Any] = {}
 if plot_data.empty:
     st.warning("No projected points match the visual filters.")
 else:
     if plot_mode == "3D":
-        surface_enabled = st.toggle(
+        overlay_controls = st.container(horizontal=True)
+        surface_enabled = overlay_controls.toggle(
             "Surface overlay",
             value=False,
             key="surface_enabled",
             help=(
                 f"Fit or load {z_component} = f({x_component}, {y_component}) and overlay "
                 "the result."
+            ),
+            persist_state="page",
+        )
+        curve_enabled = overlay_controls.toggle(
+            "Curve overlay",
+            value=False,
+            key="curve_enabled",
+            help=(
+                "Fit or load a parameterized trajectory through the three displayed "
+                "coordinates."
+            ),
+            persist_state="page",
+        )
+        extruded_surface_enabled = overlay_controls.toggle(
+            "Extruded surface",
+            value=False,
+            key="extruded_surface_enabled",
+            help=(
+                "Load a cubic spline and fit the extrusion direction that minimizes RMSE "
+                "for the selected displayed points."
             ),
             persist_state="page",
         )
@@ -1748,6 +3709,13 @@ else:
                             "surface_data_sha256": surface_data_digest,
                             "pca_sha256": pca_projection_fingerprint(active_pca),
                             "pca_fingerprint_version": (PCA_PROJECTION_FINGERPRINT_VERSION),
+                            "direction_method": direction_method,
+                            "residual_trajectory_scaling": residual_trajectory_scaling,
+                            "direction_target": (
+                                "log10_time_horizon_months"
+                                if direction_method == "PLS"
+                                else None
+                            ),
                             "layer_component": component,
                             "cached_position": inspection["positions"][position_index],
                             "aggregation_fields": list(aggregation_fields),
@@ -2083,11 +4051,67 @@ else:
                 y_component=y_component,
                 z_component=z_component,
                 active_pca=active_pca,
+                direction_method=direction_method,
+                residual_trajectory_scaling=residual_trajectory_scaling,
                 layer_component=component,
                 cached_position=inspection["positions"][position_index],
             )
+        curve_mode = "Fit new"
+        if curve_enabled:
+            curve_mode = st.segmented_control(
+                "Curve model",
+                ["Fit new", "Use saved"],
+                default="Fit new",
+                key="curve_model_mode",
+                persist_state="page",
+            )
+        if curve_enabled and curve_mode == "Fit new":
+            curve_result, curve_appearance = new_curve_controls(
+                plot_data=plot_data,
+                projection=projection,
+                x_component=x_component,
+                y_component=y_component,
+                z_component=z_component,
+                active_pca=active_pca,
+                direction_method=direction_method,
+                residual_trajectory_scaling=residual_trajectory_scaling,
+                layer_component=component,
+                cached_position=inspection["positions"][position_index],
+                aggregation_fields=list(aggregation_fields),
+            )
+        elif curve_enabled:
+            curve_result, curve_appearance = loaded_curve_controls(
+                plot_data=plot_data,
+                projection=projection,
+                x_component=x_component,
+                y_component=y_component,
+                z_component=z_component,
+                active_pca=active_pca,
+                direction_method=direction_method,
+                residual_trajectory_scaling=residual_trajectory_scaling,
+                layer_component=component,
+                cached_position=inspection["positions"][position_index],
+            )
+        if extruded_surface_enabled:
+            extruded_surface_result, extruded_surface_appearance = (
+                loaded_extruded_surface_controls(
+                    plot_data=plot_data,
+                    projection=projection,
+                    x_component=x_component,
+                    y_component=y_component,
+                    z_component=z_component,
+                    active_pca=active_pca,
+                    direction_method=direction_method,
+                    residual_trajectory_scaling=residual_trajectory_scaling,
+                    layer_component=component,
+                    cached_position=inspection["positions"][position_index],
+                )
+            )
     else:
-        st.caption("Switch the plot to 3D to fit or load a surface overlay.")
+        st.caption(
+            "Switch the plot to 3D to fit or load surface and curve overlays, including "
+            "parametric extruded surfaces."
+        )
 
     visibility_controls = st.container(horizontal=True)
     show_points = visibility_controls.toggle(
@@ -2098,6 +4122,8 @@ else:
         persist_state="page",
     )
     show_fitted_surface = True
+    show_fitted_curve = True
+    show_extruded_surface = True
     if plot_mode == "3D":
         show_fitted_surface = visibility_controls.toggle(
             "Show surface",
@@ -2105,6 +4131,22 @@ else:
             key="plot_show_fitted_surface",
             help="Show or hide the fitted or loaded surface without discarding it.",
             disabled=surface_result is None,
+            persist_state="page",
+        )
+        show_fitted_curve = visibility_controls.toggle(
+            "Show curve",
+            value=True,
+            key="plot_show_fitted_curve",
+            help="Show or hide the fitted or loaded curve without discarding it.",
+            disabled=curve_result is None,
+            persist_state="page",
+        )
+        show_extruded_surface = visibility_controls.toggle(
+            "Show extrusion",
+            value=True,
+            key="plot_show_extruded_surface",
+            help="Show or hide the loaded extruded surface without discarding it.",
+            disabled=extruded_surface_result is None,
             persist_state="page",
         )
 
@@ -2122,6 +4164,7 @@ else:
         "hover_data": tooltip_fields,
         "opacity": point_opacity,
     }
+    curve_plot_bounds: np.ndarray | None = None
     if plot_mode == "3D":
         figure = px.scatter_3d(**common, z=z_component)
         figure.update_traces(marker={"size": point_size}, visible=show_points)
@@ -2216,6 +4259,160 @@ else:
                         hoverinfo="skip",
                     )
                 )
+        if extruded_surface_result is not None and show_extruded_surface:
+            coordinate_indices = [
+                extruded_surface_result.model.coordinate_features.index(component_name)
+                for component_name in (x_component, y_component, z_component)
+            ]
+            surface_grid = extruded_surface_result.grid_xyz[..., coordinate_indices]
+            use_extrusion_color = (
+                extruded_surface_appearance.get("color_mode") == "Extrusion coordinate"
+            )
+            surface_color = (
+                extruded_surface_result.grid_extrusion
+                if use_extrusion_color
+                else extruded_surface_result.grid_parameter
+            )
+            color_title = (
+                "u" if use_extrusion_color else extruded_surface_result.model.parameter_feature
+            )
+            show_wireframe = bool(extruded_surface_appearance.get("show_wireframe"))
+            figure.add_trace(
+                go.Surface(
+                    x=surface_grid[..., 0],
+                    y=surface_grid[..., 1],
+                    z=surface_grid[..., 2],
+                    surfacecolor=surface_color,
+                    customdata=np.stack(
+                        [
+                            extruded_surface_result.grid_parameter,
+                            extruded_surface_result.grid_extrusion,
+                        ],
+                        axis=-1,
+                    ),
+                    colorscale=extruded_surface_appearance.get("colorscale", "Viridis"),
+                    reversescale=bool(extruded_surface_appearance.get("reverse_scale")),
+                    opacity=float(extruded_surface_appearance.get("opacity", 0.52)),
+                    showscale=bool(extruded_surface_appearance.get("show_colorbar")),
+                    colorbar={"title": color_title, "x": 1.24},
+                    contours={
+                        "x": {"show": show_wireframe, "color": "rgba(255,255,255,0.45)"},
+                        "y": {"show": show_wireframe, "color": "rgba(255,255,255,0.45)"},
+                    },
+                    connectgaps=False,
+                    name="Extruded spline surface",
+                    hovertemplate=(
+                        f"{x_component}: %{{x:.4g}}<br>"
+                        f"{y_component}: %{{y:.4g}}<br>"
+                        f"{z_component}: %{{z:.4g}}<br>"
+                        f"{extruded_surface_result.model.parameter_feature}: "
+                        "%{customdata[0]:.4g}<br>u: %{customdata[1]:.4g}"
+                        "<extra>Extruded surface</extra>"
+                    ),
+                )
+            )
+            if extruded_surface_appearance.get("show_residuals"):
+                point_xyz = extruded_surface_result.point_xyz[:, coordinate_indices]
+                point_projection = extruded_surface_result.point_projection[:, coordinate_indices]
+                residual_size = np.linalg.norm(point_xyz - point_projection, axis=1)
+                residual_count = min(
+                    int(extruded_surface_appearance.get("residual_count", 100)), len(point_xyz)
+                )
+                selected = np.argsort(residual_size)[-residual_count:]
+                residual_x: list[float | None] = []
+                residual_y: list[float | None] = []
+                residual_z: list[float | None] = []
+                for residual_index in selected:
+                    residual_x.extend(
+                        [point_xyz[residual_index, 0], point_projection[residual_index, 0], None]
+                    )
+                    residual_y.extend(
+                        [point_xyz[residual_index, 1], point_projection[residual_index, 1], None]
+                    )
+                    residual_z.extend(
+                        [point_xyz[residual_index, 2], point_projection[residual_index, 2], None]
+                    )
+                figure.add_trace(
+                    go.Scatter3d(
+                        x=residual_x,
+                        y=residual_y,
+                        z=residual_z,
+                        mode="lines",
+                        line={"color": "rgba(0, 137, 123, 0.72)", "width": 3},
+                        name="Surface projection residuals",
+                        hoverinfo="skip",
+                    )
+                )
+        if curve_result is not None and show_fitted_curve:
+            coordinate_indices = [
+                curve_result.model.coordinate_features.index(component_name)
+                for component_name in (x_component, y_component, z_component)
+            ]
+            saved_display_bounds = np.asarray(
+                curve_result.metrics["display_coordinate_bounds"], dtype=np.float64
+            )
+            curve_plot_bounds = saved_display_bounds[coordinate_indices]
+            curve_xyz = curve_result.curve_xyz[:, coordinate_indices]
+            curve_mode = (
+                "lines+markers" if curve_appearance.get("show_samples") else "lines"
+            )
+            curve_color = curve_appearance.get("color", "#d81b60")
+            figure.add_trace(
+                go.Scatter3d(
+                    x=curve_xyz[:, 0],
+                    y=curve_xyz[:, 1],
+                    z=curve_xyz[:, 2],
+                    customdata=curve_result.curve_parameter,
+                    mode=curve_mode,
+                    line={
+                        "color": curve_color,
+                        "width": int(curve_appearance.get("line_width", 6)),
+                    },
+                    marker={"color": curve_color, "size": 3},
+                    opacity=float(curve_appearance.get("opacity", 0.95)),
+                    name=CURVE_ALGORITHMS[curve_result.algorithm],
+                    hovertemplate=(
+                        f"{x_component}: %{{x:.4g}}<br>"
+                        f"{y_component}: %{{y:.4g}}<br>"
+                        f"{z_component}: %{{z:.4g}}<br>"
+                        f"{curve_result.model.parameter_feature}: %{{customdata:.4g}}"
+                        "<extra>Curve</extra>"
+                    ),
+                )
+            )
+            if curve_appearance.get("show_residuals"):
+                point_xyz = curve_result.point_xyz[:, coordinate_indices]
+                point_prediction = curve_result.point_prediction[:, coordinate_indices]
+                residual_size = np.linalg.norm(point_xyz - point_prediction, axis=1)
+                residual_count = min(
+                    int(curve_appearance.get("residual_count", 100)), len(point_xyz)
+                )
+                selected = np.argsort(residual_size)[-residual_count:]
+                residual_x: list[float | None] = []
+                residual_y: list[float | None] = []
+                residual_z: list[float | None] = []
+                for residual_index in selected:
+                    residual_x.extend(
+                        [point_xyz[residual_index, 0], point_prediction[residual_index, 0], None]
+                    )
+                    residual_y.extend(
+                        [point_xyz[residual_index, 1], point_prediction[residual_index, 1], None]
+                    )
+                    residual_z.extend(
+                        [point_xyz[residual_index, 2], point_prediction[residual_index, 2], None]
+                    )
+                figure.add_trace(
+                    go.Scatter3d(
+                        x=residual_x,
+                        y=residual_y,
+                        z=residual_z,
+                        mode="lines",
+                        line={"color": curve_color, "width": 2},
+                        opacity=0.45,
+                        name="Curve residuals",
+                        hoverinfo="skip",
+                    )
+                )
     else:
         figure = px.scatter(**common)
         figure.update_traces(
@@ -2228,11 +4425,29 @@ else:
         and show_fitted_surface
         and surface_appearance.get("show_colorbar")
     )
+    extruded_colorbar_visible = bool(
+        extruded_surface_result is not None
+        and show_extruded_surface
+        and extruded_surface_appearance.get("show_colorbar")
+    )
     if surface_colorbar_visible and numeric_color:
         figure.update_layout(coloraxis_colorbar={"x": 1.0})
+    if curve_plot_bounds is not None:
+        figure.update_layout(
+            scene={
+                "xaxis": {"range": curve_plot_bounds[0].tolist()},
+                "yaxis": {"range": curve_plot_bounds[1].tolist()},
+                "zaxis": {"range": curve_plot_bounds[2].tolist()},
+            }
+        )
     figure.update_layout(
         height=680,
-        margin={"l": 12, "r": 150 if surface_colorbar_visible else 12, "t": 28, "b": 12},
+        margin={
+            "l": 12,
+            "r": 220 if surface_colorbar_visible or extruded_colorbar_visible else 12,
+            "t": 28,
+            "b": 12,
+        },
         paper_bgcolor="white",
         plot_bgcolor="white",
         font={"family": "Inter, ui-sans-serif, system-ui", "color": "#17201d"},
@@ -2240,49 +4455,91 @@ else:
     )
     st.plotly_chart(figure, width="stretch", config={"displaylogo": False})
 
-with st.expander("PCA details and downloads"):
+with st.expander(f"{direction_method} details and downloads"):
+    variance_column = (
+        "explained_variance" if direction_method == "PCA" else "represented_x_variance"
+    )
     variance = pd.DataFrame(
         {
             "component": pc_fields,
-            "explained_variance": details["explained_variance"],
+            variance_column: details["explained_variance"],
             "cumulative_variance": details["explained_variance"].cumsum(),
         }
     )
     st.dataframe(variance, hide_index=True, width="stretch")
+    if direction_method == "PLS":
+        st.caption(
+            "PLS directions are supervised only by `log10(time_horizon_months)`. Variance "
+            "values describe the activation (X) variance represented by each latent score."
+        )
     st.dataframe(projection_details_table(projection), hide_index=True, width="stretch")
     st.caption("Downloads contain the full projection, independent of visual filters.")
-    if pca_mode == "Fit new":
-        model_metadata = {
-            "layer_component": component,
-            "cached_position": inspection["positions"][position_index],
-            "pca_solver": details.get("pca_solver"),
-            "aggregation_fields": list(aggregation_fields),
-        }
-    else:
-        artifact_fields = {
-            "artifact_kind",
-            "artifact_version",
-            "sklearn_version",
-            "component_count",
-            "feature_count",
-        }
-        model_metadata = {
-            key: value for key, value in loaded_pca_provenance.items() if key not in artifact_fields
-        }
     safe_component = component.replace("/", "-").replace("\\", "-")
     with st.container(horizontal=True):
-        st.download_button(
-            "Download PCA model",
-            data=lambda: serialize_pca_model(active_pca, metadata=model_metadata),
-            file_name=f"activation_pca_{safe_component}.joblib",
-            mime="application/octet-stream",
-            icon=":material/download:",
-            on_click="ignore",
-        )
+        if direction_method == "PCA":
+            if pca_mode == "Fit new":
+                model_metadata = {
+                    "layer_component": component,
+                    "cached_position": inspection["positions"][position_index],
+                    "pca_solver": details.get("pca_solver"),
+                    "aggregation_fields": list(aggregation_fields),
+                }
+            else:
+                artifact_fields = {
+                    "artifact_kind",
+                    "artifact_version",
+                    "sklearn_version",
+                    "component_count",
+                    "feature_count",
+                }
+                model_metadata = {
+                    key: value
+                    for key, value in loaded_pca_provenance.items()
+                    if key not in artifact_fields
+                }
+            st.download_button(
+                "Download PCA model",
+                data=lambda: serialize_pca_model(active_pca, metadata=model_metadata),
+                file_name=f"activation_pca_{safe_component}.joblib",
+                mime="application/octet-stream",
+                icon=":material/download:",
+                on_click="ignore",
+            )
+        else:
+            if pls_mode == "Fit new":
+                model_metadata = {
+                    "layer_component": component,
+                    "cached_position": inspection["positions"][position_index],
+                    "pls_target": "log10_time_horizon_months",
+                    "residual_trajectory_scaling": residual_trajectory_scaling,
+                    "aggregation_fields": list(aggregation_fields),
+                }
+            else:
+                artifact_fields = {
+                    "artifact_kind",
+                    "artifact_version",
+                    "sklearn_version",
+                    "component_count",
+                    "feature_count",
+                }
+                model_metadata = {
+                    key: value
+                    for key, value in loaded_pls_provenance.items()
+                    if key not in artifact_fields
+                }
+                model_metadata["residual_trajectory_scaling"] = residual_trajectory_scaling
+            st.download_button(
+                "Download PLS model",
+                data=lambda: serialize_pls_model(active_pca, metadata=model_metadata),
+                file_name=f"activation_pls_{safe_component}.joblib",
+                mime="application/octet-stream",
+                icon=":material/download:",
+                on_click="ignore",
+            )
         st.download_button(
             "Download projected CSV",
             projection.to_csv(index=False).encode("utf-8"),
-            file_name="activation_pca_projection.csv",
+            file_name=f"activation_{direction_method.lower()}_projection.csv",
             mime="text/csv",
             icon=":material/download:",
             on_click="ignore",

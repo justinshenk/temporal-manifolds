@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import io
 import pickle
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 import torch
+from sklearn.cross_decomposition import PLSRegression
 from sklearn.decomposition import PCA
 from streamlit.testing.v1 import AppTest
 
@@ -19,13 +21,17 @@ from temporal_manifolds.activations.extraction_policy import (
 )
 from temporal_manifolds.viz.activation_explorer import (
     PCA_PROJECTION_FINGERPRINT_VERSION,
+    SOURCE_FOLDER_FIELD,
     activation_batch_basename,
+    activation_source_folder_name,
+    activation_source_folder_names,
     discover_activation_batch_paths,
     extract_activation_slice,
     fit_pca_projection,
     flatten_scalar_metadata,
     inspect_sources,
     load_pca_model,
+    load_pls_model,
     metadata_filter_choices,
     metadata_filter_mask,
     metadata_value_token,
@@ -36,8 +42,11 @@ from temporal_manifolds.viz.activation_explorer import (
     projection_details_table,
     select_activation_batch_uploads,
     serialize_pca_model,
+    serialize_pls_model,
     transform_pca_projection,
 )
+from temporal_manifolds.viz.curve_fitting import fit_curve, serialize_curve_model
+from temporal_manifolds.viz.extruded_spline_surface import serialize_extruded_surface
 
 
 def test_pca_projection_fingerprint_includes_whitening_scale() -> None:
@@ -67,6 +76,32 @@ def test_activation_batch_basename_accepts_directory_upload_paths() -> None:
         == "activations_batch_00001.pt"
     )
     assert activation_batch_basename("batches/metadata.json") is None
+
+
+def test_activation_source_folder_name_supports_local_and_uploaded_paths() -> None:
+    class Upload:
+        name = r"collection\run_b\activations_batch_00001.pt"
+
+    assert activation_source_folder_name(Path("collection/run_a/activations_batch_00000.pt")) == (
+        "run_a"
+    )
+    assert activation_source_folder_name(Upload()) == "run_b"
+    root_upload = type("RootUpload", (), {"name": "activations_batch_00002.pt"})()
+    assert activation_source_folder_name(root_upload) == "<root>"
+    assert activation_source_folder_name(io.BytesIO()) == "<unknown>"
+
+    assert activation_source_folder_names(
+        [
+            Path("collection_a/run/activations_batch_000.pt"),
+            Path("collection_b/run/activations_batch_000.pt"),
+        ]
+    ) == ["collection_a/run", "collection_b/run"]
+    assert activation_source_folder_names(
+        [
+            type("Upload", (), {"name": "collection_a/run/activations_batch_000.pt"})(),
+            type("Upload", (), {"name": "collection_b/run/activations_batch_000.pt"})(),
+        ]
+    ) == ["collection_a/run", "collection_b/run"]
 
 
 def test_upload_selection_preserves_same_named_files() -> None:
@@ -100,6 +135,128 @@ def test_app_exposes_multiple_local_and_uploaded_folder_controls() -> None:
     assert app.file_uploader[0].accept_directory
     assert app.file_uploader[0].multiple_files
     assert "Load selected folders" in [button.label for button in app.button]
+
+
+def test_curve_overlay_is_available_only_for_three_dimensional_plots(tmp_path: Path) -> None:
+    path = tmp_path / "activations_batch_000.pt"
+    _batch(path)
+    app_path = Path(__file__).resolve().parents[1] / "apps" / "activation_explorer.py"
+    app = AppTest.from_file(app_path)
+    app.session_state["sources"] = [str(path)]
+    app.session_state["source_label"] = str(tmp_path)
+    app.session_state["source_is_local"] = True
+    app.session_state["source_revision"] = 1
+
+    app.run(timeout=30)
+
+    assert not app.exception
+    assert "Curve overlay" in [toggle.label for toggle in app.toggle]
+    assert "Extruded surface" in [toggle.label for toggle in app.toggle]
+    curve_toggle = next(toggle for toggle in app.toggle if toggle.label == "Curve overlay")
+    curve_toggle.set_value(True).run(timeout=30)
+
+    assert not app.exception
+    assert "Curve parameter" in [selectbox.label for selectbox in app.selectbox]
+    assert "Curve padding" in [slider.label for slider in app.slider]
+    fit_curve_button = next(
+        button for button in app.button if button.label == "Fit / update curve"
+    )
+    fit_curve_button.click().run(timeout=30)
+
+    assert not app.exception
+    assert app.session_state["curve_result"] is not None
+    displayed_curve = app.session_state["curve_result"]
+    cubic_parameter = np.linspace(
+        *displayed_curve.model.training_parameter_bounds,
+        4,
+    )
+    cubic_spline = fit_curve(
+        cubic_parameter,
+        displayed_curve.model.predict(cubic_parameter),
+        algorithm="spline",
+        parameter_feature=displayed_curve.model.parameter_feature,
+        coordinate_features=displayed_curve.model.coordinate_features,
+        parameters={"degree": 3, "smoothing": 0.0},
+        validation_fraction=0.0,
+    )
+    cubic_spline_bytes = serialize_curve_model(cubic_spline.model)
+    curve_mode = next(
+        control for control in app.segmented_control if control.label == "Curve model"
+    )
+    curve_mode.set_value("Use saved").run(timeout=30)
+
+    assert not app.exception
+    assert "Saved curve model" in [uploader.label for uploader in app.file_uploader]
+
+    extruded_toggle = next(
+        toggle for toggle in app.toggle if toggle.label == "Extruded surface"
+    )
+    extruded_toggle.set_value(True).run(timeout=30)
+
+    assert not app.exception
+    assert "Cubic spline model" in [uploader.label for uploader in app.file_uploader]
+    assert "Load cubic spline" in [button.label for button in app.button]
+    cubic_spline_uploader = next(
+        uploader for uploader in app.file_uploader if uploader.label == "Cubic spline model"
+    )
+    cubic_spline_uploader.set_value(
+        ("cubic_spline.joblib", cubic_spline_bytes, "application/octet-stream")
+    ).run(timeout=30)
+    load_spline = next(button for button in app.button if button.label == "Load cubic spline")
+    load_spline.click().run(timeout=30)
+
+    assert not app.exception
+    extrusion_degree = next(
+        control for control in app.segmented_control if control.label == "Extrusion degree"
+    )
+    assert extrusion_degree.options == ["Linear", "Quadratic"]
+    extrusion_degree.set_value("Quadratic").run(timeout=30)
+    update_extrusion = next(
+        button for button in app.button if button.label == "Fit / update extrusion"
+    )
+    update_extrusion.click().run(timeout=30)
+
+    assert not app.exception
+    assert "loaded_extruded_surface_result" in app.session_state, [
+        error.value for error in app.error
+    ]
+    assert app.session_state["loaded_extruded_surface_result"] is not None
+    assert app.session_state["loaded_extruded_surface_model"].extrusion_degree == 2
+    assert "Download extruded surface" in [button.label for button in app.download_button]
+    extruded_surface_bytes = serialize_extruded_surface(
+        app.session_state["loaded_extruded_surface_model"]
+    )
+    extrusion_source = next(
+        control for control in app.segmented_control if control.label == "Extrusion source"
+    )
+    extrusion_source.set_value("Load saved surface").run(timeout=30)
+
+    assert not app.exception
+    assert "Saved extruded surface" in [uploader.label for uploader in app.file_uploader]
+    assert "Load extruded surface" in [button.label for button in app.button]
+    surface_uploader = next(
+        uploader for uploader in app.file_uploader if uploader.label == "Saved extruded surface"
+    )
+    surface_uploader.set_value(
+        ("extruded_surface.joblib", extruded_surface_bytes, "application/octet-stream")
+    ).run(timeout=30)
+    load_surface = next(
+        button for button in app.button if button.label == "Load extruded surface"
+    )
+    load_surface.click().run(timeout=30)
+
+    assert not app.exception
+    assert app.session_state["loaded_extruded_surface_result"] is not None
+    assert app.session_state["loaded_extruded_surface_model"].extrusion_degree == 2
+    assert "Download extruded surface" in [button.label for button in app.download_button]
+    plot_control = next(control for control in app.segmented_control if control.label == "Plot")
+    plot_control.set_value("2D").run(timeout=30)
+
+    assert not app.exception
+    assert "Curve overlay" not in [toggle.label for toggle in app.toggle]
+    assert any(
+        "surface and curve overlays" in caption.value for caption in app.caption
+    )
 
 
 def _batch(path: Path) -> None:
@@ -153,7 +310,55 @@ def test_distinct_local_folders_keep_same_named_batches(tmp_path: Path) -> None:
     assert sources == [str(first_batch.resolve()), str(second_batch.resolve())]
     assert inspection["batch_count"] == 2
     assert inspection["source_row_counts"] == [4, 4]
+    assert SOURCE_FOLDER_FIELD in inspection["metadata_fields"]
+    assert inspection["metadata_index"][SOURCE_FOLDER_FIELD].tolist() == [
+        *(["run_a"] * 4),
+        *(["run_b"] * 4),
+    ]
     assert matrix.shape == (8, 6)
+
+    _, row_offsets, metadata, details = prepare_analysis_data(
+        matrix,
+        inspection["metadata_index"],
+        cached_position=PROMPT_TOKEN_POSITION,
+        metadata_filters={SOURCE_FOLDER_FIELD: ["run_b"]},
+        aggregation_fields=[],
+    )
+    assert row_offsets.tolist() == [4, 5, 6, 7]
+    assert metadata[SOURCE_FOLDER_FIELD].tolist() == ["run_b"] * 4
+    assert details["loaded_samples"] == 4
+
+    _, _, aggregated_metadata, _ = prepare_analysis_data(
+        matrix,
+        inspection["metadata_index"],
+        cached_position=PROMPT_TOKEN_POSITION,
+        metadata_filters=None,
+        aggregation_fields=["time_horizon_months"],
+    )
+    assert aggregated_metadata[SOURCE_FOLDER_FIELD].tolist() == ["<averaged>"] * 4
+
+
+def test_uploaded_directory_names_become_source_folder_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "activations_batch_000.pt"
+    _batch(path)
+    payload = path.read_bytes()
+
+    class Upload(io.BytesIO):
+        def __init__(self, name: str) -> None:
+            super().__init__(payload)
+            self.name = name
+
+    inspection = inspect_sources(
+        [
+            Upload("collection/run_a/activations_batch_000.pt"),
+            Upload(r"collection\run_b\activations_batch_000.pt"),
+        ]
+    )
+
+    assert inspection["metadata_index"][SOURCE_FOLDER_FIELD].tolist() == [
+        *(["run_a"] * 4),
+        *(["run_b"] * 4),
+    ]
 
 
 def test_flatten_scalar_metadata_omits_collections() -> None:
@@ -168,20 +373,40 @@ def test_inspect_and_prepare_projection(tmp_path: Path) -> None:
     assert inspection["positions"] == [PROMPT_TOKEN_POSITION]
     assert inspection["source_row_counts"] == [4]
     assert list(inspection["metadata_index"]["sample_index"]) == [10, 11, 12, 13]
+    assert inspection["metadata_index"][SOURCE_FOLDER_FIELD].tolist() == [tmp_path.name] * 4
 
     result, pca, details = prepare_projection(
         [path],
         layer_component=TARGET_LAYER_COMPONENT,
         position_index=CACHED_POSITION_INDEX,
-        metadata_filters={"template_metadata.prompt_framing": ["task_available_time"]},
+        metadata_filters={
+            "template_metadata.prompt_framing": ["task_available_time"],
+            SOURCE_FOLDER_FIELD: [tmp_path.name],
+        },
         aggregation_fields=[],
         n_components=2,
     )
     assert list(result["sample_index"]) == [10, 11, 13]
+    assert result[SOURCE_FOLDER_FIELD].tolist() == [tmp_path.name] * 3
     assert np.allclose(result["time_horizon_months"], [1 / 30.4375, 1, 24])
     assert [column for column in result if column.startswith("PC")] == ["PC1", "PC2"]
     assert pca.n_components == 2
     assert details["analysis_rows"] == 3
+
+
+def test_derived_source_folder_overrides_prompt_metadata_collision(tmp_path: Path) -> None:
+    folder = tmp_path / "actual_run"
+    folder.mkdir()
+    path = folder / "activations_batch_000.pt"
+    _batch(path)
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    for metadata in payload["prompt_metadata"]:
+        metadata[SOURCE_FOLDER_FIELD] = "spoofed"
+    torch.save(payload, path)
+
+    inspection = inspect_sources([path])
+
+    assert inspection["metadata_index"][SOURCE_FOLDER_FIELD].tolist() == ["actual_run"] * 4
 
 
 @pytest.mark.parametrize(
@@ -399,6 +624,45 @@ def test_load_pca_model_accepts_raw_pickle_and_rejects_invalid_models() -> None:
         load_pca_model(pickle.dumps(PCA(n_components=2)))
     with pytest.raises(ValueError, match="not a supported PCA model artifact"):
         load_pca_model(pickle.dumps({"model": fitted}))
+
+
+def test_saved_pls_round_trip_reproduces_projection() -> None:
+    rng = np.random.default_rng(42)
+    values = rng.normal(size=(24, 6))
+    target = values[:, 0] - 0.5 * values[:, 2] + rng.normal(scale=0.05, size=24)
+    fitted = PLSRegression(
+        n_components=3,
+        scale=False,
+        max_iter=750,
+        tol=1e-7,
+    ).fit(values, target)
+    fitted.components_ = np.asarray(fitted.x_rotations_).T / np.asarray(fitted._x_std)[  # noqa: SLF001
+        np.newaxis, :
+    ]
+    fitted.mean_ = np.asarray(fitted._x_mean)  # noqa: SLF001
+    fitted.explained_variance_ratio_ = np.array([0.5, 0.25, 0.1])
+
+    artifact = serialize_pls_model(
+        fitted,
+        metadata={
+            "layer_component": TARGET_LAYER_COMPONENT,
+            "cached_position": PROMPT_TOKEN_POSITION,
+            "pls_target": "log10_time_horizon_months",
+        },
+    )
+    restored, provenance = load_pls_model(artifact)
+
+    assert np.allclose(restored.transform(values), fitted.transform(values))
+    assert provenance["layer_component"] == TARGET_LAYER_COMPONENT
+    assert provenance["component_count"] == 3
+    assert provenance["feature_count"] == values.shape[1]
+    assert provenance["pls_target"] == "log10_time_horizon_months"
+    assert provenance["pls_scale"] is False
+    assert provenance["pls_max_iter"] == 750
+    assert provenance["pls_tolerance"] == pytest.approx(1e-7)
+
+    with pytest.raises(ValueError, match="not a supported PLS model artifact"):
+        load_pls_model(pickle.dumps(fitted))
 
 
 def test_loaded_pca_rejects_incompatible_activation_width(tmp_path: Path) -> None:

@@ -13,6 +13,7 @@ from typing import Literal, TypedDict
 try:
     from . import abstract as abstract_dataset
     from . import conversational as conversational_dataset
+    from . import plain_english as plain_english_dataset
     from .utils import (
         NUMBER_FORMATS,
         NumberFormat,
@@ -25,6 +26,7 @@ try:
 except ImportError:
     import abstract as abstract_dataset  # type: ignore
     import conversational as conversational_dataset  # type: ignore
+    import plain_english as plain_english_dataset  # type: ignore
 
     from temporal_manifolds.dataset.utils import (  # type: ignore
         NUMBER_FORMATS,
@@ -65,11 +67,12 @@ class PromptRecord(TypedDict):
     unit: str | None
 
 
-DatasetName = Literal["conversational", "abstract"]
+DatasetName = Literal["conversational", "abstract", "plain_english"]
 
 DATASETS = {
     "conversational": conversational_dataset,
     "abstract": abstract_dataset,
+    "plain_english": plain_english_dataset,
 }
 
 TIME_CONSTRAINT_LINE = re.compile(
@@ -82,6 +85,23 @@ def remove_time_constraint_lines(template: str) -> str:
     """Remove explicit time-constraint fields from a prompt template."""
     lines = [line for line in template.splitlines() if not TIME_CONSTRAINT_LINE.match(line)]
     return "\n".join(lines)
+
+
+def unconstrained_template(template_config: TemplateConfig) -> str:
+    """Return a template's natural time-free form or remove labelled time fields."""
+    configured = template_config.get("unconstrained_template")
+    if configured is not None:
+        return str(configured)
+    return remove_time_constraint_lines(str(template_config["template"]))
+
+
+def template_metadata(template_config: TemplateConfig) -> dict[str, str]:
+    """Return analysis metadata, excluding strings used only for rendering."""
+    return {
+        key: str(value)
+        for key, value in template_config.items()
+        if key not in {"id", "template", "unconstrained_template"}
+    }
 
 
 def normalize_dataset_name(dataset: str) -> DatasetName:
@@ -316,17 +336,13 @@ def generate_task_dataset(
                 for quantity in quantity_configs:
                     template_config = random.choice(template_configs)
                     template_id = str(template_config["id"])
-                    template = remove_time_constraint_lines(str(template_config["template"]))
-                    template_metadata = {
-                        key: str(value)
-                        for key, value in template_config.items()
-                        if key not in {"id", "template"}
-                    }
+                    template = unconstrained_template(template_config)
+                    metadata = template_metadata(template_config)
                     append_unconstrained_prompt_variants(
                         records,
                         template,
                         template_id,
-                        template_metadata,
+                        metadata,
                         task,
                         task_config["metadata"],
                         quantity,
@@ -334,19 +350,15 @@ def generate_task_dataset(
         else:
             for template_config in template_configs:
                 template_id = str(template_config["id"])
-                template = remove_time_constraint_lines(str(template_config["template"]))
-                template_metadata = {
-                    key: str(value)
-                    for key, value in template_config.items()
-                    if key not in {"id", "template"}
-                }
+                template = unconstrained_template(template_config)
+                metadata = template_metadata(template_config)
                 for task, task_config in sorted(task_configs.items()):
                     for quantity in quantity_configs:
                         append_unconstrained_prompt_variants(
                             records,
                             template,
                             template_id,
-                            template_metadata,
+                            metadata,
                             task,
                             task_config["metadata"],
                             quantity,
@@ -367,16 +379,12 @@ def generate_task_dataset(
                         template = str(template_config["template"])
                         if remove_time_constraints:
                             template = remove_time_constraint_lines(template)
-                        template_metadata = {
-                            key: str(value)
-                            for key, value in template_config.items()
-                            if key not in {"id", "template"}
-                        }
+                        metadata = template_metadata(template_config)
                         append_prompt_variants(
                             records=records,
                             template=template,
                             template_id=template_id,
-                            template_metadata=template_metadata,
+                            template_metadata=metadata,
                             task=task,
                             task_metadata=task_metadata,
                             quantity=quantity,
@@ -395,16 +403,12 @@ def generate_task_dataset(
                             template = str(template_config["template"])
                             if remove_time_constraints:
                                 template = remove_time_constraint_lines(template)
-                            template_metadata = {
-                                key: str(value)
-                                for key, value in template_config.items()
-                                if key not in {"id", "template"}
-                            }
+                            metadata = template_metadata(template_config)
                             append_prompt_variants(
                                 records=records,
                                 template=template,
                                 template_id=template_id,
-                                template_metadata=template_metadata,
+                                template_metadata=metadata,
                                 task=task,
                                 task_metadata=task_metadata,
                                 quantity=quantity,
@@ -420,11 +424,7 @@ def generate_task_dataset(
             template = str(template_config["template"])
             if remove_time_constraints:
                 template = remove_time_constraint_lines(template)
-            template_metadata = {
-                key: str(value)
-                for key, value in template_config.items()
-                if key not in {"id", "template"}
-            }
+            metadata = template_metadata(template_config)
             for task, task_config in sorted(task_configs.items()):
                 units = task_config["units"]
                 task_metadata = task_config["metadata"]
@@ -435,7 +435,7 @@ def generate_task_dataset(
                                 records=records,
                                 template=template,
                                 template_id=template_id,
-                                template_metadata=template_metadata,
+                                template_metadata=metadata,
                                 task=task,
                                 task_metadata=task_metadata,
                                 quantity=quantity,
@@ -453,7 +453,7 @@ def generate_task_dataset(
                                     records=records,
                                     template=template,
                                     template_id=template_id,
-                                    template_metadata=template_metadata,
+                                    template_metadata=metadata,
                                     task=task,
                                     task_metadata=task_metadata,
                                     quantity=quantity,

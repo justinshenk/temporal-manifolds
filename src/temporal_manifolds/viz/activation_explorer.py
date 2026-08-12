@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn import __version__ as sklearn_version
+from sklearn.cross_decomposition import PLSRegression
 from sklearn.decomposition import PCA, IncrementalPCA
 from pandas.api.types import is_scalar
 
@@ -29,8 +30,11 @@ from temporal_manifolds.activations.extraction_policy import (
 )
 
 MISSING = object()
+SOURCE_FOLDER_FIELD = "source_folder"
 PCA_MODEL_ARTIFACT_KIND = "temporal-manifolds.activation-pca"
 PCA_MODEL_ARTIFACT_VERSION = 1
+PLS_MODEL_ARTIFACT_KIND = "temporal-manifolds.activation-pls"
+PLS_MODEL_ARTIFACT_VERSION = 1
 PCA_PROJECTION_FINGERPRINT_VERSION = 2
 MetadataValueToken = tuple[str, str, str]
 
@@ -94,6 +98,53 @@ def activation_batch_basename(name: str) -> str | None:
     if basename.startswith("activations_batch_") and basename.endswith(".pt"):
         return basename
     return None
+
+
+def _activation_source_parent(source: Any) -> tuple[tuple[str, str], tuple[str, ...]]:
+    """Return a canonical parent identity and displayable path parts."""
+    if isinstance(source, (str, Path)):
+        parent = Path(source).expanduser().resolve().parent
+        identity = ("local", os.path.normcase(str(parent)))
+        parts = tuple(part.rstrip("\\/") or part for part in parent.parts)
+        return identity, parts
+
+    name = str(getattr(source, "name", ""))
+    if not name:
+        return ("unknown", "<unknown>"), ("<unknown>",)
+    parent = PurePosixPath(name.replace("\\", "/")).parent
+    if parent == PurePosixPath("."):
+        return ("upload", "<root>"), ("<root>",)
+    return ("upload", parent.as_posix()), parent.parts
+
+
+def activation_source_folder_names(sources: Sequence[Any]) -> list[str]:
+    """Return concise folder labels, expanding duplicate leaf names just enough to differ."""
+    parents = [_activation_source_parent(source) for source in sources]
+    unique_parents = dict(parents)
+    labels: dict[tuple[str, str], str] = {}
+    for identity, parts in unique_parents.items():
+        for depth in range(1, len(parts) + 1):
+            candidate = "/".join(parts[-depth:])
+            if all(
+                other_identity == identity
+                or "/".join(other_parts[-depth:]) != candidate
+                for other_identity, other_parts in unique_parents.items()
+            ):
+                labels[identity] = candidate
+                break
+        else:
+            labels[identity] = "/".join(parts)
+
+    duplicate_labels = Counter(labels.values())
+    for identity, label in tuple(labels.items()):
+        if duplicate_labels[label] > 1:
+            labels[identity] = f"{identity[0]}:{label}"
+    return [labels[identity] for identity, _ in parents]
+
+
+def activation_source_folder_name(source: Any) -> str:
+    """Return the folder label for one local path or directory upload."""
+    return activation_source_folder_names([source])[0]
 
 
 def select_activation_batch_uploads(files: Iterable[Any]) -> list[Any]:
@@ -324,6 +375,118 @@ def load_pca_model(
     return pca, provenance
 
 
+def validate_pls_model(pls: Any) -> tuple[int, int]:
+    """Validate a fitted Activation Atlas PLS estimator."""
+    if not isinstance(pls, PLSRegression):
+        raise ValueError("The selected file does not contain a PLSRegression model.")
+
+    components = getattr(pls, "components_", None)
+    explained_variance = getattr(pls, "explained_variance_ratio_", None)
+    rotations = getattr(pls, "x_rotations_", None)
+    mean = getattr(pls, "mean_", None)
+    x_scale = getattr(pls, "_x_std", None)
+    if any(value is None for value in (components, explained_variance, rotations, mean, x_scale)):
+        raise ValueError(
+            "The selected PLS model is not a fitted Activation Atlas PLS artifact."
+        )
+
+    components = np.asarray(components)
+    explained_variance = np.asarray(explained_variance)
+    rotations = np.asarray(rotations)
+    mean = np.asarray(mean)
+    x_scale = np.asarray(x_scale)
+    if components.ndim != 2 or not all(components.shape):
+        raise ValueError("The selected PLS model has invalid fitted components.")
+    component_count, feature_count = map(int, components.shape)
+    if rotations.shape != (feature_count, component_count):
+        raise ValueError("The selected PLS model has inconsistent rotations.")
+    if explained_variance.shape != (component_count,):
+        raise ValueError("The selected PLS model has invalid represented-variance metadata.")
+    if mean.shape != (feature_count,) or x_scale.shape != (feature_count,):
+        raise ValueError("The selected PLS model has inconsistent centering metadata.")
+    if not np.isfinite(components).all() or not np.isfinite(mean).all():
+        raise ValueError("The selected PLS model contains non-finite projection parameters.")
+    if not np.isfinite(x_scale).all() or np.any(x_scale <= 0):
+        raise ValueError("The selected PLS model has invalid activation scales.")
+    fitted_feature_count = int(getattr(pls, "n_features_in_", feature_count))
+    if fitted_feature_count != feature_count:
+        raise ValueError("The selected PLS model has inconsistent feature metadata.")
+    return component_count, feature_count
+
+
+def serialize_pls_model(
+    pls: PLSRegression,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> bytes:
+    """Serialize a fitted PLS estimator and provenance as a versioned joblib artifact."""
+    component_count, feature_count = validate_pls_model(pls)
+    artifact_metadata = dict(metadata or {})
+    artifact_metadata.update(
+        {
+            "pls_scale": bool(pls.scale),
+            "pls_max_iter": int(pls.max_iter),
+            "pls_tolerance": float(pls.tol),
+        }
+    )
+    artifact = {
+        "kind": PLS_MODEL_ARTIFACT_KIND,
+        "version": PLS_MODEL_ARTIFACT_VERSION,
+        "model": pls,
+        "sklearn_version": sklearn_version,
+        "component_count": component_count,
+        "feature_count": feature_count,
+        "metadata": artifact_metadata,
+    }
+    buffer = io.BytesIO()
+    joblib.dump(artifact, buffer, compress=3)
+    return buffer.getvalue()
+
+
+def load_pls_model(
+    source: str | Path | bytes | BinaryIO,
+) -> tuple[PLSRegression, dict[str, Any]]:
+    """Load a trusted Activation Atlas PLS artifact and return its provenance.
+
+    Joblib and pickle files can execute arbitrary code while loading. Callers must
+    only pass files from trusted sources.
+    """
+    if isinstance(source, bytes):
+        source = io.BytesIO(source)
+    elif hasattr(source, "seek"):
+        source.seek(0)
+    try:
+        payload = joblib.load(source)
+    except Exception as exc:  # noqa: BLE001 - normalize artifact errors for UI callers
+        raise ValueError(f"The PLS model file could not be loaded: {exc}") from exc
+
+    if not isinstance(payload, Mapping) or payload.get("kind") != PLS_MODEL_ARTIFACT_KIND:
+        raise ValueError("The selected file is not a supported PLS model artifact.")
+    if payload.get("version") != PLS_MODEL_ARTIFACT_VERSION:
+        raise ValueError(f"Unsupported PLS artifact version: {payload.get('version')!r}.")
+    pls = payload.get("model")
+    component_count, feature_count = validate_pls_model(pls)
+    if payload.get("component_count") != component_count:
+        raise ValueError("The PLS artifact's component count does not match its model.")
+    if payload.get("feature_count") != feature_count:
+        raise ValueError("The PLS artifact's feature count does not match its model.")
+    metadata = payload.get("metadata", {})
+    if not isinstance(metadata, Mapping):
+        raise ValueError("The PLS artifact contains invalid provenance metadata.")
+    provenance = {
+        **dict(metadata),
+        "pls_scale": bool(pls.scale),
+        "pls_max_iter": int(pls.max_iter),
+        "pls_tolerance": float(pls.tol),
+        "artifact_kind": PLS_MODEL_ARTIFACT_KIND,
+        "artifact_version": PLS_MODEL_ARTIFACT_VERSION,
+        "sklearn_version": payload.get("sklearn_version"),
+        "component_count": component_count,
+        "feature_count": feature_count,
+    }
+    return pls, provenance
+
+
 def _load(source: str | Path | bytes | BinaryIO) -> dict[str, Any]:
     if isinstance(source, bytes):
         source = io.BytesIO(source)
@@ -345,7 +508,10 @@ def inspect_sources(sources: Sequence[str | Path | bytes | BinaryIO]) -> dict[st
     metadata_records: list[dict[str, Any]] = []
     source_row_counts: list[int] = []
     rows = 0
-    for source_index, source in enumerate(sources):
+    source_folders = activation_source_folder_names(sources)
+    for source_index, (source, source_folder) in enumerate(
+        zip(sources, source_folders, strict=True)
+    ):
         payload = _load(source)
         validate_activation_payload(
             payload,
@@ -369,12 +535,14 @@ def inspect_sources(sources: Sequence[str | Path | bytes | BinaryIO]) -> dict[st
         ):
             flattened = flatten_scalar_metadata(metadata)
             metadata_fields.update(flattened)
+            metadata_fields.add(SOURCE_FOLDER_FIELD)
             metadata_records.append(
                 {
                     "sample_index": int(sample_index),
                     "_source_index": source_index,
                     "_row_offset": row_offset,
                     **flattened,
+                    SOURCE_FOLDER_FIELD: source_folder,
                 }
             )
         del payload
@@ -538,7 +706,9 @@ def prepare_analysis_data(
             prepared_matrix[group_index] = vector_sum / len(source_offsets)
             row = metadata_df.iloc[group_offsets[0]].copy()
             row["source_sample_count"] = len(group_offsets)
-            for field in [value_field, unit_field, *available_phrasing]:
+            for field in [value_field, unit_field, *available_phrasing, SOURCE_FOLDER_FIELD]:
+                if field not in metadata_df:
+                    continue
                 if metadata_df.iloc[group_offsets][field].nunique(dropna=True) > 1:
                     row[field] = "<averaged>"
             records.append(row)
@@ -763,8 +933,11 @@ def prepare_projection(
     loaded_indices: list[int] = []
     absolute_positions: list[Any] = []
     cached_position: Any = None
+    source_folders = activation_source_folder_names(sources)
 
-    for source_index, source in enumerate(sources):
+    for source_index, (source, source_folder) in enumerate(
+        zip(sources, source_folders, strict=True)
+    ):
         payload = _load(source)
         tensor = validate_activation_payload(
             payload,
@@ -788,7 +961,12 @@ def prepare_projection(
             offset
             for offset, metadata in enumerate(metadata_rows)
             if all(
-                metadata_value_matches(get_metadata_field(metadata, field), expected)
+                metadata_value_matches(
+                    source_folder
+                    if field == SOURCE_FOLDER_FIELD
+                    else get_metadata_field(metadata, field),
+                    expected,
+                )
                 for field, expected in (metadata_filters or {}).items()
             )
         ]
@@ -803,7 +981,12 @@ def prepare_projection(
             )
             for offset in row_offsets:
                 loaded_indices.append(int(sample_indices[offset]))
-                metadata_records.append(flatten_scalar_metadata(metadata_rows[offset]))
+                metadata_records.append(
+                    {
+                        **flatten_scalar_metadata(metadata_rows[offset]),
+                        SOURCE_FOLDER_FIELD: source_folder,
+                    }
+                )
                 absolute_positions.append(position_value)
         if max_samples is not None and len(loaded_indices) >= max_samples:
             break
@@ -837,7 +1020,7 @@ def prepare_projection(
             )
             row = metadata_df.iloc[row_offsets[0]].copy()
             row["source_sample_count"] = len(row_offsets)
-            for field in [value_field, unit_field, *available_phrasing]:
+            for field in [value_field, unit_field, *available_phrasing, SOURCE_FOLDER_FIELD]:
                 if (
                     field in metadata_df
                     and metadata_df.iloc[row_offsets][field].nunique(dropna=True) > 1
@@ -894,11 +1077,17 @@ def unique_filter_values(
 ) -> dict[str, list[Any]]:
     """Collect scalar metadata values for filter controls without reading activations."""
     values, seen = {field: [] for field in fields}, {field: set() for field in fields}
-    for source in sources:
+    sources = list(sources)
+    source_folders = activation_source_folder_names(sources)
+    for source, source_folder in zip(sources, source_folders, strict=True):
         payload = _load(source)
         for metadata in payload["prompt_metadata"]:
             for field in fields:
-                value = get_metadata_field(metadata, field)
+                value = (
+                    source_folder
+                    if field == SOURCE_FOLDER_FIELD
+                    else get_metadata_field(metadata, field)
+                )
                 if value is not MISSING and value not in seen[field]:
                     seen[field].add(value)
                     values[field].append(value)

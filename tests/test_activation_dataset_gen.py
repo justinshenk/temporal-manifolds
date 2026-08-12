@@ -245,6 +245,71 @@ def test_dataset_cli_accepts_remove_output_format_constraints(
     assert parse_args().remove_output_format_constraints is True
 
 
+def test_plain_english_dataset_reuses_conversational_tasks_and_time_values() -> None:
+    from temporal_manifolds.dataset import conversational, plain_english
+
+    assert plain_english.tasks == conversational.tasks
+    assert plain_english.tasks is not conversational.tasks
+    assert all(
+        plain_english.tasks[task]["units"] is not config["units"]
+        for task, config in conversational.tasks.items()
+    )
+    assert plain_english.values == conversational.values
+
+
+def test_plain_english_prompts_are_natural_and_format_neutral() -> None:
+    from temporal_manifolds.dataset import plain_english
+    from temporal_manifolds.dataset.generate import generate_task_dataset
+
+    records = generate_task_dataset(
+        dataset="plain_english",
+        task_units={"make a cup of tea": {"minutes"}},
+        time_values=[1],
+    )
+
+    assert len(records) == len(plain_english.templates) * 4
+    assert {record["template_id"] for record in records} == {
+        template["id"] for template in plain_english.templates
+    }
+    assert all("make a cup of tea" in record["text"] for record in records)
+    assert all(record["value_text"] in record["text"] for record in records)
+    assert all(record["unit"] in record["text"] for record in records)
+    assert all("\n" not in record["text"] for record in records)
+    assert all(
+        label not in record["text"]
+        for record in records
+        for label in ("Task:", "Goal:", "Objective:", "Output format:")
+    )
+    assert all("output_format" not in record["template_metadata"] for record in records)
+
+
+def test_plain_english_dataset_is_available_from_the_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from temporal_manifolds.dataset.generate import parse_args
+
+    monkeypatch.setattr(sys, "argv", ["generate", "--dataset", "plain_english"])
+
+    assert parse_args().dataset == "plain_english"
+
+
+def test_plain_english_time_constraints_can_be_removed_naturally() -> None:
+    from temporal_manifolds.dataset import plain_english
+    from temporal_manifolds.dataset.generate import generate_task_dataset
+
+    records = generate_task_dataset(
+        dataset="plain_english",
+        task_units={"make a cup of tea": {"minutes"}},
+        time_values=[1, 2],
+        remove_time_constraints=True,
+    )
+
+    assert len(records) == len(plain_english.templates)
+    assert all("make a cup of tea" in record["text"] for record in records)
+    assert all("{value}" not in record["text"] and "{unit}" not in record["text"] for record in records)
+    assert all(record["value"] is None and record["unit"] is None for record in records)
+
+
 def test_abstract_tasks_cover_the_complete_supported_time_range() -> None:
     from temporal_manifolds.dataset import abstract
     from temporal_manifolds.dataset.utils import SUPPORTED_UNITS

@@ -32,6 +32,14 @@ Cache abstract prompts with:
 bash scripts/run_activation_caching_abstract_selected_acts.sh
 ```
 
+Generate the plain-English dataset, which uses the same tasks and horizons as
+the conversational dataset without labelled fields or a required answer shape:
+
+```bash
+uv run python -m temporal_manifolds.dataset.generate --dataset plain_english \
+  --randomize-template --output-path data/plain_english_prompts.json
+```
+
 The no-output-format conversational variant uses the same fixed extraction
 contract and writes to an isolated artifact namespace:
 

@@ -1,0 +1,32 @@
+{
+  "data": {
+    "samples": 4768,
+    "trajectories": 84,
+    "tasks": 47,
+    "raw_activation_dimensions": 2560,
+    "pls_dimensions": 3
+  },
+  "feature": "RMS of standardized PLS reconstruction residual",
+  "scale_model": {
+    "formula": "exp(intercept + coefficient * residual_rms)",
+    "intercept": 1.0745485648817321,
+    "coefficient": -0.7182994833205745,
+    "training_residual_rms_min": 0.3291537987249844,
+    "training_residual_rms_max": 3.1239547274050246
+  },
+  "validation": {
+    "protocol": "5-fold GroupKFold holding out entire tasks; equal total weight per trajectory",
+    "strict_train_only_reference_curve_log_scale_r2": 0.8401730491575594,
+    "strict_train_only_reference_curve_log_scale_rmse": 0.35806971374938096,
+    "strict_median_absolute_fractional_scale_error": 0.15454778182033346,
+    "translation_only_common_curve_r2_before": 0.7377410153993562,
+    "translation_only_common_curve_r2_after_oof_correction": 0.8869279427604149,
+    "per_trajectory_scale_and_translation_upper_fit_r2": 0.9475316192197895,
+    "log_scale_std_before": 0.8642561295406589,
+    "log_scale_std_after_oof_correction": 0.3230782046482515,
+    "corrected_scale_p10": 0.646248091956428,
+    "corrected_scale_median": 1.0641021346369788,
+    "corrected_scale_p90": 1.3965021515213059
+  },
+  "note": "Overall performance includes the large conv versus non-conv scale difference; within-folder task variation is only partially corrected by this one-scalar model."
+}
