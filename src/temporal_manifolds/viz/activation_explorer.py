@@ -781,6 +781,46 @@ def projection_details_table(projection: pd.DataFrame) -> pd.DataFrame:
     return table
 
 
+def reconstruction_residual_rms(
+    activation_matrix: np.ndarray,
+    prepared_matrix: np.ndarray | None,
+    row_offsets: np.ndarray,
+    scores: np.ndarray,
+    model: PCA | IncrementalPCA | PLSRegression,
+    *,
+    batch_size: int = 2048,
+) -> np.ndarray:
+    """Return each point's activation-space reconstruction-residual RMS."""
+    if batch_size < 1:
+        raise ValueError("Reconstruction batch size must be positive.")
+
+    scores = np.asarray(scores)
+    row_count = len(scores)
+    if prepared_matrix is not None:
+        values = np.asarray(prepared_matrix)
+        if values.ndim != 2 or len(values) != row_count:
+            raise ValueError("Prepared activations and projection scores are misaligned.")
+    else:
+        if len(row_offsets) != row_count:
+            raise ValueError("Activation row offsets and projection scores are misaligned.")
+        values = None
+
+    residual_rms = np.empty(row_count, dtype=np.float64)
+    for batch in _bounded_batches(row_count, batch_size, 1):
+        batch_values = (
+            np.asarray(values[batch], dtype=np.float64)
+            if values is not None
+            else np.asarray(activation_matrix[row_offsets[batch]], dtype=np.float64)
+        )
+        reconstructed = np.asarray(model.inverse_transform(scores[batch]), dtype=np.float64)
+        if reconstructed.shape != batch_values.shape:
+            raise ValueError("Reconstructed activations have an invalid shape.")
+        residual_rms[batch] = np.sqrt(
+            np.mean(np.square(batch_values - reconstructed), axis=1)
+        )
+    return residual_rms
+
+
 def fit_pca_projection(
     activation_matrix: np.ndarray,
     prepared_matrix: np.ndarray | None,

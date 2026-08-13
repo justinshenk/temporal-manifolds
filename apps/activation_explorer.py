@@ -21,9 +21,12 @@ from temporal_manifolds.activations.extraction_policy import (
     PROMPT_TOKEN_POSITION,
     TARGET_LAYER_COMPONENT,
 )
-from temporal_manifolds.geometry.residual_trajectory_scaler import (
-    ResidualTrajectoryScaler,
-    load_fitted_scaler,
+from temporal_manifolds.geometry.extrusion.rms_spline_surface_transformer import (
+    RMSSplineSurfaceEvaluationResult,
+    RMSSplineSurfaceTransformer,
+    add_surface_parameter_columns,
+    evaluate_rms_spline_surface,
+    serialize_rms_spline_surface,
 )
 from temporal_manifolds.viz.activation_explorer import (
     PCA_PROJECTION_FINGERPRINT_VERSION,
@@ -39,6 +42,7 @@ from temporal_manifolds.viz.activation_explorer import (
     pca_projection_fingerprint,
     prepare_analysis_data,
     projection_details_table,
+    reconstruction_residual_rms,
     select_activation_batch_uploads,
     serialize_pca_model,
     serialize_pls_model,
@@ -53,16 +57,11 @@ from temporal_manifolds.viz.curve_fitting import (
     CurveEvaluationResult,
     CurveFitResult,
     evaluate_curve_model,
-    fit_curve,
+    fit_geometric_spline,
     load_curve_model,
+    parse_spline_quantiles,
+    project_onto_curve_parameter,
     serialize_curve_model,
-)
-from temporal_manifolds.viz.extruded_spline_surface import (
-    ExtrudedSurfaceEvaluationResult,
-    evaluate_extruded_surface,
-    fit_extrusion_direction,
-    load_extruded_surface,
-    serialize_extruded_surface,
 )
 from temporal_manifolds.viz.surface_fitting import (
     ALGORITHM_POINT_CAPS,
@@ -241,14 +240,13 @@ def fit_surface_cached(
 
 
 @st.cache_data(max_entries=16, show_spinner=False)
-def fit_curve_cached(
-    parameter_values: np.ndarray,
+def fit_geometric_spline_cached(
     coordinates: np.ndarray,
     options: dict[str, Any],
 ) -> CurveFitResult:
-    """Cache a reusable 3D curve model and its diagnostics."""
+    """Cache a geometric principal-spline fit."""
 
-    return fit_curve(parameter_values, coordinates, **options)
+    return fit_geometric_spline(coordinates, **options)
 
 
 def fit_pls_projection(
@@ -345,89 +343,6 @@ def fit_pls_projection(
         "pls_iterations": list(pls.n_iter_),
     }
     return result, pls, projection_details
-
-
-@st.cache_resource(show_spinner=False)
-def load_residual_trajectory_scaler() -> ResidualTrajectoryScaler:
-    """Load the bundled fitted trajectory scaler once per app process."""
-
-    return load_fitted_scaler()
-
-
-def scale_pls_projection(
-    activation_matrix: np.ndarray,
-    prepared_matrix: np.ndarray | None,
-    row_offsets: np.ndarray,
-    projection: pd.DataFrame,
-    *,
-    pls: PLSRegression,
-    scaler: ResidualTrajectoryScaler,
-    details: dict[str, Any],
-) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Apply the fitted residual-RMS correction to compatible PLS coordinates."""
-
-    score_fields = [f"PLS{index}" for index in range(1, scaler.n_components_ + 1)]
-    missing_fields = [field for field in score_fields if field not in projection]
-    if missing_fields:
-        raise ValueError(
-            "Residual trajectory scaling requires the first "
-            f"{scaler.n_components_} PLS components."
-        )
-
-    raw_activations = (
-        np.asarray(prepared_matrix, dtype=np.float32)
-        if prepared_matrix is not None
-        else np.asarray(activation_matrix[row_offsets], dtype=np.float32)
-    )
-    if raw_activations.shape != (len(projection), scaler.n_features_in_):
-        raise ValueError(
-            "Residual trajectory scaling requires "
-            f"{scaler.n_features_in_:,}-feature activations; the prepared data has shape "
-            f"{raw_activations.shape}."
-        )
-
-    pls_mean = np.asarray(getattr(pls, "_x_mean", np.empty(0)), dtype=np.float64)
-    pls_std = np.asarray(getattr(pls, "_x_std", np.empty(0)), dtype=np.float64)
-    pls_loadings = np.asarray(
-        getattr(pls, "x_loadings_", np.empty((0, 0))), dtype=np.float64
-    )
-    compatible = (
-        pls_mean.shape == scaler.x_mean.shape
-        and pls_std.shape == scaler.x_std.shape
-        and pls_loadings.shape[0] == scaler.n_features_in_
-        and pls_loadings.shape[1] >= scaler.n_components_
-        and np.allclose(pls_mean, scaler.x_mean, rtol=1e-5, atol=1e-7)
-        and np.allclose(pls_std, scaler.x_std, rtol=1e-5, atol=1e-7)
-        and np.allclose(
-            pls_loadings[:, : scaler.n_components_],
-            scaler.x_loadings,
-            rtol=1e-5,
-            atol=1e-7,
-        )
-    )
-    if not compatible:
-        raise ValueError(
-            "The residual trajectory scaler is calibrated for a different PLS basis. "
-            "Load the matching supplied 3-D PLS model or turn this option off."
-        )
-
-    scores = projection[score_fields].to_numpy(dtype=np.float64)
-    corrected, predicted_scale, residual_rms = scaler.transform_with_diagnostics(
-        raw_activations,
-        scores,
-    )
-    result = projection.copy()
-    result.loc[:, score_fields] = corrected
-    result["predicted_trajectory_scale"] = predicted_scale
-    result["residual_rms"] = residual_rms
-    scaled_details = {
-        **details,
-        "residual_trajectory_scaling": True,
-        "residual_trajectory_scaling_components": score_fields,
-        "residual_trajectory_scale_min": float(np.min(predicted_scale)),
-        "residual_trajectory_scale_max": float(np.max(predicted_scale)),
-    }
-    return result, scaled_details
 
 
 def transform_pls_projection(
@@ -1005,7 +920,7 @@ def curve_appearance_controls(result: CurveDisplayResult) -> dict[str, Any]:
 
 
 def extruded_surface_appearance_controls(
-    result: ExtrudedSurfaceEvaluationResult,
+    result: RMSSplineSurfaceEvaluationResult,
 ) -> dict[str, Any]:
     """Render appearance controls for a loaded parametric surface."""
 
@@ -1094,59 +1009,23 @@ def new_curve_controls(
     z_component: str,
     active_pca: Any,
     direction_method: str,
-    residual_trajectory_scaling: bool,
     layer_component: str,
     cached_position: Any,
     aggregation_fields: list[str],
 ) -> tuple[CurveFitResult | None, dict[str, Any]]:
-    """Render controls for fitting a parameterized 3D curve."""
+    """Render controls for fitting a geometry-parameterized spline."""
 
     coordinate_features = (x_component, y_component, z_component)
-    parameter_fields = [
-        field
-        for field in projection.columns
-        if field not in {"sample_index", *coordinate_features}
-        and is_numeric_dtype(projection[field])
-        and not is_bool_dtype(projection[field])
-    ]
     with st.container(border=True):
         st.subheader("Curve fitting")
         st.caption(
-            "Fit a trajectory **(X(t), Y(t), Z(t))** through the projected points, where "
-            "t is a numeric field you choose. This is useful for tracing how activations move "
-            "with time horizon or another ordered quantity."
+            "Fit a geometric principal spline **C(t) = (X(t), Y(t), Z(t))**. The dummy "
+            "parameter **t ∈ [0, 1]** is inferred from the point-cloud geometry and refined "
+            "to minimize nearest-curve distance."
         )
-        if not parameter_fields:
-            st.warning("A numeric non-coordinate field is required to parameterize a curve.")
-            return None, {}
-
-        default_parameter = next(
-            (
-                field
-                for field in ("log10_time_horizon_months", "time_horizon_months")
-                if field in parameter_fields
-            ),
-            parameter_fields[0],
-        )
-        if st.session_state.get("curve_parameter_feature") not in (None, *parameter_fields):
-            st.session_state.pop("curve_parameter_feature", None)
-        selectors = st.columns([1.2, 1.4, 1.0])
-        algorithm = selectors[0].selectbox(
-            "Algorithm",
-            list(CURVE_ALGORITHMS),
-            format_func=CURVE_ALGORITHMS.__getitem__,
-            key="curve_algorithm",
-            persist_state="page",
-        )
-        parameter_feature = selectors[1].selectbox(
-            "Curve parameter",
-            parameter_fields,
-            index=parameter_fields.index(default_parameter),
-            key="curve_parameter_feature",
-            help="The curve follows increasing values of this field.",
-            persist_state="page",
-        )
-        fit_scope = selectors[2].segmented_control(
+        algorithm = "spline"
+        parameter_feature = "t"
+        fit_scope = st.segmented_control(
             "Fit points",
             ["Visible", "All projected"],
             default="Visible",
@@ -1156,12 +1035,9 @@ def new_curve_controls(
         st.caption(CURVE_DESCRIPTIONS[algorithm])
 
         curve_source = plot_data if fit_scope == "Visible" else projection
-        parameter_values = pd.to_numeric(
-            curve_source[parameter_feature], errors="coerce"
-        ).to_numpy(dtype=np.float64)
         coordinates = curve_source[list(coordinate_features)].to_numpy(dtype=np.float64)
-        finite = np.isfinite(parameter_values) & np.isfinite(coordinates).all(axis=1)
-        unique_count = int(np.unique(parameter_values[finite]).size)
+        finite = np.isfinite(coordinates).all(axis=1)
+        unique_count = int(len(np.unique(coordinates[finite], axis=0)))
         display_coordinates = plot_data[list(coordinate_features)].to_numpy(dtype=np.float64)
         finite_display = display_coordinates[np.isfinite(display_coordinates).all(axis=1)]
         display_coordinate_bounds = np.column_stack(
@@ -1169,100 +1045,110 @@ def new_curve_controls(
         )
         st.caption(
             f"Current scope contains {len(curve_source):,} point(s) and {unique_count:,} "
-            f"distinct finite {parameter_feature} value(s)."
+            + "distinct finite 3D location(s)."
         )
-        if unique_count < 3:
-            st.warning("At least three distinct finite parameter values are required.")
+        minimum_unique = 4
+        if unique_count < minimum_unique:
+            st.warning(
+                f"At least {minimum_unique} distinct finite "
+                + "3D locations"
+                + " are required."
+            )
             return None, {}
 
         with st.form(f"curve_fit_form::{algorithm}"):
             st.markdown("**Model controls**")
-            if algorithm == "spline":
-                model_columns = st.columns(2)
-                maximum_degree = min(5, unique_count - 1)
-                clamp_integer_widget_state(
-                    "curve_spline_degree",
-                    minimum=1,
-                    maximum=maximum_degree,
-                    default=min(3, maximum_degree),
-                )
-                spline_degree = model_columns[0].slider(
-                    "Spline degree",
-                    1,
-                    maximum_degree,
-                    min(3, maximum_degree),
-                    key="curve_spline_degree",
+            model_columns = st.columns(2)
+            maximum_degree = min(5, unique_count - 1)
+            clamp_integer_widget_state(
+                "curve_spline_degree",
+                minimum=1,
+                maximum=maximum_degree,
+                default=min(3, maximum_degree),
+            )
+            spline_degree = model_columns[0].slider(
+                "Spline degree",
+                1,
+                maximum_degree,
+                min(3, maximum_degree),
+                key="curve_spline_degree",
+                persist_state="page",
+            )
+            smoothing = model_columns[1].slider(
+                "Smoothing strength",
+                0.0,
+                2.0,
+                0.15,
+                0.01,
+                key="curve_spline_smoothing",
+                help="Zero follows the inferred centerline; larger values smooth more.",
+                persist_state="page",
+            )
+            model_parameters = {"degree": spline_degree, "smoothing": smoothing}
+            knot_error = None
+            knot_mode = st.segmented_control(
+                "Cubic spline knot specification",
+                ["Quantiles", "Number of knots"],
+                default="Number of knots",
+                key="curve_spline_knot_mode",
+                persist_state="page",
+            )
+            knot_quantile_text = st.text_input(
+                "Knot quantiles (Python list)",
+                value="[0.25, 0.5, 0.75]",
+                key="curve_spline_knot_quantiles",
+                help="Strictly increasing quantiles between 0 and 1 along inferred t.",
+                disabled=knot_mode != "Quantiles",
+                persist_state="page",
+            )
+            knot_count = int(
+                st.number_input(
+                    "Total number of knots",
+                    min_value=0,
+                    max_value=max(0, unique_count - 4),
+                    value=0,
+                    key="curve_spline_knot_count",
+                    help=(
+                        "This many interior positions are placed at evenly spaced quantiles "
+                        "of inferred t; boundary knots are implicit."
+                    ),
+                    disabled=knot_mode != "Number of knots",
                     persist_state="page",
                 )
-                smoothing = model_columns[1].slider(
-                    "Smoothing strength",
-                    0.0,
-                    2.0,
-                    0.15,
-                    0.01,
-                    key="curve_spline_smoothing",
-                    help="Zero interpolates the reduced points; larger values smooth more.",
-                    persist_state="page",
-                )
-                model_parameters = {"degree": spline_degree, "smoothing": smoothing}
-            else:
-                model_columns = st.columns(2)
-                maximum_degree = min(10, unique_count - 1)
-                clamp_integer_widget_state(
-                    "curve_polynomial_degree",
-                    minimum=1,
-                    maximum=maximum_degree,
-                    default=min(3, maximum_degree),
-                )
-                polynomial_degree = model_columns[0].slider(
-                    "Polynomial degree",
-                    1,
-                    maximum_degree,
-                    min(3, maximum_degree),
-                    key="curve_polynomial_degree",
-                    persist_state="page",
-                )
-                ridge_alpha = 10.0 ** model_columns[1].slider(
-                    "log10 ridge alpha",
-                    -8.0,
-                    4.0,
-                    -3.0,
-                    0.25,
-                    key="curve_polynomial_alpha",
-                    persist_state="page",
-                )
-                model_parameters = {"degree": polynomial_degree, "alpha": ridge_alpha}
+            )
+            if spline_degree != 3 and (knot_mode == "Quantiles" or knot_count > 0):
+                knot_error = "Quantile-based knots require spline degree 3."
+            elif knot_mode == "Quantiles":
+                try:
+                    knot_quantiles = parse_spline_quantiles(knot_quantile_text)
+                except ValueError as exc:
+                    knot_error = str(exc)
+                else:
+                    model_parameters["knot_quantiles"] = knot_quantiles
+            elif knot_count:
+                model_parameters["knot_count"] = knot_count
 
-            st.markdown("**Sampling and validation**")
-            common_columns = st.columns(6)
+            st.markdown("**Sampling**")
+            common_columns = st.columns(4)
             max_points_key = f"curve_common::{algorithm}::max_points"
             clamp_integer_widget_state(
                 max_points_key,
-                minimum=3,
+                minimum=4,
                 maximum=unique_count,
                 default=min(unique_count, 3_000),
             )
             max_fit_points = int(
                 common_columns[0].number_input(
                     "Maximum fit values",
-                    min_value=3,
+                    min_value=4,
                     max_value=unique_count,
                     value=min(unique_count, 3_000),
                     key=max_points_key,
                     persist_state="page",
                 )
             )
-            validation_fraction = common_columns[1].slider(
-                "Held-out fraction",
-                0.0,
-                0.4,
-                0.2,
-                0.05,
-                key=f"curve_common::{algorithm}::validation",
-                persist_state="page",
-            )
             random_state = int(
-                common_columns[2].number_input(
+                common_columns[1].number_input(
                     "Random seed",
                     min_value=0,
                     max_value=2_147_483_647,
@@ -1271,7 +1157,7 @@ def new_curve_controls(
                     persist_state="page",
                 )
             )
-            sample_count = common_columns[3].slider(
+            sample_count = common_columns[2].slider(
                 "Curve samples",
                 40,
                 1_000,
@@ -1280,7 +1166,7 @@ def new_curve_controls(
                 key=f"curve_common::{algorithm}::samples",
                 persist_state="page",
             )
-            padding_percent = common_columns[4].slider(
+            padding_percent = common_columns[3].slider(
                 "Curve padding",
                 0,
                 100,
@@ -1294,14 +1180,6 @@ def new_curve_controls(
                 ),
                 persist_state="page",
             )
-            duplicate_reducer = common_columns[5].selectbox(
-                "Duplicate reducer",
-                ["mean", "median"],
-                format_func=str.capitalize,
-                key=f"curve_common::{algorithm}::duplicates",
-                help="Combines coordinates that share the same parameter value.",
-                persist_state="page",
-            )
             fit_submitted = st.form_submit_button(
                 "Fit / update curve",
                 type="primary",
@@ -1310,20 +1188,16 @@ def new_curve_controls(
             )
 
         fit_options = {
-            "algorithm": algorithm,
             "parameters": model_parameters,
             "sample_count": sample_count,
             "padding_fraction": padding_percent / 100.0,
             "display_coordinate_bounds": display_coordinate_bounds,
-            "duplicate_reducer": duplicate_reducer,
             "max_fit_points": max_fit_points,
-            "validation_fraction": validation_fraction,
             "random_state": random_state,
-            "parameter_feature": parameter_feature,
             "coordinate_features": coordinate_features,
         }
         data_digest = sha256(
-            np.ascontiguousarray(np.column_stack([parameter_values, coordinates])).tobytes()
+            np.ascontiguousarray(coordinates).tobytes()
         ).hexdigest()
         curve_identity = (
             data_digest,
@@ -1332,13 +1206,18 @@ def new_curve_controls(
             fit_scope,
             algorithm,
             CURVE_MODEL_ARTIFACT_VERSION,
+            knot_mode,
+            knot_quantile_text,
+            knot_count,
             repr(fit_options),
         )
         if fit_submitted:
             try:
+                if knot_error is not None:
+                    raise ValueError(knot_error)
                 with st.spinner(f"Fitting {CURVE_ALGORITHMS[algorithm]}…"):
-                    fitted_curve = fit_curve_cached(
-                        parameter_values, coordinates, fit_options
+                    fitted_curve = fit_geometric_spline_cached(
+                        coordinates, fit_options
                     )
             except (ValueError, MemoryError) as exc:
                 st.session_state.pop("curve_result", None)
@@ -1364,10 +1243,10 @@ def new_curve_controls(
         metrics = result.metrics
         diagnostic_columns = st.columns(4)
         diagnostic_columns[0].metric(
-            "Held-out 3D RMSE", _format_metric(metrics["validation_rmse_3d"])
+            "Geometric 3D RMSE", _format_metric(metrics["geometric_rmse_3d"])
         )
         diagnostic_columns[1].metric(
-            "Held-out R²", _format_metric(metrics["validation_r2"])
+            "Geometric 3D MAE", _format_metric(metrics["geometric_mae_3d"])
         )
         diagnostic_columns[2].metric(
             "Training 3D RMSE", _format_metric(metrics["train_rmse_3d"])
@@ -1384,7 +1263,6 @@ def new_curve_controls(
             "pca_sha256": pca_projection_fingerprint(active_pca),
             "pca_fingerprint_version": PCA_PROJECTION_FINGERPRINT_VERSION,
             "direction_method": direction_method,
-            "residual_trajectory_scaling": residual_trajectory_scaling,
             "direction_target": (
                 "log10_time_horizon_months" if direction_method == "PLS" else None
             ),
@@ -1430,7 +1308,6 @@ def loaded_curve_controls(
     z_component: str,
     active_pca: Any,
     direction_method: str,
-    residual_trajectory_scaling: bool,
     layer_component: str,
     cached_position: Any,
 ) -> tuple[CurveEvaluationResult | None, dict[str, Any]]:
@@ -1510,33 +1387,11 @@ def loaded_curve_controls(
                 + "."
             )
             compatible = False
-        if loaded_model.parameter_feature not in projection:
-            st.error(
-                f"The saved parameter field {loaded_model.parameter_feature!r} is not present "
-                "in the current projection."
-            )
-            compatible = False
-        elif not is_numeric_dtype(projection[loaded_model.parameter_feature]) or is_bool_dtype(
-            projection[loaded_model.parameter_feature]
-        ):
-            st.error(
-                f"The saved parameter field {loaded_model.parameter_feature!r} is not numeric."
-            )
-            compatible = False
-
         saved_direction_method = loaded_provenance.get("direction_method", "PCA")
         if saved_direction_method != direction_method:
             st.error(
                 f"This curve was fitted in {saved_direction_method} coordinates, but the "
                 f"current projection uses {direction_method}."
-            )
-            compatible = False
-        saved_scaling = bool(loaded_provenance.get("residual_trajectory_scaling", False))
-        if saved_scaling != residual_trajectory_scaling:
-            st.error(
-                "This curve was fitted with residual trajectory scaling "
-                f"{'enabled' if saved_scaling else 'disabled'}, but the current projection "
-                f"has it {'enabled' if residual_trajectory_scaling else 'disabled'}."
             )
             compatible = False
         current_pca_digest = pca_projection_fingerprint(active_pca)
@@ -1632,20 +1487,22 @@ def loaded_curve_controls(
             key="apply_loaded_curve_button",
         )
         saved_coordinates = list(loaded_model.coordinate_features)
-        parameter_values = pd.to_numeric(
-            preview_source[loaded_model.parameter_feature], errors="coerce"
-        ).to_numpy(dtype=np.float64)
         coordinates = preview_source[saved_coordinates].to_numpy(dtype=np.float64)
+        finite_coordinates = np.isfinite(coordinates).all(axis=1)
+        parameter_values = np.full(len(coordinates), np.nan, dtype=np.float64)
+        if np.any(finite_coordinates):
+            parameter_values[finite_coordinates] = project_onto_curve_parameter(
+                loaded_model, coordinates[finite_coordinates], grid_size=10_001
+            )
         display_coordinates = plot_data[saved_coordinates].to_numpy(dtype=np.float64)
         finite_display = display_coordinates[np.isfinite(display_coordinates).all(axis=1)]
         display_coordinate_bounds = np.column_stack(
             [finite_display.min(axis=0), finite_display.max(axis=0)]
         )
         data_digest = sha256(
-            np.ascontiguousarray(np.column_stack([parameter_values, coordinates])).tobytes()
+            np.ascontiguousarray(coordinates).tobytes()
         ).hexdigest()
         preview_identity = (
-            source_mode,
             loaded_digest,
             current_pca_digest,
             data_digest,
@@ -1703,18 +1560,17 @@ def loaded_extruded_surface_controls(
     z_component: str,
     active_pca: Any,
     direction_method: str,
-    residual_trajectory_scaling: bool,
     layer_component: str,
     cached_position: Any,
-) -> tuple[ExtrudedSurfaceEvaluationResult | None, dict[str, Any]]:
-    """Load a cubic spline and fit its least-squares extrusion to displayed points."""
+) -> tuple[RMSSplineSurfaceEvaluationResult | None, dict[str, Any]]:
+    """Fit or load an RMS-conditioned extrusion around a saved cubic spline."""
 
     load_succeeded = False
     with st.container(border=True):
         st.subheader("Extruded spline surface")
         st.caption(
-            "Fit **S(t, u) = C(t) + u d** from a saved cubic spline, or load a previously "
-            "downloaded extruded surface."
+            "Fit **S(t, r) = C(t) + E(u(r))** from a saved cubic spline, using "
+            "reconstruction residual RMS to determine each point's extrusion offset."
         )
         st.warning(
             "Only load model files you trust. Joblib and pickle artifacts can "
@@ -1771,8 +1627,10 @@ def loaded_extruded_surface_controls(
                             "The extrusion input must be a degree-3 cubic spline curve model."
                         )
                 else:
-                    loaded_model, loaded_provenance = load_extruded_surface(model_bytes)
-            except ValueError as exc:
+                    loaded_model, loaded_provenance = (
+                        RMSSplineSurfaceTransformer.load_artifact(model_bytes)
+                    )
+            except (TypeError, ValueError) as exc:
                 st.error(str(exc))
             else:
                 st.session_state.loaded_extruded_surface_digest = uploaded_digest
@@ -1842,14 +1700,6 @@ def loaded_extruded_surface_controls(
                 f"current projection uses {direction_method}."
             )
             compatible = False
-        saved_scaling = loaded_provenance.get("residual_trajectory_scaling")
-        if saved_scaling is not None and bool(saved_scaling) != residual_trajectory_scaling:
-            st.error(
-                "This model and the current projection use different residual trajectory "
-                "scaling settings."
-            )
-            compatible = False
-
         current_pca_digest = pca_projection_fingerprint(active_pca)
         saved_pca_digest = loaded_provenance.get("pca_sha256")
         saved_fingerprint_version = loaded_provenance.get("pca_fingerprint_version")
@@ -1879,23 +1729,19 @@ def loaded_extruded_surface_controls(
             )
             compatible = False
 
-        parameter_available = loaded_model.parameter_feature in projection
-        if fitting_direction and not parameter_available:
+        residual_feature = "reconstruction_residual_rms"
+        residual_available = residual_feature in projection
+        if not residual_available:
             st.error(
-                f"The cubic spline parameter {loaded_model.parameter_feature!r} is not "
-                "available in the current projection."
+                "Reconstruction residual RMS is unavailable. Recompute the current "
+                "projection before fitting or applying this surface."
             )
             compatible = False
-        elif parameter_available and (
-            not is_numeric_dtype(projection[loaded_model.parameter_feature]) or is_bool_dtype(
-            projection[loaded_model.parameter_feature]
-            )
+        elif not is_numeric_dtype(projection[residual_feature]) or is_bool_dtype(
+            projection[residual_feature]
         ):
-            st.error(
-                f"The cubic spline parameter {loaded_model.parameter_feature!r} must be numeric."
-            )
+            st.error("Reconstruction residual RMS must be numeric.")
             compatible = False
-
         saved_layer = loaded_provenance.get("layer_component")
         if saved_layer is not None and saved_layer != layer_component:
             st.warning(
@@ -1916,7 +1762,7 @@ def loaded_extruded_surface_controls(
                 "Parameter bounds": (
                     loaded_model.training_parameter_bounds.tolist()
                     if fitting_direction
-                    else loaded_model.parameter_bounds.tolist()
+                    else loaded_model.projection_parameter_bounds.tolist()
                 ),
                 "Coordinates": loaded_model.coordinate_features,
                 "Artifact version": loaded_provenance.get("artifact_version"),
@@ -1929,22 +1775,23 @@ def loaded_extruded_surface_controls(
                     }
                 )
             else:
-                model_details["Extrusion degree"] = loaded_model.extrusion_degree
-                model_details["Linear coefficient"] = {
-                    feature: float(value)
-                    for feature, value in zip(
-                        loaded_model.coordinate_features, loaded_model.direction, strict=True
-                    )
-                }
-                if loaded_model.quadratic_direction is not None:
-                    model_details["Quadratic coefficient"] = {
-                        feature: float(value)
-                        for feature, value in zip(
-                            loaded_model.coordinate_features,
-                            loaded_model.quadratic_direction,
-                            strict=True,
-                        )
+                model_details.update(
+                    {
+                        "Extrusion degree": loaded_model.degree,
+                        "Residual feature": loaded_model.residual_feature,
+                        "Residual reference": loaded_model.residual_reference,
+                        "Residual fit bounds": loaded_model.residual_bounds.tolist(),
+                        "Log-residual scale": loaded_model.log_residual_scale,
+                        "Coefficient rows": {
+                            feature: row.tolist()
+                            for feature, row in zip(
+                                loaded_model.coordinate_features,
+                                loaded_model.coefficients,
+                                strict=True,
+                            )
+                        },
                     }
+                )
             st.write(model_details)
 
         preview_scope = st.segmented_control(
@@ -1953,68 +1800,97 @@ def loaded_extruded_surface_controls(
             default="Visible",
             key="extruded_surface_scope",
             help=(
-                "The selected points determine the RMSE-minimizing direction, automatic "
-                "extrusion width, and diagnostics."
+                "The selected points fit the RMS-conditioned polynomial offset and define "
+                "the preview diagnostics."
                 if fitting_direction
-                else "The selected points determine the automatic width and current-data diagnostics."
+                else "The selected points determine the preview extent and diagnostics."
             ),
             persist_state="page",
         )
         preview_source = plot_data if preview_scope == "Visible" else projection
         saved_coordinates = list(loaded_model.coordinate_features)
         point_xyz = preview_source[saved_coordinates].to_numpy(dtype=np.float64)
-        point_parameter = (
-            pd.to_numeric(
-                preview_source[loaded_model.parameter_feature], errors="coerce"
-            ).to_numpy(dtype=np.float64)
-            if parameter_available
-            else None
+        point_residual = pd.to_numeric(
+            preview_source[residual_feature], errors="coerce"
+        ).to_numpy(dtype=np.float64)
+        if fitting_direction:
+            finite_point_xyz = np.isfinite(point_xyz).all(axis=1)
+            point_parameter = np.full(len(point_xyz), np.nan, dtype=np.float64)
+            if np.any(finite_point_xyz):
+                point_parameter[finite_point_xyz] = project_onto_curve_parameter(
+                    loaded_model, point_xyz[finite_point_xyz], grid_size=10_001
+                )
+        else:
+            point_parameter = None
+        source_values = (
+            preview_source[SOURCE_FOLDER_FIELD].fillna("<missing>").astype(str)
+            if SOURCE_FOLDER_FIELD in preview_source
+            else pd.Series("<current>", index=preview_source.index)
         )
-        fit_data = (
-            np.column_stack([point_parameter, point_xyz])
-            if point_parameter is not None
-            else point_xyz
+        numeric_fit_data = np.column_stack(
+            [point_xyz, point_residual, *([] if point_parameter is None else [point_parameter])]
         )
-        data_digest = sha256(np.ascontiguousarray(fit_data).tobytes()).hexdigest()
+        data_digest = sha256(np.ascontiguousarray(numeric_fit_data).tobytes()).hexdigest()
+        source_options = sorted(source_values.unique().tolist())
+        default_base_source = "abst" if "abst" in source_options else source_options[0]
+        preferred_fit_sources = [
+            source for source in ("conv", "nof_conv") if source in source_options
+        ]
+        if not preferred_fit_sources:
+            preferred_fit_sources = [
+                source for source in source_options if source != default_base_source
+            ] or [default_base_source]
 
         with st.form("extruded_surface_preview_form"):
             if fitting_direction:
+                fit_columns = st.columns(2)
+                base_source = fit_columns[0].selectbox(
+                    "Reference source",
+                    source_options,
+                    index=source_options.index(default_base_source),
+                    key="extruded_surface_base_source",
+                    help="Its lowest positive reconstruction RMS anchors the saved spline edge.",
+                    persist_state="page",
+                )
+                fit_sources = fit_columns[1].multiselect(
+                    "Fit sources",
+                    source_options,
+                    default=preferred_fit_sources,
+                    key="extruded_surface_fit_sources",
+                    help="Rows from these sources fit the RMS-to-offset polynomial.",
+                    persist_state="page",
+                )
                 extrusion_degree_label = st.segmented_control(
                     "Extrusion degree",
-                    ["Linear", "Quadratic"],
-                    default="Linear",
+                    ["Linear", "Quadratic", "Cubic"],
+                    default="Cubic",
                     key="extruded_surface_degree",
                     help=(
-                        "Quadratic fits C(t) + u·d₁ + u²·d₂ using alternating "
-                        "least-squares optimization."
+                        "Fits E(u) as a no-intercept ridge polynomial; cubic matches the "
+                        "shared RMS spline-surface transformer default."
                     ),
                     persist_state="page",
                 )
-                extrusion_degree = 1 if extrusion_degree_label == "Linear" else 2
-                quadratic_max_iterations = (
-                    st.slider(
-                        "Quadratic optimization iterations",
-                        50,
-                        1_000,
-                        200,
-                        50,
-                        key="extruded_surface_quadratic_iterations",
-                        help=(
-                            "Higher values can reduce RMSE for difficult curved cross-sections "
-                            "but take longer."
-                        ),
-                        persist_state="page",
-                    )
-                    if extrusion_degree == 2
-                    else 0
+                extrusion_degree = {
+                    "Linear": 1,
+                    "Quadratic": 2,
+                    "Cubic": 3,
+                }[extrusion_degree_label]
+                ridge_alpha = st.number_input(
+                    "Ridge regularization",
+                    min_value=0.0,
+                    value=1e-3,
+                    format="%.3g",
+                    key="extruded_surface_ridge_alpha",
+                    help="L2 penalty applied to the no-intercept polynomial coefficients.",
+                    persist_state="page",
                 )
             else:
-                extrusion_degree = loaded_model.extrusion_degree
-                quadratic_max_iterations = 0
-                st.caption(
-                    f"Saved extrusion degree: "
-                    f"{'linear' if extrusion_degree == 1 else 'quadratic'}"
-                )
+                base_source = None
+                fit_sources = []
+                extrusion_degree = loaded_model.degree
+                ridge_alpha = loaded_model.ridge_alpha
+                st.caption(f"Saved extrusion degree: {extrusion_degree}")
             sample_columns = st.columns(4)
             parameter_samples = sample_columns[0].slider(
                 "Curve samples",
@@ -2052,29 +1928,56 @@ def loaded_extruded_surface_controls(
                 5,
                 format="%d%%",
                 key="extruded_surface_width_padding",
-                help="Extends the sheet beyond the current points along the extrusion axis.",
+                help="Extends the sheet in log-RMS space beyond the current points.",
+                persist_state="page",
+            )
+            clip_residual = st.toggle(
+                "Clip residual RMS to fitted range",
+                value=True,
+                key="extruded_surface_clip_residual",
+                help=(
+                    "Prevents polynomial extrapolation beyond the residual range used to "
+                    "fit the model."
+                ),
                 persist_state="page",
             )
             extent_mode = st.segmented_control(
-                "Extrusion extent",
+                "Residual extent",
                 ["Current points", "Manual"],
                 default="Current points",
                 key="extruded_surface_extent_mode",
-                help="Current points derives the u range by projecting the selected points.",
+                help="Current points derives the positive RMS range from the selected rows.",
                 persist_state="page",
             )
             manual_bounds = None
             if extent_mode == "Manual":
+                positive_residual = point_residual[
+                    np.isfinite(point_residual) & (point_residual > 0)
+                ]
+                if len(positive_residual):
+                    default_residual_low = float(np.min(positive_residual))
+                    default_residual_high = float(np.max(positive_residual))
+                elif not fitting_direction:
+                    default_residual_low, default_residual_high = map(
+                        float, loaded_model.residual_bounds
+                    )
+                else:
+                    default_residual_low, default_residual_high = 0.1, 1.0
+                if np.isclose(default_residual_low, default_residual_high):
+                    default_residual_low *= 0.9
+                    default_residual_high *= 1.1
                 bound_columns = st.columns(2)
                 extrusion_minimum = bound_columns[0].number_input(
-                    "Minimum u",
-                    value=-1.0,
+                    "Minimum residual RMS",
+                    min_value=np.finfo(float).tiny,
+                    value=default_residual_low,
                     key="extruded_surface_minimum_u",
                     persist_state="page",
                 )
                 extrusion_maximum = bound_columns[1].number_input(
-                    "Maximum u",
-                    value=1.0,
+                    "Maximum residual RMS",
+                    min_value=np.finfo(float).tiny,
+                    value=default_residual_high,
                     key="extruded_surface_maximum_u",
                     persist_state="page",
                 )
@@ -2088,8 +1991,10 @@ def loaded_extruded_surface_controls(
 
         preview_identity = (
             source_mode,
+            base_source,
+            tuple(fit_sources),
             extrusion_degree,
-            quadratic_max_iterations,
+            ridge_alpha,
             loaded_digest,
             current_pca_digest,
             data_digest,
@@ -2098,43 +2003,57 @@ def loaded_extruded_surface_controls(
             extrusion_samples,
             parameter_padding,
             extrusion_padding,
+            clip_residual,
             extent_mode,
             manual_bounds,
         )
         if preview_submitted or load_succeeded:
             try:
                 spinner_text = (
-                    "Fitting the minimum-RMSE direction and sampling the surface…"
+                    "Fitting the RMS-conditioned spline surface and sampling it…"
                     if fitting_direction
-                    else "Evaluating the loaded extruded surface…"
+                    else "Evaluating the loaded RMS spline surface…"
                 )
                 with st.spinner(spinner_text):
                     if fitting_direction:
-                        direction_fit = fit_extrusion_direction(
-                            loaded_model,
-                            point_parameter,
-                            point_xyz,
-                            degree=extrusion_degree,
-                            max_iterations=(
-                                quadratic_max_iterations if extrusion_degree == 2 else 200
-                            ),
+                        if not fit_sources:
+                            raise ValueError("Select at least one fit source.")
+                        fit_frame = preview_source.copy()
+                        fit_frame.loc[:, saved_coordinates] = point_xyz
+                        fit_frame.loc[:, residual_feature] = point_residual
+                        fit_frame.loc[:, loaded_model.parameter_feature] = point_parameter
+                        fit_frame.loc[:, SOURCE_FOLDER_FIELD] = source_values.to_numpy()
+                        finite_fit = (
+                            np.isfinite(point_xyz).all(axis=1)
+                            & np.isfinite(point_residual)
+                            & (point_residual > 0)
+                            & np.isfinite(point_parameter)
                         )
-                        surface_model = direction_fit.model
+                        fit_frame = fit_frame.loc[finite_fit].copy()
+                        surface_model = RMSSplineSurfaceTransformer.fit(
+                            fit_frame,
+                            {"model": loaded_model},
+                            base_source=base_source,
+                            fit_sources=fit_sources,
+                            source_feature=SOURCE_FOLDER_FIELD,
+                            residual_feature=residual_feature,
+                            degree=extrusion_degree,
+                            ridge_alpha=float(ridge_alpha),
+                        )
                     else:
-                        direction_fit = None
                         surface_model = loaded_model
-                    result = evaluate_extruded_surface(
+                    result = evaluate_rms_spline_surface(
                         surface_model,
                         point_xyz,
-                        point_parameter=point_parameter,
+                        point_residual,
+                        true_parameter=point_parameter,
                         parameter_samples=parameter_samples,
-                        extrusion_samples=extrusion_samples,
+                        residual_samples=extrusion_samples,
                         parameter_padding_fraction=parameter_padding / 100.0,
-                        extrusion_padding_fraction=extrusion_padding / 100.0,
-                        extrusion_bounds=manual_bounds,
+                        residual_padding_fraction=extrusion_padding / 100.0,
+                        residual_bounds=manual_bounds,
+                        clip=clip_residual,
                     )
-                    if direction_fit is not None:
-                        result.metrics.update(direction_fit.metrics)
             except (ValueError, MemoryError) as exc:
                 st.session_state.pop("loaded_extruded_surface_result", None)
                 st.session_state.pop("loaded_extruded_surface_identity", None)
@@ -2156,61 +2075,42 @@ def loaded_extruded_surface_controls(
         if result is None:
             return None, {}
 
+        st.selectbox(
+            "Point projection method",
+            ["Nearest point on the curve (Euclidean distance)"],
+            key="extruded_surface_projection_method",
+            help=(
+                "Dewarp each point by its RMS-derived extrusion offset, then choose the "
+                "spline parameter whose curve point has the smallest Euclidean distance."
+            ),
+            persist_state="page",
+        )
+
         metrics = result.metrics
         diagnostic_columns = st.columns(3)
-        if fitting_direction:
-            diagnostic_columns[0].metric(
-                "Curve RMSE", _format_metric(metrics["curve_rmse_3d"])
-            )
-            diagnostic_columns[1].metric(
-                "Fitted surface RMSE",
-                _format_metric(metrics["surface_rmse_3d"]),
-                help=(
-                    "The linear solution is globally optimal. Quadratic fitting uses "
-                    "multi-start alternating optimization."
-                ),
-            )
-            diagnostic_columns[2].metric(
-                "Residual captured",
-                _format_metric(metrics["captured_residual_variance"], percent=True),
-                help=(
-                    "Fraction of point-to-spline squared residual captured by the "
-                    "extrusion curve."
-                ),
-            )
-        else:
-            diagnostic_columns[0].metric(
-                "Current surface RMSE", _format_metric(metrics["current_rmse_3d"])
-            )
-            diagnostic_columns[1].metric(
-                "Current surface MAE", _format_metric(metrics["current_mae_3d"])
-            )
-            diagnostic_columns[2].metric(
-                "Maximum error", _format_metric(metrics["current_max_error_3d"])
-            )
-        linear_coefficient = {
-            feature: float(value)
-            for feature, value in zip(
-                result.model.coordinate_features, result.model.direction, strict=True
+        diagnostic_columns[0].metric(
+            "Current surface RMSE", _format_metric(metrics["current_rmse_3d"])
+        )
+        diagnostic_columns[1].metric(
+            "Parameter RMSE", _format_metric(metrics.get("parameter_rmse"))
+        )
+        diagnostic_columns[2].metric(
+            "Clipped RMS points", f"{int(metrics['clipped_residual_points']):,}"
+        )
+        coefficient_text = {
+            feature: [float(value) for value in row]
+            for feature, row in zip(
+                result.model.coordinate_features,
+                result.model.coefficients,
+                strict=True,
             )
         }
-        coefficient_text = f"d₁: {linear_coefficient}"
-        if result.model.quadratic_direction is not None:
-            quadratic_coefficient = {
-                feature: float(value)
-                for feature, value in zip(
-                    result.model.coordinate_features,
-                    result.model.quadratic_direction,
-                    strict=True,
-                )
-            }
-            coefficient_text += f" · d₂: {quadratic_coefficient}"
         st.caption(
-            f"Degree {result.model.extrusion_degree} · {coefficient_text} · "
+            f"Degree {result.model.degree} · coefficients by coordinate: {coefficient_text} · "
             f"t ∈ [{metrics['display_parameter_bounds'][0]:.4g}, "
             f"{metrics['display_parameter_bounds'][1]:.4g}] · "
-            f"u ∈ [{metrics['display_extrusion_bounds'][0]:.4g}, "
-            f"{metrics['display_extrusion_bounds'][1]:.4g}]"
+            f"RMS ∈ [{metrics['display_residual_bounds'][0]:.4g}, "
+            f"{metrics['display_residual_bounds'][1]:.4g}]"
         )
         if result.warnings:
             st.warning(" ".join(result.warnings))
@@ -2222,12 +2122,19 @@ def loaded_extruded_surface_controls(
         artifact_metadata.update(
             {
                 "direction_method": direction_method,
-                "residual_trajectory_scaling": residual_trajectory_scaling,
                 "pca_sha256": current_pca_digest,
                 "pca_fingerprint_version": PCA_PROJECTION_FINGERPRINT_VERSION,
                 "layer_component": layer_component,
                 "cached_position": cached_position,
-                "extrusion_degree": result.model.extrusion_degree,
+                "extrusion_degree": result.model.degree,
+                "base_source": (
+                    base_source if fitting_direction else artifact_metadata.get("base_source")
+                ),
+                "fit_sources": (
+                    list(fit_sources)
+                    if fitting_direction
+                    else artifact_metadata.get("fit_sources")
+                ),
                 "fit_scope": (
                     preview_scope
                     if fitting_direction
@@ -2236,14 +2143,12 @@ def loaded_extruded_surface_controls(
                 "fit_metrics": {
                     key: metrics[key]
                     for key in (
-                        "curve_rmse_3d",
-                        "surface_rmse_3d",
-                        "surface_mae_3d",
-                        "surface_max_error_3d",
-                        "captured_residual_variance",
-                        "extrusion_degree",
-                        "optimization_iterations",
-                        "optimization_converged",
+                        "current_rmse_3d",
+                        "current_mae_3d",
+                        "current_max_error_3d",
+                        "parameter_rmse",
+                        "parameter_mae",
+                        "clipped_residual_points",
                     )
                     if key in metrics
                 },
@@ -2252,8 +2157,10 @@ def loaded_extruded_surface_controls(
         safe_coordinates = "-".join(result.model.coordinate_features).replace("/", "-")
         st.download_button(
             "Download extruded surface",
-            data=lambda: serialize_extruded_surface(result.model, metadata=artifact_metadata),
-            file_name=f"activation_extruded_surface_{safe_coordinates}.joblib",
+            data=lambda: serialize_rms_spline_surface(
+                result.model, metadata=artifact_metadata
+            ),
+            file_name=f"activation_rms_spline_surface_{safe_coordinates}.joblib",
             mime="application/octet-stream",
             icon=":material/download:",
             on_click="ignore",
@@ -2275,7 +2182,6 @@ def loaded_surface_controls(
     z_component: str,
     active_pca: Any,
     direction_method: str,
-    residual_trajectory_scaling: bool,
     layer_component: str,
     cached_position: Any,
 ) -> tuple[SurfaceEvaluationResult | None, dict[str, Any]]:
@@ -2377,15 +2283,6 @@ def loaded_surface_controls(
                 f"current projection uses {direction_method}."
             )
             compatible = False
-        saved_scaling = bool(loaded_provenance.get("residual_trajectory_scaling", False))
-        if saved_scaling != residual_trajectory_scaling:
-            st.error(
-                "This surface was fitted with residual trajectory scaling "
-                f"{'enabled' if saved_scaling else 'disabled'}, but the current projection "
-                f"has it {'enabled' if residual_trajectory_scaling else 'disabled'}."
-            )
-            compatible = False
-
         current_pca_digest = pca_projection_fingerprint(active_pca)
         saved_pca_digest = loaded_provenance.get("pca_sha256")
         saved_pca_fingerprint_version = loaded_provenance.get("pca_fingerprint_version")
@@ -3076,29 +2973,6 @@ with st.sidebar:
                 "Preparation changes retransform the selected points without refitting the model."
             )
 
-    residual_trajectory_scaling = False
-    if direction_method == "PLS":
-        residual_trajectory_scaling = st.toggle(
-            "Residual trajectory scaling",
-            value=False,
-            key="residual_trajectory_scaling",
-            help=(
-                "Correct magnification in the bundled 3-D PLS space using each raw activation's "
-                "standardized reconstruction-residual RMS. The fitted correction is only "
-                "compatible with its matching 2,560-feature PLS basis."
-            ),
-        )
-        if residual_trajectory_scaling:
-            st.caption(
-                "Corrects PLS1-PLS3 about the scaler's fixed global center and clips residual "
-                "RMS to its training range."
-            )
-        pca_identity = (
-            *pca_identity,
-            "residual_trajectory_scaling",
-            residual_trajectory_scaling,
-        )
-
 slice_key = (component, position_index, st.session_state.get("source_revision", 0))
 if st.session_state.get("slice_key") != slice_key:
     try:
@@ -3247,16 +3121,17 @@ if st.session_state.get("pca_key") != pca_key:
                     pca=loaded_pca_model,
                     details=st.session_state["prepared_details"],
                 )
-            if direction_method == "PLS" and residual_trajectory_scaling:
-                projection, details = scale_pls_projection(
-                    activation_matrix,
-                    st.session_state.get("prepared_matrix"),
-                    st.session_state["prepared_row_offsets"],
-                    projection,
-                    pls=pca,
-                    scaler=load_residual_trajectory_scaler(),
-                    details=details,
-                )
+            score_prefix = "PLS" if direction_method == "PLS" else "PC"
+            score_fields = [
+                f"{score_prefix}{index + 1}" for index in range(pca.components_.shape[0])
+            ]
+            projection["reconstruction_residual_rms"] = reconstruction_residual_rms(
+                activation_matrix,
+                st.session_state.get("prepared_matrix"),
+                st.session_state["prepared_row_offsets"],
+                projection[score_fields].to_numpy(),
+                pca,
+            )
         st.session_state.pca_key = pca_key
         st.session_state.projection = projection
         st.session_state.pca = pca
@@ -3272,6 +3147,7 @@ active_pca = st.session_state.pca
 component_count = int(active_pca.components_.shape[0])
 direction_prefix = "PC" if direction_method == "PCA" else "PLS"
 pc_fields = [f"{direction_prefix}{index}" for index in range(1, component_count + 1)]
+axis_fields = [*pc_fields, "reconstruction_residual_rms"]
 metadata_fields = sorted(
     column for column in projection if column not in {*pc_fields, "sample_index"}
 )
@@ -3290,31 +3166,26 @@ variance_metric_label = (
 metric_columns[3].metric(variance_metric_label, f"{sum(details['explained_variance']):.1%}")
 if details.get("pca_source") == "loaded":
     st.caption("Explained variance describes the loaded model's original training data.")
-if residual_trajectory_scaling:
-    st.caption(
-        "Residual trajectory scaling is active for PLS1-PLS3. Predicted scale and residual RMS "
-        "are included in plot controls and downloads."
-    )
 st.subheader("Projection")
 controls = st.columns([1.1, 1.25, 1.25, 2])
 plot_mode = controls[0].segmented_control(
-    "Plot", ["2D", "3D"], default="3D" if len(pc_fields) >= 3 else "2D"
+    "Plot", ["2D", "3D"], default="3D" if len(axis_fields) >= 3 else "2D"
 )
 required_axes = 3 if plot_mode == "3D" else 2
-if len(pc_fields) < required_axes:
+if len(axis_fields) < required_axes:
     st.warning(
-        f"Fit at least {required_axes} {direction_method} components for a {plot_mode} plot."
+        f"At least {required_axes} numeric projection fields are required for a {plot_mode} plot."
     )
     st.stop()
-x_component = controls[1].selectbox("X component", pc_fields, index=0)
-y_choices = [field for field in pc_fields if field != x_component]
-y_component = controls[2].selectbox("Y component", y_choices, index=0)
+x_component = controls[1].selectbox("X axis", axis_fields, index=0)
+y_choices = [field for field in axis_fields if field != x_component]
+y_component = controls[2].selectbox("Y axis", y_choices, index=0)
 z_component = None
 if plot_mode == "3D":
-    z_choices = [field for field in pc_fields if field not in {x_component, y_component}]
-    z_component = controls[3].selectbox("Z component", z_choices, index=0)
+    z_choices = [field for field in axis_fields if field not in {x_component, y_component}]
+    z_component = controls[3].selectbox("Z axis", z_choices, index=0)
 else:
-    controls[3].caption("Choose any two fitted components for the plane.")
+    controls[3].caption("Choose any two projection fields for the plane.")
 
 plot_controls = st.columns([1.1, 1, 1, 2])
 color_field = plot_controls[0].selectbox("Color by", color_fields)
@@ -3397,7 +3268,7 @@ surface_result: SurfaceDisplayResult | None = None
 surface_appearance: dict[str, Any] = {}
 curve_result: CurveDisplayResult | None = None
 curve_appearance: dict[str, Any] = {}
-extruded_surface_result: ExtrudedSurfaceEvaluationResult | None = None
+extruded_surface_result: RMSSplineSurfaceEvaluationResult | None = None
 extruded_surface_appearance: dict[str, Any] = {}
 if plot_data.empty:
     st.warning("No projected points match the visual filters.")
@@ -3429,7 +3300,7 @@ else:
             value=False,
             key="extruded_surface_enabled",
             help=(
-                "Load a cubic spline and fit the extrusion direction that minimizes RMSE "
+                "Load a cubic spline and fit an RMS-conditioned polynomial extrusion "
                 "for the selected displayed points."
             ),
             persist_state="page",
@@ -3710,7 +3581,6 @@ else:
                             "pca_sha256": pca_projection_fingerprint(active_pca),
                             "pca_fingerprint_version": (PCA_PROJECTION_FINGERPRINT_VERSION),
                             "direction_method": direction_method,
-                            "residual_trajectory_scaling": residual_trajectory_scaling,
                             "direction_target": (
                                 "log10_time_horizon_months"
                                 if direction_method == "PLS"
@@ -4052,7 +3922,6 @@ else:
                 z_component=z_component,
                 active_pca=active_pca,
                 direction_method=direction_method,
-                residual_trajectory_scaling=residual_trajectory_scaling,
                 layer_component=component,
                 cached_position=inspection["positions"][position_index],
             )
@@ -4074,7 +3943,6 @@ else:
                 z_component=z_component,
                 active_pca=active_pca,
                 direction_method=direction_method,
-                residual_trajectory_scaling=residual_trajectory_scaling,
                 layer_component=component,
                 cached_position=inspection["positions"][position_index],
                 aggregation_fields=list(aggregation_fields),
@@ -4088,7 +3956,6 @@ else:
                 z_component=z_component,
                 active_pca=active_pca,
                 direction_method=direction_method,
-                residual_trajectory_scaling=residual_trajectory_scaling,
                 layer_component=component,
                 cached_position=inspection["positions"][position_index],
             )
@@ -4102,7 +3969,6 @@ else:
                     z_component=z_component,
                     active_pca=active_pca,
                     direction_method=direction_method,
-                    residual_trajectory_scaling=residual_trajectory_scaling,
                     layer_component=component,
                     cached_position=inspection["positions"][position_index],
                 )
@@ -4287,6 +4153,7 @@ else:
                         [
                             extruded_surface_result.grid_parameter,
                             extruded_surface_result.grid_extrusion,
+                            extruded_surface_result.grid_residual,
                         ],
                         axis=-1,
                     ),
@@ -4306,7 +4173,8 @@ else:
                         f"{y_component}: %{{y:.4g}}<br>"
                         f"{z_component}: %{{z:.4g}}<br>"
                         f"{extruded_surface_result.model.parameter_feature}: "
-                        "%{customdata[0]:.4g}<br>u: %{customdata[1]:.4g}"
+                        "%{customdata[0]:.4g}<br>u: %{customdata[1]:.4g}<br>"
+                        "Residual RMS: %{customdata[2]:.4g}"
                         "<extra>Extruded surface</extra>"
                     ),
                 )
@@ -4511,7 +4379,6 @@ with st.expander(f"{direction_method} details and downloads"):
                     "layer_component": component,
                     "cached_position": inspection["positions"][position_index],
                     "pls_target": "log10_time_horizon_months",
-                    "residual_trajectory_scaling": residual_trajectory_scaling,
                     "aggregation_fields": list(aggregation_fields),
                 }
             else:
@@ -4527,7 +4394,6 @@ with st.expander(f"{direction_method} details and downloads"):
                     for key, value in loaded_pls_provenance.items()
                     if key not in artifact_fields
                 }
-                model_metadata["residual_trajectory_scaling"] = residual_trajectory_scaling
             st.download_button(
                 "Download PLS model",
                 data=lambda: serialize_pls_model(active_pca, metadata=model_metadata),
@@ -4536,11 +4402,33 @@ with st.expander(f"{direction_method} details and downloads"):
                 icon=":material/download:",
                 on_click="ignore",
             )
+        active_extruded_surface_model = st.session_state.get(
+            "loaded_extruded_surface_model"
+        )
+        if active_extruded_surface_model is not None:
+            clip_surface_residual = bool(
+                st.session_state.get("extruded_surface_clip_residual", True)
+            )
+
+            def transformed_csv_data() -> bytes:
+                return add_surface_parameter_columns(
+                    projection,
+                    active_extruded_surface_model,
+                    clip=clip_surface_residual,
+                ).to_csv(index=False).encode("utf-8")
+
+            csv_data = transformed_csv_data
+        else:
+            csv_data = projection.to_csv(index=False).encode("utf-8")
         st.download_button(
             "Download projected CSV",
-            projection.to_csv(index=False).encode("utf-8"),
+            csv_data,
             file_name=f"activation_{direction_method.lower()}_projection.csv",
             mime="text/csv",
             icon=":material/download:",
             on_click="ignore",
+            help=(
+                "Includes t (spline parameter) and u (extrusion parameter) when an "
+                "extruded surface is loaded."
+            ),
         )

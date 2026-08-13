@@ -10,6 +10,7 @@ dist/
 .eggs/
 .installed.cfg
 *.egg
+data/
 
 # Virtualenvs / uv
 .venv/

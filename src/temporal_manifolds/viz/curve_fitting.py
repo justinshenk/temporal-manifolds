@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import io
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,23 +11,21 @@ from typing import Any, BinaryIO
 import joblib
 import numpy as np
 from scipy import __version__ as scipy_version
-from scipy.interpolate import UnivariateSpline
+from scipy.interpolate import UnivariateSpline, make_lsq_spline
+from scipy.sparse.csgraph import dijkstra, minimum_spanning_tree
+from scipy.spatial import cKDTree
+from scipy.spatial.distance import pdist, squareform
 from sklearn import __version__ as sklearn_version
 from sklearn.metrics import r2_score
 
-CURVE_MODEL_ARTIFACT_VERSION = 1
+CURVE_MODEL_ARTIFACT_VERSION = 2
 CURVE_ALGORITHMS = {
-    "spline": "Smoothing spline",
-    "polynomial": "Polynomial ridge",
+    "spline": "Geometric smoothing spline",
 }
 CURVE_DESCRIPTIONS = {
     "spline": (
-        "Fits one smoothing spline per displayed coordinate. Higher smoothing follows the "
-        "large-scale trajectory instead of individual points."
-    ),
-    "polynomial": (
-        "Fits one regularized polynomial per displayed coordinate. This gives a compact, "
-        "globally smooth curve that can extrapolate beyond the fitted parameter range."
+        "Fits a geometric principal spline through the 3D point cloud. A dummy parameter "
+        "t from 0 to 1 is inferred from the geometry and refined by nearest-curve projection."
     ),
 }
 
@@ -103,31 +102,30 @@ CurveDisplayResult = CurveFitResult | CurveEvaluationResult
 
 
 def _predict_coordinate(predictor: Any, values: np.ndarray) -> np.ndarray:
-    if isinstance(predictor, np.ndarray):
-        return np.polynomial.polynomial.polyval(values, predictor)
     return np.asarray(predictor(values), dtype=np.float64)
 
 
-def _fit_polynomial(
-    parameter: np.ndarray,
-    coordinates: np.ndarray,
-    *,
-    degree: int,
-    alpha: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if not 1 <= degree <= 12:
-        raise ValueError("Polynomial degree must be between 1 and 12.")
-    if not np.isfinite(alpha) or alpha < 0:
-        raise ValueError("Polynomial ridge alpha must be finite and non-negative.")
-    if degree >= len(parameter):
+def parse_spline_quantiles(value: str) -> list[float]:
+    """Parse a Python list of strictly increasing interior quantiles."""
+
+    try:
+        parsed = ast.literal_eval(value.strip())
+    except (SyntaxError, ValueError) as exc:
         raise ValueError(
-            f"Polynomial degree {degree} requires at least {degree + 1} unique parameter values."
-        )
-    design = np.polynomial.polynomial.polyvander(parameter, degree)
-    penalty = np.eye(degree + 1, dtype=np.float64) * alpha
-    penalty[0, 0] = 0.0
-    coefficients = np.linalg.solve(design.T @ design + penalty, design.T @ coordinates)
-    return tuple(coefficients[:, index] for index in range(3))  # type: ignore[return-value]
+            "Spline quantiles must be a valid Python list, such as [0.25, 0.5, 0.75]."
+        ) from exc
+    if not isinstance(parsed, list):
+        raise ValueError("Spline quantiles must be entered as a Python list.")
+    if any(isinstance(item, bool) or not isinstance(item, (int, float)) for item in parsed):
+        raise ValueError("Every spline quantile must be a finite number.")
+    quantiles = [float(item) for item in parsed]
+    if not np.isfinite(quantiles).all():
+        raise ValueError("Every spline quantile must be a finite number.")
+    if any(right <= left for left, right in zip(quantiles, quantiles[1:], strict=False)):
+        raise ValueError("Spline quantiles must be strictly increasing with no duplicates.")
+    if quantiles and (quantiles[0] <= 0 or quantiles[-1] >= 1):
+        raise ValueError("Spline quantiles must lie strictly between 0 and 1.")
+    return quantiles
 
 
 def _fit_splines(
@@ -136,13 +134,51 @@ def _fit_splines(
     *,
     degree: int,
     smoothing: float,
-) -> tuple[UnivariateSpline, UnivariateSpline, UnivariateSpline]:
+    knots: list[float] | None = None,
+) -> tuple[Any, Any, Any]:
     if not 1 <= degree <= 5:
         raise ValueError("Spline degree must be between 1 and 5.")
     if len(parameter) <= degree:
         raise ValueError(f"A degree-{degree} spline requires at least {degree + 1} values.")
     if not np.isfinite(smoothing) or smoothing < 0:
         raise ValueError("Spline smoothing must be finite and non-negative.")
+    interior_knots = np.asarray(knots or [], dtype=np.float64)
+    if len(interior_knots):
+        if degree != 3:
+            raise ValueError("Custom spline knots are supported only for cubic splines.")
+        if not np.isfinite(interior_knots).all() or np.any(np.diff(interior_knots) <= 0):
+            raise ValueError("Spline knots must be finite and strictly increasing.")
+        if interior_knots[0] <= parameter[0] or interior_knots[-1] >= parameter[-1]:
+            raise ValueError("Spline knots must lie strictly inside the fitted parameter range.")
+        maximum_knots = len(parameter) - degree - 1
+        if len(interior_knots) > maximum_knots:
+            raise ValueError(
+                f"At most {maximum_knots} interior knot(s) can be fitted from "
+                f"{len(parameter)} training values."
+            )
+        knot_vector = np.concatenate(
+            [
+                np.repeat(parameter[0], degree + 1),
+                interior_knots,
+                np.repeat(parameter[-1], degree + 1),
+            ]
+        )
+        try:
+            return tuple(
+                make_lsq_spline(
+                    parameter,
+                    coordinates[:, index],
+                    knot_vector,
+                    k=degree,
+                    method="qr",
+                )
+                for index in range(3)
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "The custom spline knots cannot be supported by the fitted parameter values. "
+                "Use fewer knots or move them farther apart."
+            ) from exc
     predictors = []
     for index in range(3):
         variance = max(float(np.var(coordinates[:, index])), np.finfo(np.float64).eps)
@@ -190,6 +226,58 @@ def _coordinate_metrics(actual: np.ndarray, predicted: np.ndarray) -> dict[str, 
         "r2": score,
         "coordinate_rmse": coordinate_rmse.tolist(),
     }
+
+
+def _mst_backbone(coordinates: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return the longest-path backbone of the Euclidean minimum spanning tree."""
+
+    unique_coordinates = np.unique(np.asarray(coordinates, dtype=np.float64), axis=0)
+    if len(unique_coordinates) < 3:
+        raise ValueError("A geometric spline requires at least three distinct 3D points.")
+    distances = squareform(pdist(unique_coordinates, metric="euclidean"))
+    tree = minimum_spanning_tree(distances)
+    graph = tree + tree.T
+    first_distances = dijkstra(graph, indices=0)
+    endpoint = int(np.argmax(first_distances))
+    second_distances, predecessors = dijkstra(
+        graph, indices=endpoint, return_predecessors=True
+    )
+    opposite = int(np.argmax(second_distances))
+    path = [opposite]
+    while path[-1] != endpoint:
+        predecessor = int(predecessors[path[-1]])
+        if predecessor < 0:
+            raise ValueError("Could not construct a connected geometric spline backbone.")
+        path.append(predecessor)
+    path.reverse()
+    backbone = unique_coordinates[path]
+    chord_lengths = np.linalg.norm(np.diff(backbone, axis=0), axis=1)
+    cumulative = np.concatenate([[0.0], np.cumsum(chord_lengths)])
+    if cumulative[-1] <= np.finfo(np.float64).eps:
+        raise ValueError("The geometric spline points have no measurable extent.")
+    return backbone, cumulative / cumulative[-1]
+
+
+def project_onto_curve_parameter(
+    model: CurveModel,
+    coordinates: np.ndarray,
+    *,
+    grid_size: int = 4_001,
+) -> np.ndarray:
+    """Estimate nearest-curve parameter values by dense Euclidean projection."""
+
+    points = np.asarray(coordinates, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError("Coordinates must have shape (n_points, 3).")
+    if not np.isfinite(points).all():
+        raise ValueError("Coordinates must be finite for geometric curve projection.")
+    if grid_size < 100:
+        raise ValueError("Curve projection grid size must be at least 100.")
+    bounds = np.asarray(model.training_parameter_bounds, dtype=np.float64)
+    parameter_grid = np.linspace(bounds[0], bounds[1], int(grid_size))
+    curve_grid = model.predict(parameter_grid)
+    _, nearest = cKDTree(curve_grid).query(points)
+    return parameter_grid[np.asarray(nearest, dtype=int)]
 
 
 def _expanded_coordinate_bounds(
@@ -267,11 +355,10 @@ def _sample_curve(
     return curve_parameter, model.predict(curve_parameter), display_bounds
 
 
-def fit_curve(
+def _fit_parameterized_spline(
     parameter_values: np.ndarray,
     coordinates: np.ndarray,
     *,
-    algorithm: str = "spline",
     parameters: dict[str, Any] | None = None,
     sample_count: int = 240,
     padding_fraction: float = 0.0,
@@ -283,10 +370,8 @@ def fit_curve(
     parameter_feature: str = "parameter",
     coordinate_features: tuple[str, str, str] = ("x", "y", "z"),
 ) -> CurveFitResult:
-    """Fit a 3D curve, using one observed scalar to order the points."""
+    """Internal spline fit for parameters inferred by the geometric optimizer."""
 
-    if algorithm not in CURVE_ALGORITHMS:
-        raise ValueError(f"Unknown curve algorithm: {algorithm!r}.")
     if len(coordinate_features) != 3 or len(set(coordinate_features)) != 3:
         raise ValueError("A curve requires three distinct coordinate feature names.")
     if not 0 <= validation_fraction < 0.5:
@@ -341,17 +426,46 @@ def fit_curve(
     train_xyz = train_xyz[order]
 
     model_parameters = dict(parameters or {})
-    if algorithm == "polynomial":
-        model_parameters.setdefault("degree", min(3, len(train_t) - 1))
-        model_parameters.setdefault("alpha", 1e-3)
-        predictors = _fit_polynomial(train_t, train_xyz, **model_parameters)
+    model_parameters.setdefault("degree", min(3, len(train_t) - 1))
+    model_parameters.setdefault("smoothing", 0.15)
+    raw_quantiles = model_parameters.get("knot_quantiles")
+    raw_count = model_parameters.get("knot_count")
+    if raw_quantiles is not None and raw_count is not None:
+        raise ValueError("Specify spline knot quantiles or a knot count, not both.")
+    if raw_quantiles is not None:
+        if not isinstance(raw_quantiles, list):
+            raise ValueError("Spline knot quantiles must be provided as a Python list.")
+        quantiles = parse_spline_quantiles(repr(raw_quantiles))
+        model_parameters["knot_quantiles"] = quantiles
+    elif raw_count is not None:
+        if isinstance(raw_count, bool) or not isinstance(raw_count, int) or raw_count < 0:
+            raise ValueError("Spline knot count must be a non-negative integer.")
+        quantiles = np.linspace(0, 1, raw_count + 2)[1:-1].tolist()
+        model_parameters["knot_count"] = raw_count
     else:
-        model_parameters.setdefault("degree", min(3, len(train_t) - 1))
-        model_parameters.setdefault("smoothing", 0.15)
-        predictors = _fit_splines(train_t, train_xyz, **model_parameters)
+        quantiles = []
+    normalized_knots = (
+        np.quantile(train_t, quantiles).astype(float).tolist() if quantiles else None
+    )
+    if normalized_knots is not None:
+        if len(np.unique(normalized_knots)) != len(normalized_knots):
+            raise ValueError(
+                "The selected knot quantiles produce duplicate positions. Use fewer or "
+                "more widely separated quantiles."
+            )
+        model_parameters["resolved_knots"] = [
+            float(knot * scale + center) for knot in normalized_knots
+        ]
+    predictors = _fit_splines(
+        train_t,
+        train_xyz,
+        degree=model_parameters["degree"],
+        smoothing=model_parameters["smoothing"],
+        knots=normalized_knots,
+    )
 
     model = CurveModel(
-        algorithm=algorithm,
+        algorithm="spline",
         predictors=predictors,
         parameter_feature=str(parameter_feature),
         coordinate_features=tuple(coordinate_features),
@@ -420,6 +534,126 @@ def fit_curve(
     )
 
 
+def fit_geometric_spline(
+    coordinates: np.ndarray,
+    *,
+    parameters: dict[str, Any] | None = None,
+    sample_count: int = 240,
+    padding_fraction: float = 0.0,
+    display_coordinate_bounds: np.ndarray | None = None,
+    max_fit_points: int | None = None,
+    random_state: int = 42,
+    coordinate_features: tuple[str, str, str] = ("x", "y", "z"),
+    refinement_iterations: int = 4,
+) -> CurveFitResult:
+    """Fit a 3D principal spline whose dummy parameter is inferred geometrically."""
+
+    if not 1 <= refinement_iterations <= 20:
+        raise ValueError("Geometric spline refinement iterations must be between 1 and 20.")
+    xyz = np.asarray(coordinates, dtype=np.float64)
+    if xyz.ndim != 2 or xyz.shape[1] != 3:
+        raise ValueError("Coordinates must have shape (n_points, 3).")
+    finite = np.isfinite(xyz).all(axis=1)
+    dropped_nonfinite = int((~finite).sum())
+    xyz = xyz[finite]
+    if len(xyz) < 4:
+        raise ValueError("At least four finite points are required for a geometric spline.")
+
+    if max_fit_points is None:
+        max_fit_points = min(len(xyz), 3_000)
+    if max_fit_points < 4:
+        raise ValueError("Maximum geometric spline fit points must be at least 4.")
+    rng = np.random.default_rng(random_state)
+    if len(xyz) > max_fit_points:
+        backbone_indices = np.sort(
+            rng.choice(len(xyz), size=max_fit_points, replace=False)
+        )
+        backbone_source = xyz[backbone_indices]
+    else:
+        backbone_source = xyz
+    backbone, backbone_parameter = _mst_backbone(backbone_source)
+    _, nearest_backbone = cKDTree(backbone).query(xyz)
+    parameter = backbone_parameter[np.asarray(nearest_backbone, dtype=int)]
+
+    model_parameters = dict(parameters or {})
+    model_parameters["parameterization"] = "geometric_principal_curve"
+    model_parameters["refinement_iterations"] = int(refinement_iterations)
+    fitted: CurveFitResult | None = None
+    for _ in range(refinement_iterations):
+        fitted = _fit_parameterized_spline(
+            parameter,
+            xyz,
+            parameters=model_parameters,
+            sample_count=sample_count,
+            padding_fraction=padding_fraction,
+            display_coordinate_bounds=display_coordinate_bounds,
+            duplicate_reducer="mean",
+            max_fit_points=max_fit_points,
+            validation_fraction=0.0,
+            random_state=random_state,
+            parameter_feature="t",
+            coordinate_features=coordinate_features,
+        )
+        updated_parameter = project_onto_curve_parameter(fitted.model, xyz)
+        if np.max(np.abs(updated_parameter - parameter)) < 1e-5:
+            parameter = updated_parameter
+            break
+        parameter = updated_parameter
+    assert fitted is not None
+    fitted = _fit_parameterized_spline(
+        parameter,
+        xyz,
+        parameters=model_parameters,
+        sample_count=sample_count,
+        padding_fraction=padding_fraction,
+        display_coordinate_bounds=display_coordinate_bounds,
+        duplicate_reducer="mean",
+        max_fit_points=max_fit_points,
+        validation_fraction=0.0,
+        random_state=random_state,
+        parameter_feature="t",
+        coordinate_features=coordinate_features,
+    )
+    parameter = project_onto_curve_parameter(fitted.model, xyz, grid_size=10_001)
+    point_prediction = fitted.model.predict(parameter)
+    geometric_metrics = _coordinate_metrics(xyz, point_prediction)
+    curve_parameter = np.linspace(
+        *fitted.model.training_parameter_bounds,
+        int(sample_count),
+    )
+    metrics = {
+        **fitted.metrics,
+        "input_points": int(len(finite)),
+        "finite_points": int(finite.sum()),
+        "dropped_nonfinite": dropped_nonfinite,
+        "fit_points": int(len(xyz)),
+        "validation_points": 0,
+        "train_rmse_3d": geometric_metrics["rmse_3d"],
+        "train_mae_3d": geometric_metrics["mae_3d"],
+        "train_r2": geometric_metrics["r2"],
+        "train_coordinate_rmse": geometric_metrics["coordinate_rmse"],
+        "geometric_rmse_3d": geometric_metrics["rmse_3d"],
+        "geometric_mae_3d": geometric_metrics["mae_3d"],
+    }
+    warnings = [
+        warning
+        for warning in fitted.warnings
+        if not warning.startswith("Held-out validation")
+    ]
+    if dropped_nonfinite:
+        warnings.append(f"Dropped {dropped_nonfinite:,} non-finite row(s).")
+    return CurveFitResult(
+        model=fitted.model,
+        curve_parameter=curve_parameter,
+        curve_xyz=fitted.model.predict(curve_parameter),
+        point_parameter=parameter,
+        point_xyz=xyz,
+        point_prediction=point_prediction,
+        metrics=metrics,
+        warnings=tuple(dict.fromkeys(warnings)),
+    )
+
+
 def evaluate_curve_model(
     model: CurveModel,
     parameter_values: np.ndarray,
@@ -483,6 +717,10 @@ def evaluate_curve_model(
 def _validate_curve_model(model: CurveModel) -> None:
     if not isinstance(model, CurveModel) or model.algorithm not in CURVE_ALGORITHMS:
         raise ValueError("The artifact does not contain a supported fitted curve model.")
+    if model.parameters.get("parameterization") != "geometric_principal_curve":
+        raise ValueError("Only geometric spline curve artifacts are supported.")
+    if model.parameter_feature != "t":
+        raise ValueError("A geometric spline artifact must use the dummy parameter 't'.")
     if len(model.predictors) != 3 or len(model.coordinate_features) != 3:
         raise ValueError("The fitted curve must contain exactly three coordinate predictors.")
     if not np.isfinite(model.parameter_center) or not np.isfinite(model.parameter_scale):

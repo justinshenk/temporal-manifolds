@@ -40,13 +40,16 @@ from temporal_manifolds.viz.activation_explorer import (
     prepare_projection,
     prepare_projection_from_matrix,
     projection_details_table,
+    reconstruction_residual_rms,
     select_activation_batch_uploads,
     serialize_pca_model,
     serialize_pls_model,
     transform_pca_projection,
 )
-from temporal_manifolds.viz.curve_fitting import fit_curve, serialize_curve_model
-from temporal_manifolds.viz.extruded_spline_surface import serialize_extruded_surface
+from temporal_manifolds.viz.curve_fitting import serialize_curve_model
+from temporal_manifolds.geometry.extrusion.rms_spline_surface_transformer import (
+    serialize_rms_spline_surface,
+)
 
 
 def test_pca_projection_fingerprint_includes_whitening_scale() -> None:
@@ -139,7 +142,7 @@ def test_app_exposes_multiple_local_and_uploaded_folder_controls() -> None:
 
 def test_curve_overlay_is_available_only_for_three_dimensional_plots(tmp_path: Path) -> None:
     path = tmp_path / "activations_batch_000.pt"
-    _batch(path)
+    _curve_batch(path)
     app_path = Path(__file__).resolve().parents[1] / "apps" / "activation_explorer.py"
     app = AppTest.from_file(app_path)
     app.session_state["sources"] = [str(path)]
@@ -150,14 +153,25 @@ def test_curve_overlay_is_available_only_for_three_dimensional_plots(tmp_path: P
     app.run(timeout=30)
 
     assert not app.exception
+    x_axis = next(selectbox for selectbox in app.selectbox if selectbox.label == "X axis")
+    assert "reconstruction_residual_rms" in x_axis.options
+    x_axis.set_value("reconstruction_residual_rms").run(timeout=30)
+    assert not app.exception
+    next(selectbox for selectbox in app.selectbox if selectbox.label == "X axis").set_value(
+        "PC1"
+    ).run(timeout=30)
+    assert not app.exception
     assert "Curve overlay" in [toggle.label for toggle in app.toggle]
     assert "Extruded surface" in [toggle.label for toggle in app.toggle]
     curve_toggle = next(toggle for toggle in app.toggle if toggle.label == "Curve overlay")
     curve_toggle.set_value(True).run(timeout=30)
 
     assert not app.exception
-    assert "Curve parameter" in [selectbox.label for selectbox in app.selectbox]
+    assert "Curve parameter" not in [selectbox.label for selectbox in app.selectbox]
     assert "Curve padding" in [slider.label for slider in app.slider]
+    assert "Knot quantiles (Python list)" in [
+        text_input.label for text_input in app.text_input
+    ]
     fit_curve_button = next(
         button for button in app.button if button.label == "Fit / update curve"
     )
@@ -166,20 +180,12 @@ def test_curve_overlay_is_available_only_for_three_dimensional_plots(tmp_path: P
     assert not app.exception
     assert app.session_state["curve_result"] is not None
     displayed_curve = app.session_state["curve_result"]
-    cubic_parameter = np.linspace(
-        *displayed_curve.model.training_parameter_bounds,
-        4,
+    assert displayed_curve.model.parameter_feature == "t"
+    assert (
+        displayed_curve.model.parameters["parameterization"]
+        == "geometric_principal_curve"
     )
-    cubic_spline = fit_curve(
-        cubic_parameter,
-        displayed_curve.model.predict(cubic_parameter),
-        algorithm="spline",
-        parameter_feature=displayed_curve.model.parameter_feature,
-        coordinate_features=displayed_curve.model.coordinate_features,
-        parameters={"degree": 3, "smoothing": 0.0},
-        validation_fraction=0.0,
-    )
-    cubic_spline_bytes = serialize_curve_model(cubic_spline.model)
+    cubic_spline_bytes = serialize_curve_model(displayed_curve.model)
     curve_mode = next(
         control for control in app.segmented_control if control.label == "Curve model"
     )
@@ -209,8 +215,8 @@ def test_curve_overlay_is_available_only_for_three_dimensional_plots(tmp_path: P
     extrusion_degree = next(
         control for control in app.segmented_control if control.label == "Extrusion degree"
     )
-    assert extrusion_degree.options == ["Linear", "Quadratic"]
-    extrusion_degree.set_value("Quadratic").run(timeout=30)
+    assert extrusion_degree.options == ["Linear", "Quadratic", "Cubic"]
+    extrusion_degree.set_value("Cubic").run(timeout=30)
     update_extrusion = next(
         button for button in app.button if button.label == "Fit / update extrusion"
     )
@@ -221,9 +227,9 @@ def test_curve_overlay_is_available_only_for_three_dimensional_plots(tmp_path: P
         error.value for error in app.error
     ]
     assert app.session_state["loaded_extruded_surface_result"] is not None
-    assert app.session_state["loaded_extruded_surface_model"].extrusion_degree == 2
+    assert app.session_state["loaded_extruded_surface_model"].degree == 3
     assert "Download extruded surface" in [button.label for button in app.download_button]
-    extruded_surface_bytes = serialize_extruded_surface(
+    extruded_surface_bytes = serialize_rms_spline_surface(
         app.session_state["loaded_extruded_surface_model"]
     )
     extrusion_source = next(
@@ -247,8 +253,16 @@ def test_curve_overlay_is_available_only_for_three_dimensional_plots(tmp_path: P
 
     assert not app.exception
     assert app.session_state["loaded_extruded_surface_result"] is not None
-    assert app.session_state["loaded_extruded_surface_model"].extrusion_degree == 2
+    assert app.session_state["loaded_extruded_surface_model"].degree == 3
     assert "Download extruded surface" in [button.label for button in app.download_button]
+    projection_method = next(
+        selectbox
+        for selectbox in app.selectbox
+        if selectbox.label == "Point projection method"
+    )
+    assert projection_method.options == [
+        "Nearest point on the curve (Euclidean distance)"
+    ]
     plot_control = next(control for control in app.segmented_control if control.label == "Plot")
     plot_control.set_value("2D").run(timeout=30)
 
@@ -278,6 +292,33 @@ def _batch(path: Path) -> None:
         {
             "sample_indices": [10, 11, 12, 13],
             "prompts": ["a", "b", "c", "d"],
+            "prompt_metadata": metadata,
+            "layer_component": TARGET_LAYER_COMPONENT,
+            "positions": [PROMPT_TOKEN_POSITION],
+            "activations": {TARGET_LAYER_COMPONENT: tensor},
+        },
+        path,
+    )
+
+
+def _curve_batch(path: Path) -> None:
+    metadata = [
+        {
+            "base_value": value,
+            "base_unit": "months",
+            "template_metadata": {
+                "prompt_framing": "task_available_time",
+                "output_format": "steps",
+            },
+        }
+        for value in (1, 2, 4, 8, 16, 32, 64, 128)
+    ]
+    generator = torch.Generator().manual_seed(17)
+    tensor = torch.randn(8, 1, 8, generator=generator)
+    torch.save(
+        {
+            "sample_indices": list(range(8)),
+            "prompts": [f"curve-{index}" for index in range(8)],
             "prompt_metadata": metadata,
             "layer_component": TARGET_LAYER_COMPONENT,
             "positions": [PROMPT_TOKEN_POSITION],
@@ -624,6 +665,30 @@ def test_load_pca_model_accepts_raw_pickle_and_rejects_invalid_models() -> None:
         load_pca_model(pickle.dumps(PCA(n_components=2)))
     with pytest.raises(ValueError, match="not a supported PCA model artifact"):
         load_pca_model(pickle.dumps({"model": fitted}))
+
+
+@pytest.mark.parametrize("model_kind", ["pca", "pls"])
+def test_reconstruction_residual_rms_records_one_scalar_per_point(model_kind: str) -> None:
+    rng = np.random.default_rng(123)
+    values = rng.normal(size=(12, 5))
+    if model_kind == "pca":
+        model = PCA(n_components=2).fit(values)
+    else:
+        model = PLSRegression(n_components=2).fit(values, rng.normal(size=12))
+    scores = model.transform(values)
+
+    actual = reconstruction_residual_rms(
+        values,
+        None,
+        np.arange(len(values)),
+        scores,
+        model,
+        batch_size=5,
+    )
+    expected = np.sqrt(np.mean((values - model.inverse_transform(scores)) ** 2, axis=1))
+
+    assert actual.shape == (len(values),)
+    assert np.allclose(actual, expected)
 
 
 def test_saved_pls_round_trip_reproduces_projection() -> None:

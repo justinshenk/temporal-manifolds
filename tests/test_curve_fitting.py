@@ -6,138 +6,133 @@ from dataclasses import replace
 import joblib
 import numpy as np
 import pytest
+from scipy.interpolate import BSpline
 
 from temporal_manifolds.viz.curve_fitting import (
-    CURVE_ALGORITHMS,
+    CURVE_MODEL_ARTIFACT_VERSION,
     evaluate_curve_model,
-    fit_curve,
+    fit_geometric_spline,
     load_curve_model,
+    parse_spline_quantiles,
+    project_onto_curve_parameter,
     serialize_curve_model,
 )
 
 
-def _trajectory(size: int = 80) -> tuple[np.ndarray, np.ndarray]:
-    parameter = np.linspace(-2.0, 2.0, size)
-    coordinates = np.column_stack(
-        [parameter, parameter**2 - 1.0, np.sin(parameter * 1.5)]
-    )
-    return parameter, coordinates
-
-
-@pytest.mark.parametrize("algorithm", list(CURVE_ALGORITHMS))
-def test_every_curve_algorithm_fits_a_three_dimensional_line(algorithm: str) -> None:
-    parameter, coordinates = _trajectory()
-    parameters = (
-        {"degree": 3, "alpha": 1e-5}
-        if algorithm == "polynomial"
-        else {"degree": 3, "smoothing": 0.01}
+def _trajectory(size: int = 80) -> np.ndarray:
+    parameter = np.linspace(0.0, 1.0, size)
+    return np.column_stack(
+        [
+            np.cos(np.pi * parameter),
+            np.sin(np.pi * parameter),
+            2.0 * parameter - 1.0,
+        ]
     )
 
-    result = fit_curve(
-        parameter,
+
+def test_geometric_spline_fits_a_three_dimensional_curve() -> None:
+    coordinates = _trajectory()
+    result = fit_geometric_spline(
         coordinates,
-        algorithm=algorithm,
-        parameters=parameters,
+        parameters={"degree": 3, "smoothing": 0.01},
         sample_count=101,
-        validation_fraction=0.2,
-        parameter_feature="time",
         coordinate_features=("PC1", "PC2", "PC3"),
     )
 
     assert result.curve_xyz.shape == (101, 3)
     assert result.point_prediction.shape == coordinates.shape
-    assert result.model.parameter_feature == "time"
+    assert result.model.parameter_feature == "t"
     assert result.model.coordinate_features == ("PC1", "PC2", "PC3")
-    assert result.metrics["validation_points"] == 16
-    assert result.metrics["validation_rmse_3d"] is not None
+    assert result.model.parameters["parameterization"] == "geometric_principal_curve"
+    assert np.all((result.point_parameter >= 0) & (result.point_parameter <= 1))
+    assert result.metrics["geometric_rmse_3d"] < 0.02
 
 
-def test_duplicate_parameters_are_reduced_before_curve_fit() -> None:
-    parameter, coordinates = _trajectory(12)
-    duplicated_parameter = np.repeat(parameter, 2)
-    duplicated_coordinates = np.repeat(coordinates, 2, axis=0)
-    duplicated_coordinates[1::2] += 0.1
-
-    result = fit_curve(
-        duplicated_parameter,
-        duplicated_coordinates,
-        algorithm="polynomial",
-        parameters={"degree": 3, "alpha": 0.0},
-        validation_fraction=0.0,
-    )
-
-    assert result.metrics["duplicates_merged"] == 12
-    assert result.metrics["unique_parameter_values"] == 12
-
-
-def test_curve_extends_to_display_bounds_and_padding_extends_further() -> None:
-    parameter = np.linspace(-1.0, 1.0, 81)
-    base = parameter**3 - parameter
-    coordinates = np.column_stack([base, 2.0 * base, -0.5 * base])
-    options = {
-        "algorithm": "polynomial",
-        "parameters": {"degree": 3, "alpha": 0.0},
-        "sample_count": 121,
-        "validation_fraction": 0.0,
-    }
-
-    default_result = fit_curve(parameter, coordinates, **options)
-    padded_result = fit_curve(parameter, coordinates, padding_fraction=0.5, **options)
-
-    assert default_result.curve_parameter[0] < parameter.min()
-    assert default_result.curve_parameter[-1] > parameter.max()
-    assert padded_result.curve_parameter[0] < default_result.curve_parameter[0]
-    assert padded_result.curve_parameter[-1] > default_result.curve_parameter[-1]
-    assert default_result.metrics["display_padding_fraction"] == 0.0
-    assert padded_result.metrics["display_padding_fraction"] == 0.5
-
-
-def test_saved_curve_round_trip_and_current_data_evaluation() -> None:
-    parameter, coordinates = _trajectory()
-    fitted = fit_curve(
-        parameter,
+def test_cubic_spline_places_knots_at_requested_quantiles() -> None:
+    coordinates = _trajectory()
+    quantiles = [0.25, 0.5, 0.75]
+    result = fit_geometric_spline(
         coordinates,
-        algorithm="polynomial",
-        parameters={"degree": 5, "alpha": 1e-6},
-        parameter_feature="log_time",
-        coordinate_features=("PLS1", "PLS2", "PLS3"),
+        parameters={"degree": 3, "smoothing": 0.02, "knot_quantiles": quantiles},
+        refinement_iterations=1,
     )
+
+    assert result.model.parameters["knot_quantiles"] == quantiles
+    assert len(result.model.parameters["resolved_knots"]) == len(quantiles)
+    assert all(isinstance(predictor, BSpline) for predictor in result.model.predictors)
+
+
+def test_cubic_spline_accepts_total_interior_knot_count() -> None:
+    result = fit_geometric_spline(
+        _trajectory(),
+        parameters={"degree": 3, "smoothing": 0.02, "knot_count": 4},
+        refinement_iterations=1,
+    )
+
+    assert result.model.parameters["knot_count"] == 4
+    assert len(result.model.parameters["resolved_knots"]) == 4
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("(0.25, 0.5, 0.75)", "Python list"),
+        ("[0.25, 0.5, 0.5]", "strictly increasing"),
+        ("[0.25, 'half', 0.75]", "finite number"),
+        ("[0, 0.5, 0.75]", "strictly between"),
+    ],
+)
+def test_spline_quantile_parser_rejects_invalid_lists(value: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_spline_quantiles(value)
+
+
+def test_geometric_spline_is_independent_of_input_row_order() -> None:
+    rng = np.random.default_rng(5)
+    coordinates = _trajectory(120)
+    coordinates += rng.normal(scale=0.01, size=coordinates.shape)
+    rng.shuffle(coordinates)
+
+    result = fit_geometric_spline(
+        coordinates,
+        parameters={"degree": 3, "smoothing": 0.02, "knot_count": 6},
+        sample_count=200,
+    )
+
+    assert result.metrics["geometric_rmse_3d"] < 0.03
+
+
+def test_saved_geometric_curve_round_trip_and_projection() -> None:
+    coordinates = _trajectory()
+    fitted = fit_geometric_spline(coordinates)
     artifact = serialize_curve_model(
         fitted.model,
-        metadata={"direction_method": "PLS", "pca_sha256": "abc"},
+        metadata={"direction_method": "PCA", "pca_sha256": "abc"},
     )
 
     restored, provenance = load_curve_model(artifact)
-    evaluated = evaluate_curve_model(
-        restored,
-        parameter,
-        coordinates,
-        sample_count=151,
-        padding_fraction=0.1,
-    )
+    parameter = project_onto_curve_parameter(restored, coordinates)
+    evaluated = evaluate_curve_model(restored, parameter, coordinates, sample_count=151)
 
-    assert np.allclose(restored.predict(parameter), fitted.model.predict(parameter))
     assert evaluated.curve_xyz.shape == (151, 3)
-    assert provenance["direction_method"] == "PLS"
-    assert provenance["artifact_version"] == 1
-    assert evaluated.metrics["current_rmse_3d"] is not None
+    assert evaluated.metrics["current_rmse_3d"] < 0.02
+    assert provenance["artifact_version"] == CURVE_MODEL_ARTIFACT_VERSION
 
 
-def test_curve_artifact_validation_rejects_unversioned_and_invalid_models() -> None:
-    parameter, coordinates = _trajectory()
-    fitted = fit_curve(parameter, coordinates, validation_fraction=0.0)
-    raw = io.BytesIO()
-    joblib.dump(fitted.model, raw)
-    with pytest.raises(ValueError, match="not a supported curve model artifact"):
-        load_curve_model(raw.getvalue())
+def test_legacy_curve_models_and_artifact_versions_are_rejected() -> None:
+    fitted = fit_geometric_spline(_trajectory())
+    legacy_model = replace(fitted.model, parameters={"degree": 3, "smoothing": 0.1})
+    with pytest.raises(ValueError, match="Only geometric spline"):
+        serialize_curve_model(legacy_model)
 
-    invalid = replace(fitted.model, parameter_scale=0.0)
-    with pytest.raises(ValueError, match="scale must be positive"):
-        serialize_curve_model(invalid)
+    payload = joblib.load(io.BytesIO(serialize_curve_model(fitted.model)))
+    payload["artifact_version"] = 1
+    buffer = io.BytesIO()
+    joblib.dump(payload, buffer)
+    with pytest.raises(ValueError, match="Unsupported curve artifact version"):
+        load_curve_model(buffer.getvalue())
 
-    with pytest.raises(ValueError, match="At least three distinct"):
-        fit_curve(
-            np.array([1.0, 1.0, 1.0]),
-            np.zeros((3, 3)),
-            validation_fraction=0.0,
-        )
+
+def test_geometric_spline_requires_distinct_finite_geometry() -> None:
+    with pytest.raises(ValueError, match="distinct 3D points"):
+        fit_geometric_spline(np.zeros((5, 3)))
