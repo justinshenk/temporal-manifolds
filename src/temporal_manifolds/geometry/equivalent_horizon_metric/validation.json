@@ -1,0 +1,92 @@
+{
+  "protocol": "5-fold GroupKFold; complete tasks held out; all conv rows excluded before splitting",
+  "residual_degree": 4,
+  "ridge": 1e-05,
+  "input_rows": 5742,
+  "excluded_conv_rows": 974,
+  "analysis_rows": 4768,
+  "folders_analyzed": {
+    "abst": 2820,
+    "nof_conv": 974,
+    "plain": 974
+  },
+  "fold_mean_baseline": {
+    "equal_horizon_pairwise_rms": 19.948455804823702,
+    "horizon_centroid_rms": 36.45710357910191,
+    "normalized_equal_horizon_rms": 0.5565955471199546
+  },
+  "fold_mean_transformed": {
+    "equal_horizon_pairwise_rms": 13.364620673759726,
+    "horizon_centroid_rms": 33.99683287546229,
+    "normalized_equal_horizon_rms": 0.39236813344182264,
+    "median_step_length_ratio": 0.6061805430032884,
+    "median_absolute_step_length_change": 0.3952420573846904,
+    "median_within_trajectory_distance_correlation": 0.9663744495885209
+  },
+  "fold_mean_improvement": {
+    "equal_horizon_pairwise_rms": 0.3300423449053109,
+    "normalized_equal_horizon_rms": 0.2950570023923288
+  },
+  "combined_out_of_fold": {
+    "equal_horizon_pairwise_rms": 15.095036862748751,
+    "horizon_centroid_rms": 33.57031997240153,
+    "normalized_equal_horizon_rms": 0.4496542444384957,
+    "median_step_length_ratio": 0.6071815834359278,
+    "median_absolute_step_length_change": 0.3946140749093474,
+    "median_within_trajectory_distance_correlation": 0.9704630860356593
+  },
+  "full_data_baseline": {
+    "equal_horizon_pairwise_rms": 21.375111190078332,
+    "horizon_centroid_rms": 35.54256605590645,
+    "normalized_equal_horizon_rms": 0.6013947095563243
+  },
+  "by_folder_combined_out_of_fold": {
+    "abst": {
+      "before": {
+        "equal_horizon_pairwise_rms": 16.83738748543126,
+        "horizon_centroid_rms": 36.50431291239947,
+        "normalized_equal_horizon_rms": 0.4612437857914614
+      },
+      "after": {
+        "equal_horizon_pairwise_rms": 9.850810344175931,
+        "horizon_centroid_rms": 33.721427379060856,
+        "normalized_equal_horizon_rms": 0.2921231724103334
+      }
+    },
+    "nof_conv": {
+      "before": {
+        "equal_horizon_pairwise_rms": 28.406570583457952,
+        "horizon_centroid_rms": 36.71948054442651,
+        "normalized_equal_horizon_rms": 0.7736103605575014
+      },
+      "after": {
+        "equal_horizon_pairwise_rms": 21.01069819024672,
+        "horizon_centroid_rms": 36.71192401331205,
+        "normalized_equal_horizon_rms": 0.5723126410543906
+      }
+    },
+    "plain": {
+      "before": {
+        "equal_horizon_pairwise_rms": 20.946872761464856,
+        "horizon_centroid_rms": 22.185815022268006,
+        "normalized_equal_horizon_rms": 0.944156107875252
+      },
+      "after": {
+        "equal_horizon_pairwise_rms": 15.513352568324933,
+        "horizon_centroid_rms": 22.73819781654103,
+        "normalized_equal_horizon_rms": 0.682259548161713
+      }
+    }
+  },
+  "cross_folder_horizon_centroid_distance": {
+    "before": {
+      "pair_count": 282,
+      "rms": 23.90982186146586
+    },
+    "after": {
+      "pair_count": 282,
+      "rms": 20.55805597765623
+    }
+  },
+  "note": "The normalized metric divides equal-horizon RMS distance by the RMS spread of horizon centroids, preventing trivial global shrinkage."
+}

@@ -28,6 +28,15 @@ from temporal_manifolds.geometry.extrusion.rms_spline_surface_transformer import
     evaluate_rms_spline_surface,
     serialize_rms_spline_surface,
 )
+from temporal_manifolds.geometry.equivalent_horizon_metric.equivalent_horizon_metric_transform import (
+    DEFAULT_RESIDUAL_DEGREE as DEFAULT_METRIC_RESIDUAL_DEGREE,
+    DEFAULT_RIDGE as DEFAULT_METRIC_RIDGE,
+    apply_coordinate_metric_transform,
+    coordinate_metric_diagnostics,
+    fit_coordinate_metric_transform,
+    load_metric_transform,
+    serialize_metric_transform,
+)
 from temporal_manifolds.viz.activation_explorer import (
     PCA_PROJECTION_FINGERPRINT_VERSION,
     SOURCE_FOLDER_FIELD,
@@ -58,6 +67,7 @@ from temporal_manifolds.viz.curve_fitting import (
     CurveFitResult,
     evaluate_curve_model,
     fit_geometric_spline,
+    geometric_spline_endpoint_defaults,
     load_curve_model,
     parse_spline_quantiles,
     project_onto_curve_parameter,
@@ -115,6 +125,14 @@ def reset_loaded_data() -> None:
         "projection",
         "pca",
         "details",
+        "coordinate_metric_identity",
+        "coordinate_metric_projection",
+        "coordinate_metric_transform",
+        "coordinate_metric_metadata",
+        "coordinate_metric_diagnostics",
+        "coordinate_metric_validation",
+        "coordinate_metric_model_source",
+        "coordinate_metric_axis_default_identity",
         "surface_result",
         "surface_identity",
         "surface_benchmark",
@@ -158,6 +176,20 @@ def clear_surface_fits() -> None:
         st.session_state.pop(key, None)
 
 
+def clear_coordinate_metric_result() -> None:
+    """Discard a transform fitted against a previous projection or configuration."""
+
+    for key in (
+        "coordinate_metric_identity",
+        "coordinate_metric_projection",
+        "coordinate_metric_transform",
+        "coordinate_metric_metadata",
+        "coordinate_metric_diagnostics",
+        "coordinate_metric_axis_default_identity",
+    ):
+        st.session_state.pop(key, None)
+
+
 def clear_visual_filters() -> None:
     for key in list(st.session_state):
         if key == "visual_filter_fields" or key.startswith("visual_filter::"):
@@ -182,6 +214,18 @@ def forget_loaded_pls() -> None:
         "loaded_pls_model",
         "loaded_pls_provenance",
         "loaded_pls_filename",
+    ):
+        st.session_state.pop(key, None)
+
+
+def forget_loaded_coordinate_metric() -> None:
+    clear_coordinate_metric_result()
+    for key in (
+        "coordinate_metric_model_upload",
+        "loaded_coordinate_metric_digest",
+        "loaded_coordinate_metric_model",
+        "loaded_coordinate_metric_artifact",
+        "loaded_coordinate_metric_filename",
     ):
         st.session_state.pop(key, None)
 
@@ -247,6 +291,15 @@ def fit_geometric_spline_cached(
     """Cache a geometric principal-spline fit."""
 
     return fit_geometric_spline(coordinates, **options)
+
+
+@st.cache_data(max_entries=32, show_spinner=False)
+def geometric_spline_endpoint_defaults_cached(
+    coordinates: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Cache automatic PLS endpoint suggestions for the current point cloud."""
+
+    return geometric_spline_endpoint_defaults(coordinates)
 
 
 def fit_pls_projection(
@@ -1034,6 +1087,17 @@ def new_curve_controls(
         )
         st.caption(CURVE_DESCRIPTIONS[algorithm])
 
+        if direction_method != "PLS" or set(coordinate_features) != {
+            "PLS1",
+            "PLS2",
+            "PLS3",
+        }:
+            st.warning(
+                "Endpoint-constrained curve fitting requires a 3D PLS plot using "
+                "PLS1, PLS2, and PLS3."
+            )
+            return None, {}
+
         curve_source = plot_data if fit_scope == "Visible" else projection
         coordinates = curve_source[list(coordinate_features)].to_numpy(dtype=np.float64)
         finite = np.isfinite(coordinates).all(axis=1)
@@ -1057,6 +1121,45 @@ def new_curve_controls(
             return None, {}
 
         with st.form(f"curve_fit_form::{algorithm}"):
+            default_start, default_end = geometric_spline_endpoint_defaults_cached(coordinates)
+            endpoint_by_feature = {
+                feature: (default_start[index], default_end[index])
+                for index, feature in enumerate(coordinate_features)
+            }
+            st.markdown("**Required endpoints in PLS coordinates**")
+            endpoint_columns = st.columns(3)
+            entered_endpoints: dict[str, tuple[float, float]] = {}
+            for column, feature in zip(endpoint_columns, ("PLS1", "PLS2", "PLS3"), strict=True):
+                start_default, end_default = endpoint_by_feature[feature]
+                entered_endpoints[feature] = (
+                    float(
+                        column.number_input(
+                            f"Start {feature}",
+                            value=float(start_default),
+                            format="%.8g",
+                            key=f"curve_start_{feature.lower()}",
+                            persist_state="page",
+                        )
+                    ),
+                    float(
+                        column.number_input(
+                            f"End {feature}",
+                            value=float(end_default),
+                            format="%.8g",
+                            key=f"curve_end_{feature.lower()}",
+                            persist_state="page",
+                        )
+                    ),
+                )
+            start_point = np.array(
+                [entered_endpoints[feature][0] for feature in coordinate_features],
+                dtype=np.float64,
+            )
+            end_point = np.array(
+                [entered_endpoints[feature][1] for feature in coordinate_features],
+                dtype=np.float64,
+            )
+
             st.markdown("**Model controls**")
             model_columns = st.columns(2)
             maximum_degree = min(5, unique_count - 1)
@@ -1175,8 +1278,8 @@ def new_curve_controls(
                 format="%d%%",
                 key=f"curve_common::{algorithm}::padding",
                 help=(
-                    "At 0%, each curve end reaches the visible plot boundary. Increase this "
-                    "to extrapolate beyond that box."
+                    "Extends the curve before t=0 and after t=1 along its endpoint "
+                    "tangents. The specified endpoints remain fixed at t=0 and t=1."
                 ),
                 persist_state="page",
             )
@@ -1189,6 +1292,8 @@ def new_curve_controls(
 
         fit_options = {
             "parameters": model_parameters,
+            "start_point": start_point,
+            "end_point": end_point,
             "sample_count": sample_count,
             "padding_fraction": padding_percent / 100.0,
             "display_coordinate_bounds": display_coordinate_bounds,
@@ -1206,9 +1311,6 @@ def new_curve_controls(
             fit_scope,
             algorithm,
             CURVE_MODEL_ARTIFACT_VERSION,
-            knot_mode,
-            knot_quantile_text,
-            knot_count,
             repr(fit_options),
         )
         if fit_submitted:
@@ -1474,8 +1576,7 @@ def loaded_curve_controls(
             format="%d%%",
             key="loaded_curve_padding",
             help=(
-                "At 0%, each curve end reaches the visible plot boundary. Increase this to "
-                "extrapolate beyond that box."
+                "Extends the saved curve beyond t=0 and t=1 along its endpoint tangents."
             ),
             persist_state="page",
         )
@@ -3000,6 +3101,7 @@ if st.session_state.get("slice_key") != slice_key:
         st.session_state.slice_key = slice_key
         st.session_state.pop("prepared_key", None)
         st.session_state.pop("pca_key", None)
+        clear_coordinate_metric_result()
         clear_surface_fits()
     except Exception as exc:  # noqa: BLE001 - surface local extraction errors in the UI
         st.error(f"Activation slice could not be prepared: {exc}")
@@ -3062,6 +3164,7 @@ if st.session_state.get("prepared_key") != prepared_key:
         st.session_state.prepared_metadata = prepared_metadata
         st.session_state.prepared_details = prepared_details
         st.session_state.pop("pca_key", None)
+        clear_coordinate_metric_result()
         clear_surface_fits()
     except Exception as exc:  # noqa: BLE001 - surface analysis/data errors in the UI
         st.error(f"Analysis data could not be prepared: {exc}")
@@ -3132,29 +3235,32 @@ if st.session_state.get("pca_key") != pca_key:
                 projection[score_fields].to_numpy(),
                 pca,
             )
+            if (
+                "log10_time_horizon_months" not in projection
+                and "time_horizon_months" in projection
+            ):
+                time_horizons = pd.to_numeric(
+                    projection["time_horizon_months"], errors="coerce"
+                ).to_numpy(dtype=np.float64)
+                if np.isfinite(time_horizons).all() and np.all(time_horizons > 0):
+                    projection["log10_time_horizon_months"] = np.log10(time_horizons)
         st.session_state.pca_key = pca_key
         st.session_state.projection = projection
         st.session_state.pca = pca
         st.session_state.details = details
+        clear_coordinate_metric_result()
         clear_surface_fits()
     except Exception as exc:  # noqa: BLE001 - surface analysis/data errors in the UI
         st.error(f"{direction_method} projection could not be prepared: {exc}")
         st.stop()
 
-projection: pd.DataFrame = st.session_state.projection
+base_projection: pd.DataFrame = st.session_state.projection
+projection = base_projection
 details = st.session_state.details
 active_pca = st.session_state.pca
 component_count = int(active_pca.components_.shape[0])
 direction_prefix = "PC" if direction_method == "PCA" else "PLS"
 pc_fields = [f"{direction_prefix}{index}" for index in range(1, component_count + 1)]
-axis_fields = [*pc_fields, "reconstruction_residual_rms"]
-metadata_fields = sorted(
-    column for column in projection if column not in {*pc_fields, "sample_index"}
-)
-color_fields = [
-    "log10_time_horizon_months",
-    *[field for field in metadata_fields if field != "log10_time_horizon_months"],
-]
 
 metric_columns = st.columns(4)
 metric_columns[0].metric("Source samples", f"{details['loaded_samples']:,}")
@@ -3166,6 +3272,345 @@ variance_metric_label = (
 metric_columns[3].metric(variance_metric_label, f"{sum(details['explained_variance']):.1%}")
 if details.get("pca_source") == "loaded":
     st.caption("Explained variance describes the loaded model's original training data.")
+
+metric_input_fields = tuple(pc_fields[:3])
+metric_transform_available = (
+    component_count >= 3
+    and "log10_time_horizon_months" in base_projection
+    and "reconstruction_residual_rms" in base_projection
+)
+transformed_pc_fields: list[str] = []
+with st.container(border=True):
+    st.subheader("Equivalent-horizon coordinate transform")
+    st.caption(
+        "Fit or apply a three-dimensional Fisher metric after the current PCA or PLS projection. "
+        "The original coordinates remain available alongside the transformed coordinates."
+    )
+    metric_transform_enabled = st.toggle(
+        "Apply coordinate transform",
+        value=False,
+        key="coordinate_metric_enabled",
+        disabled=not metric_transform_available,
+        help=(
+            "Uses the first three projected coordinates, reconstruction residual RMS, and "
+            "log10 time horizon."
+        ),
+        persist_state="page",
+    )
+    if component_count < 3:
+        st.info("Fit or load at least three PCA/PLS components to enable this transform.")
+    elif "log10_time_horizon_months" not in base_projection:
+        st.info("The projection needs positive time-horizon metadata to fit this transform.")
+    elif metric_transform_enabled:
+        with st.form("coordinate_metric_configuration", border=False):
+            configuration_columns = st.columns(2)
+            metric_residual_degree = int(
+                configuration_columns[0].number_input(
+                    "Residual polynomial degree",
+                    min_value=1,
+                    max_value=20,
+                    value=DEFAULT_METRIC_RESIDUAL_DEGREE,
+                    step=1,
+                    key="coordinate_metric_residual_degree",
+                    help="Highest reconstruction-residual power included in the fit.",
+                    persist_state="page",
+                )
+            )
+            metric_ridge = float(
+                configuration_columns[1].number_input(
+                    "Ridge regularization",
+                    min_value=0.0,
+                    value=DEFAULT_METRIC_RIDGE,
+                    step=DEFAULT_METRIC_RIDGE,
+                    format="%.2e",
+                    key="coordinate_metric_ridge",
+                    help="Diagonal regularization added to within-horizon scatter.",
+                    persist_state="page",
+                )
+            )
+            metric_fit_submitted = st.form_submit_button(
+                "Fit and apply transform",
+                type="primary",
+                icon=":material/linear_scale:",
+                width="stretch",
+            )
+
+        fit_metric_identity = (
+            pca_key,
+            "fitted",
+            metric_input_fields,
+            metric_residual_degree,
+            metric_ridge,
+        )
+        metric_identity = fit_metric_identity
+        if metric_fit_submitted:
+            try:
+                with st.spinner("Fitting equivalent-horizon coordinate transformâ€¦"):
+                    (
+                        transformed_projection,
+                        fitted_metric_transform,
+                        metric_fit_metadata,
+                        metric_diagnostics,
+                    ) = fit_coordinate_metric_transform(
+                        base_projection,
+                        metric_input_fields,
+                        residual_degree=metric_residual_degree,
+                        ridge=metric_ridge,
+                    )
+            except (ValueError, np.linalg.LinAlgError) as exc:
+                clear_coordinate_metric_result()
+                st.error(f"Coordinate transform could not be fitted: {exc}")
+            else:
+                st.session_state.coordinate_metric_identity = fit_metric_identity
+                st.session_state.coordinate_metric_projection = transformed_projection
+                st.session_state.coordinate_metric_transform = fitted_metric_transform
+                st.session_state.coordinate_metric_metadata = metric_fit_metadata
+                st.session_state.coordinate_metric_diagnostics = metric_diagnostics
+                st.session_state.coordinate_metric_validation = {
+                    "current_projection": metric_diagnostics
+                }
+                st.session_state.coordinate_metric_model_source = "fitted"
+                st.session_state.pop("coordinate_metric_axis_default_identity", None)
+                clear_surface_fits()
+
+        with st.expander("Use a saved metric model"):
+            st.warning(
+                "Only load metric files you trust. Joblib files can execute code when opened."
+            )
+            metric_upload = st.file_uploader(
+                "Saved equivalent-horizon model",
+                type=["joblib"],
+                key="coordinate_metric_model_upload",
+                help="Accepts equivalent-horizon models downloaded from this app.",
+            )
+            uploaded_metric_digest = None
+            loaded_metric_now = False
+            if metric_upload is not None:
+                metric_model_bytes = metric_upload.getvalue()
+                uploaded_metric_digest = sha256(metric_model_bytes).hexdigest()
+                needs_metric_load = (
+                    st.session_state.get("loaded_coordinate_metric_digest")
+                    != uploaded_metric_digest
+                    or "loaded_coordinate_metric_model" not in st.session_state
+                )
+                if needs_metric_load and st.button(
+                    "Load uploaded metric",
+                    type="primary",
+                    icon=":material/upload_file:",
+                    width="stretch",
+                ):
+                    try:
+                        loaded_metric_model, loaded_metric_artifact = load_metric_transform(
+                            metric_model_bytes
+                        )
+                    except Exception as exc:  # noqa: BLE001 - artifact errors belong in the UI
+                        st.error(f"Equivalent-horizon model could not be loaded: {exc}")
+                    else:
+                        st.session_state.loaded_coordinate_metric_digest = (
+                            uploaded_metric_digest
+                        )
+                        st.session_state.loaded_coordinate_metric_model = loaded_metric_model
+                        st.session_state.loaded_coordinate_metric_artifact = (
+                            loaded_metric_artifact
+                        )
+                        st.session_state.loaded_coordinate_metric_filename = metric_upload.name
+                        loaded_metric_now = True
+            elif "loaded_coordinate_metric_model" in st.session_state:
+                uploaded_metric_digest = st.session_state.get(
+                    "loaded_coordinate_metric_digest"
+                )
+
+            loaded_metric_model = st.session_state.get("loaded_coordinate_metric_model")
+            loaded_metric_artifact = st.session_state.get("loaded_coordinate_metric_artifact")
+            apply_loaded_metric = False
+            if loaded_metric_model is not None and loaded_metric_artifact is not None:
+                if not loaded_metric_now:
+                    apply_loaded_metric = st.button(
+                        "Apply loaded metric",
+                        icon=":material/linear_scale:",
+                        width="stretch",
+                    )
+                st.button(
+                    "Forget loaded metric",
+                    icon=":material/delete:",
+                    on_click=forget_loaded_coordinate_metric,
+                    width="stretch",
+                )
+
+                loaded_metric_metadata = dict(loaded_metric_artifact.get("metadata", {}))
+                loaded_input_fields = tuple(
+                    loaded_metric_metadata.get(
+                        "coordinate_columns", ("PLS1", "PLS2", "PLS3")
+                    )
+                )
+                loaded_output_fields = tuple(
+                    loaded_metric_metadata.get(
+                        "output_columns",
+                        tuple(f"{field}_metric" for field in loaded_input_fields),
+                    )
+                )
+                loaded_metric_identity = (
+                    pca_key,
+                    "loaded",
+                    uploaded_metric_digest,
+                    loaded_input_fields,
+                    loaded_output_fields,
+                )
+                if st.session_state.get("coordinate_metric_model_source") == "loaded":
+                    metric_identity = loaded_metric_identity
+
+                if loaded_metric_now or apply_loaded_metric:
+                    missing_metric_fields = [
+                        field for field in loaded_input_fields if field not in base_projection
+                    ]
+                    if missing_metric_fields:
+                        clear_coordinate_metric_result()
+                        st.error(
+                            "The saved metric expects unavailable projection fields: "
+                            + ", ".join(missing_metric_fields)
+                        )
+                    else:
+                        try:
+                            transformed_projection = apply_coordinate_metric_transform(
+                                base_projection,
+                                loaded_metric_model,
+                                loaded_input_fields,
+                                output_columns=loaded_output_fields,
+                            )
+                            metric_diagnostics = coordinate_metric_diagnostics(
+                                transformed_projection,
+                                loaded_input_fields,
+                                loaded_output_fields,
+                            )
+                        except ValueError as exc:
+                            clear_coordinate_metric_result()
+                            st.error(f"Saved coordinate transform could not be applied: {exc}")
+                        else:
+                            loaded_metric_metadata["coordinate_columns"] = list(
+                                loaded_input_fields
+                            )
+                            loaded_metric_metadata["output_columns"] = list(
+                                loaded_output_fields
+                            )
+                            metric_identity = loaded_metric_identity
+                            st.session_state.coordinate_metric_identity = loaded_metric_identity
+                            st.session_state.coordinate_metric_projection = (
+                                transformed_projection
+                            )
+                            st.session_state.coordinate_metric_transform = loaded_metric_model
+                            st.session_state.coordinate_metric_metadata = (
+                                loaded_metric_metadata
+                            )
+                            st.session_state.coordinate_metric_diagnostics = metric_diagnostics
+                            st.session_state.coordinate_metric_validation = (
+                                loaded_metric_artifact.get("validation", {})
+                            )
+                            st.session_state.coordinate_metric_model_source = "loaded"
+                            st.session_state.pop(
+                                "coordinate_metric_axis_default_identity", None
+                            )
+                            clear_surface_fits()
+
+                st.caption(
+                    f"{st.session_state.get('loaded_coordinate_metric_filename', 'Saved metric')} "
+                    f"- residual degree {loaded_metric_model.residual_degree}"
+                )
+            else:
+                st.info("Choose a saved model and click **Load uploaded metric**.")
+
+        if st.session_state.get("coordinate_metric_identity") == metric_identity:
+            projection = st.session_state.coordinate_metric_projection
+            metric_fit_metadata = st.session_state.coordinate_metric_metadata
+            metric_diagnostics = st.session_state.coordinate_metric_diagnostics
+            transformed_pc_fields = list(metric_fit_metadata["output_columns"])
+            if (
+                st.session_state.get("coordinate_metric_axis_default_identity")
+                != metric_identity
+            ):
+                st.session_state["projection_x_axis"] = transformed_pc_fields[0]
+                st.session_state["projection_y_axis"] = transformed_pc_fields[1]
+                st.session_state["projection_z_axis"] = transformed_pc_fields[2]
+                st.session_state.coordinate_metric_axis_default_identity = metric_identity
+            metric_model_source = st.session_state.get(
+                "coordinate_metric_model_source", "fitted"
+            )
+            st.success(
+                f"Transform {metric_model_source} and applied to all projected points: "
+                + ", ".join(transformed_pc_fields)
+            )
+            metric_model_bytes = serialize_metric_transform(
+                st.session_state.coordinate_metric_transform,
+                metric_fit_metadata,
+                st.session_state.get("coordinate_metric_validation", {}),
+            )
+            st.download_button(
+                "Download equivalent-horizon model",
+                data=metric_model_bytes,
+                file_name="equivalent_horizon_metric.joblib",
+                mime="application/octet-stream",
+                icon=":material/download:",
+                on_click="ignore",
+            )
+
+            st.markdown("**Leading generalized eigenvalues**")
+            with st.container(horizontal=True):
+                for index, eigenvalue in enumerate(
+                    metric_fit_metadata["leading_generalized_eigenvalues"], start=1
+                ):
+                    st.metric(
+                        f"Eigenvalue {index}",
+                        _format_metric(eigenvalue),
+                        border=True,
+                    )
+
+            metric_labels = {
+                "equal_horizon_pairwise_rms": "Equal-horizon pairwise RMS",
+                "horizon_centroid_rms": "Horizon-centroid RMS",
+                "normalized_equal_horizon_rms": "Normalized equal-horizon RMS",
+            }
+            diagnostic_table = pd.DataFrame(
+                [
+                    {
+                        "metric": label,
+                        "before": metric_diagnostics["before"][key],
+                        "after": metric_diagnostics["after"][key],
+                        "reduction": metric_diagnostics["improvement"][key],
+                    }
+                    for key, label in metric_labels.items()
+                ]
+            )
+            st.dataframe(
+                diagnostic_table,
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "before": st.column_config.NumberColumn(format="%.5g"),
+                    "after": st.column_config.NumberColumn(format="%.5g"),
+                    "reduction": st.column_config.NumberColumn(format="percent"),
+                },
+            )
+            st.caption(
+                "These diagnostics describe the current fit data; lower equal-horizon "
+                "distance is better. The normalized value accounts for horizon-centroid spread."
+            )
+        elif st.session_state.get("coordinate_metric_projection") is not None:
+            st.info("The configuration changed. Fit again to refresh the transform.")
+        else:
+            st.info("Edit the configuration, then fit the transform.")
+
+if not metric_transform_enabled:
+    st.session_state.pop("coordinate_metric_axis_default_identity", None)
+
+coordinate_fields = [*pc_fields, *transformed_pc_fields]
+axis_fields = [*coordinate_fields, "reconstruction_residual_rms"]
+metadata_fields = sorted(
+    column for column in projection if column not in {*coordinate_fields, "sample_index"}
+)
+color_fields = [
+    "log10_time_horizon_months",
+    *[field for field in metadata_fields if field != "log10_time_horizon_months"],
+]
+
 st.subheader("Projection")
 controls = st.columns([1.1, 1.25, 1.25, 2])
 plot_mode = controls[0].segmented_control(
@@ -3177,13 +3622,47 @@ if len(axis_fields) < required_axes:
         f"At least {required_axes} numeric projection fields are required for a {plot_mode} plot."
     )
     st.stop()
-x_component = controls[1].selectbox("X axis", axis_fields, index=0)
+preferred_axis_fields = transformed_pc_fields or pc_fields
+if st.session_state.get("projection_x_axis") not in axis_fields:
+    st.session_state["projection_x_axis"] = preferred_axis_fields[0]
+x_component = controls[1].selectbox(
+    "X axis",
+    axis_fields,
+    key="projection_x_axis",
+    persist_state="page",
+)
 y_choices = [field for field in axis_fields if field != x_component]
-y_component = controls[2].selectbox("Y axis", y_choices, index=0)
+preferred_y = next(
+    (field for field in preferred_axis_fields if field != x_component),
+    y_choices[0],
+)
+if st.session_state.get("projection_y_axis") not in y_choices:
+    st.session_state["projection_y_axis"] = preferred_y
+y_component = controls[2].selectbox(
+    "Y axis",
+    y_choices,
+    key="projection_y_axis",
+    persist_state="page",
+)
 z_component = None
 if plot_mode == "3D":
     z_choices = [field for field in axis_fields if field not in {x_component, y_component}]
-    z_component = controls[3].selectbox("Z axis", z_choices, index=0)
+    preferred_z = next(
+        (
+            field
+            for field in preferred_axis_fields
+            if field not in {x_component, y_component}
+        ),
+        z_choices[0],
+    )
+    if st.session_state.get("projection_z_axis") not in z_choices:
+        st.session_state["projection_z_axis"] = preferred_z
+    z_component = controls[3].selectbox(
+        "Z axis",
+        z_choices,
+        key="projection_z_axis",
+        persist_state="page",
+    )
 else:
     controls[3].caption("Choose any two projection fields for the plane.")
 
@@ -4428,7 +4907,8 @@ with st.expander(f"{direction_method} details and downloads"):
             icon=":material/download:",
             on_click="ignore",
             help=(
-                "Includes t (spline parameter) and u (extrusion parameter) when an "
+                "Includes the original coordinates and any fitted *_metric coordinates. "
+                "Also includes t (spline parameter) and u (extrusion parameter) when an "
                 "extruded surface is loaded."
             ),
         )

@@ -11,21 +11,22 @@ from typing import Any, BinaryIO
 import joblib
 import numpy as np
 from scipy import __version__ as scipy_version
-from scipy.interpolate import UnivariateSpline, make_lsq_spline
+from scipy.interpolate import BSpline
 from scipy.sparse.csgraph import dijkstra, minimum_spanning_tree
 from scipy.spatial import cKDTree
 from scipy.spatial.distance import pdist, squareform
 from sklearn import __version__ as sklearn_version
 from sklearn.metrics import r2_score
 
-CURVE_MODEL_ARTIFACT_VERSION = 2
+CURVE_MODEL_ARTIFACT_VERSION = 4
 CURVE_ALGORITHMS = {
-    "spline": "Geometric smoothing spline",
+    "spline": "Endpoint-constrained geometric spline",
 }
 CURVE_DESCRIPTIONS = {
     "spline": (
-        "Fits a geometric principal spline through the 3D point cloud. A dummy parameter "
-        "t from 0 to 1 is inferred from the geometry and refined by nearest-curve projection."
+        "Fits a constrained SciPy BSpline through the 3D point cloud. A dummy parameter "
+        "t from 0 to 1 is inferred geometrically, while the supplied PLS endpoints are "
+        "enforced exactly at t=0 and t=1."
     ),
 }
 
@@ -101,6 +102,53 @@ class CurveEvaluationResult:
 CurveDisplayResult = CurveFitResult | CurveEvaluationResult
 
 
+@dataclass(frozen=True)
+class TangentExtrapolatingBSpline:
+    """Evaluate a BSpline inside its fit range and tangent lines outside it."""
+
+    spline: BSpline
+    lower_bound: float
+    upper_bound: float
+    derivative_order: int = 0
+
+    def __call__(self, values: np.ndarray | float) -> np.ndarray:
+        array = np.asarray(values, dtype=np.float64)
+        flat = array.reshape(-1)
+        clipped = np.clip(flat, self.lower_bound, self.upper_bound)
+        if self.derivative_order == 0:
+            result = np.asarray(self.spline(clipped), dtype=np.float64)
+            derivative = self.spline.derivative()
+            below = flat < self.lower_bound
+            above = flat > self.upper_bound
+            result[below] = self.spline(self.lower_bound) + derivative(
+                self.lower_bound
+            ) * (flat[below] - self.lower_bound)
+            result[above] = self.spline(self.upper_bound) + derivative(
+                self.upper_bound
+            ) * (flat[above] - self.upper_bound)
+        elif self.derivative_order == 1:
+            derivative = self.spline.derivative()
+            result = np.asarray(derivative(clipped), dtype=np.float64)
+        else:
+            result = np.asarray(
+                self.spline.derivative(self.derivative_order)(clipped), dtype=np.float64
+            )
+            result[(flat < self.lower_bound) | (flat > self.upper_bound)] = 0.0
+        return result.reshape(array.shape)
+
+    def derivative(self, nu: int = 1) -> "TangentExtrapolatingBSpline":
+        """Return a callable derivative compatible with SciPy spline predictors."""
+
+        if nu < 0:
+            raise ValueError("Derivative order must be non-negative.")
+        return TangentExtrapolatingBSpline(
+            self.spline,
+            self.lower_bound,
+            self.upper_bound,
+            self.derivative_order + int(nu),
+        )
+
+
 def _predict_coordinate(predictor: Any, values: np.ndarray) -> np.ndarray:
     return np.asarray(predictor(values), dtype=np.float64)
 
@@ -134,6 +182,7 @@ def _fit_splines(
     *,
     degree: int,
     smoothing: float,
+    endpoints: np.ndarray,
     knots: list[float] | None = None,
 ) -> tuple[Any, Any, Any]:
     if not 1 <= degree <= 5:
@@ -142,51 +191,62 @@ def _fit_splines(
         raise ValueError(f"A degree-{degree} spline requires at least {degree + 1} values.")
     if not np.isfinite(smoothing) or smoothing < 0:
         raise ValueError("Spline smoothing must be finite and non-negative.")
+    boundary = np.asarray(endpoints, dtype=np.float64)
+    if boundary.shape != (2, 3) or not np.isfinite(boundary).all():
+        raise ValueError("Spline endpoints must contain two finite 3D coordinates.")
     interior_knots = np.asarray(knots or [], dtype=np.float64)
     if len(interior_knots):
-        if degree != 3:
-            raise ValueError("Custom spline knots are supported only for cubic splines.")
         if not np.isfinite(interior_knots).all() or np.any(np.diff(interior_knots) <= 0):
             raise ValueError("Spline knots must be finite and strictly increasing.")
         if interior_knots[0] <= parameter[0] or interior_knots[-1] >= parameter[-1]:
             raise ValueError("Spline knots must lie strictly inside the fitted parameter range.")
-        maximum_knots = len(parameter) - degree - 1
-        if len(interior_knots) > maximum_knots:
-            raise ValueError(
-                f"At most {maximum_knots} interior knot(s) can be fitted from "
-                f"{len(parameter)} training values."
-            )
-        knot_vector = np.concatenate(
-            [
-                np.repeat(parameter[0], degree + 1),
-                interior_knots,
-                np.repeat(parameter[-1], degree + 1),
-            ]
+    else:
+        automatic_count = min(12, max(1, len(parameter) // 8))
+        interior_knots = np.quantile(
+            parameter, np.linspace(0, 1, automatic_count + 2)[1:-1]
         )
-        try:
-            return tuple(
-                make_lsq_spline(
-                    parameter,
-                    coordinates[:, index],
-                    knot_vector,
-                    k=degree,
-                    method="qr",
-                )
-                for index in range(3)
-            )
-        except ValueError as exc:
-            raise ValueError(
-                "The custom spline knots cannot be supported by the fitted parameter values. "
-                "Use fewer knots or move them farther apart."
-            ) from exc
-    predictors = []
-    for index in range(3):
-        variance = max(float(np.var(coordinates[:, index])), np.finfo(np.float64).eps)
-        smoothing_budget = float(smoothing) * len(parameter) * variance
-        predictors.append(
-            UnivariateSpline(parameter, coordinates[:, index], k=degree, s=smoothing_budget)
+        interior_knots = np.unique(interior_knots)
+    knot_vector = np.concatenate(
+        [
+            np.repeat(parameter[0], degree + 1),
+            interior_knots,
+            np.repeat(parameter[-1], degree + 1),
+        ]
+    )
+    design = BSpline.design_matrix(
+        parameter, knot_vector, degree, extrapolate=False
+    ).toarray()
+    coefficient_count = design.shape[1]
+    if coefficient_count < 2:
+        raise ValueError("The spline basis cannot represent two constrained endpoints.")
+    free_design = design[:, 1:-1]
+    fixed_fit = np.outer(design[:, 0], boundary[0]) + np.outer(
+        design[:, -1], boundary[1]
+    )
+    difference = np.diff(np.eye(coefficient_count), n=2, axis=0)
+    free_difference = difference[:, 1:-1]
+    fixed_difference = np.outer(difference[:, 0], boundary[0]) + np.outer(
+        difference[:, -1], boundary[1]
+    )
+    coefficients = np.empty((coefficient_count, 3), dtype=np.float64)
+    coefficients[0] = boundary[0]
+    coefficients[-1] = boundary[1]
+    if coefficient_count > 2:
+        penalty = float(smoothing) * len(parameter)
+        system = free_design.T @ free_design
+        right = free_design.T @ (coordinates - fixed_fit)
+        if len(difference) and penalty:
+            system += penalty * (free_difference.T @ free_difference)
+            right -= penalty * (free_difference.T @ fixed_difference)
+        coefficients[1:-1] = np.linalg.lstsq(system, right, rcond=None)[0]
+    return tuple(
+        TangentExtrapolatingBSpline(
+            BSpline(knot_vector, coefficients[:, index], degree, extrapolate=False),
+            float(parameter[0]),
+            float(parameter[-1]),
         )
-    return tuple(predictors)  # type: ignore[return-value]
+        for index in range(3)
+    )  # type: ignore[return-value]
 
 
 def _merge_duplicate_parameters(
@@ -228,21 +288,33 @@ def _coordinate_metrics(actual: np.ndarray, predicted: np.ndarray) -> dict[str, 
     }
 
 
-def _mst_backbone(coordinates: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Return the longest-path backbone of the Euclidean minimum spanning tree."""
+def _mst_backbone(
+    coordinates: np.ndarray,
+    start_point: np.ndarray | None = None,
+    end_point: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return an endpoint-oriented path through the Euclidean minimum spanning tree."""
 
-    unique_coordinates = np.unique(np.asarray(coordinates, dtype=np.float64), axis=0)
+    values = np.asarray(coordinates, dtype=np.float64)
+    if start_point is not None and end_point is not None:
+        values = np.vstack([values, start_point, end_point])
+    unique_coordinates = np.unique(values, axis=0)
     if len(unique_coordinates) < 3:
         raise ValueError("A geometric spline requires at least three distinct 3D points.")
     distances = squareform(pdist(unique_coordinates, metric="euclidean"))
     tree = minimum_spanning_tree(distances)
     graph = tree + tree.T
-    first_distances = dijkstra(graph, indices=0)
-    endpoint = int(np.argmax(first_distances))
-    second_distances, predecessors = dijkstra(
-        graph, indices=endpoint, return_predecessors=True
-    )
-    opposite = int(np.argmax(second_distances))
+    if start_point is None or end_point is None:
+        first_distances = dijkstra(graph, indices=0)
+        endpoint = int(np.argmax(first_distances))
+        second_distances, predecessors = dijkstra(
+            graph, indices=endpoint, return_predecessors=True
+        )
+        opposite = int(np.argmax(second_distances))
+    else:
+        endpoint = int(np.flatnonzero(np.all(unique_coordinates == start_point, axis=1))[0])
+        opposite = int(np.flatnonzero(np.all(unique_coordinates == end_point, axis=1))[0])
+        _, predecessors = dijkstra(graph, indices=endpoint, return_predecessors=True)
     path = [opposite]
     while path[-1] != endpoint:
         predecessor = int(predecessors[path[-1]])
@@ -256,6 +328,20 @@ def _mst_backbone(coordinates: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     if cumulative[-1] <= np.finfo(np.float64).eps:
         raise ValueError("The geometric spline points have no measurable extent.")
     return backbone, cumulative / cumulative[-1]
+
+
+def geometric_spline_endpoint_defaults(coordinates: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Choose deterministic endpoint defaults from the point-cloud MST diameter."""
+
+    finite = np.asarray(coordinates, dtype=np.float64)
+    if finite.ndim != 2 or finite.shape[1] != 3:
+        raise ValueError("Coordinates must have shape (n_points, 3).")
+    finite = finite[np.isfinite(finite).all(axis=1)]
+    if len(finite) > 3_000:
+        indices = np.linspace(0, len(finite) - 1, 3_000).round().astype(int)
+        finite = finite[indices]
+    backbone, _ = _mst_backbone(finite)
+    return backbone[0].copy(), backbone[-1].copy()
 
 
 def project_onto_curve_parameter(
@@ -294,49 +380,6 @@ def _expanded_coordinate_bounds(
     return np.column_stack([bounds[:, 0] - padding, bounds[:, 1] + padding])
 
 
-def _curve_boundary_parameter(
-    model: CurveModel,
-    start: float,
-    direction: float,
-    display_bounds: np.ndarray,
-) -> float:
-    """Walk outwards from a fitted endpoint and stop at the display-box boundary."""
-
-    def is_inside(parameter_value: float) -> bool:
-        try:
-            predicted = model.predict([parameter_value])[0]
-        except (FloatingPointError, ValueError, OverflowError):
-            return False
-        return bool(
-            np.isfinite(predicted).all()
-            and np.all(predicted >= display_bounds[:, 0])
-            and np.all(predicted <= display_bounds[:, 1])
-        )
-
-    if not is_inside(start):
-        return start
-    fitted_span = float(np.ptp(model.training_parameter_bounds))
-    step = max(fitted_span / 100.0, np.finfo(np.float64).eps)
-    inside_parameter = start
-    for _ in range(80):
-        outside_parameter = inside_parameter + direction * step
-        if not is_inside(outside_parameter):
-            inside = inside_parameter
-            outside = outside_parameter
-            for _ in range(40):
-                midpoint = (inside + outside) / 2.0
-                if is_inside(midpoint):
-                    inside = midpoint
-                else:
-                    outside = midpoint
-            return inside
-        inside_parameter = outside_parameter
-        step *= 1.25
-        if abs(inside_parameter - start) >= fitted_span * 50.0:
-            break
-    return inside_parameter
-
-
 def _sample_curve(
     model: CurveModel,
     sample_count: int,
@@ -349,8 +392,9 @@ def _sample_curve(
         raise ValueError("Curve padding fraction must be between 0 and 1.")
     display_bounds = _expanded_coordinate_bounds(coordinate_bounds, padding_fraction)
     lower, upper = np.asarray(model.training_parameter_bounds, dtype=np.float64)
-    lower = _curve_boundary_parameter(model, lower, -1.0, display_bounds)
-    upper = _curve_boundary_parameter(model, upper, 1.0, display_bounds)
+    parameter_padding = float(padding_fraction) * (upper - lower)
+    lower -= parameter_padding
+    upper += parameter_padding
     curve_parameter = np.linspace(lower, upper, sample_count)
     return curve_parameter, model.predict(curve_parameter), display_bounds
 
@@ -359,6 +403,7 @@ def _fit_parameterized_spline(
     parameter_values: np.ndarray,
     coordinates: np.ndarray,
     *,
+    endpoint_coordinates: np.ndarray,
     parameters: dict[str, Any] | None = None,
     sample_count: int = 240,
     padding_fraction: float = 0.0,
@@ -391,6 +436,21 @@ def _fit_parameterized_spline(
     unique_parameter, unique_xyz = _merge_duplicate_parameters(
         parameter, xyz, duplicate_reducer
     )
+    endpoints = np.asarray(endpoint_coordinates, dtype=np.float64)
+    if endpoints.shape != (2, 3) or not np.isfinite(endpoints).all():
+        raise ValueError("Spline endpoints must contain two finite 3D coordinates.")
+    if np.allclose(endpoints[0], endpoints[1]):
+        raise ValueError("Spline start and end coordinates must be different.")
+    for endpoint_parameter, endpoint_xyz in zip((0.0, 1.0), endpoints, strict=True):
+        matches = np.isclose(unique_parameter, endpoint_parameter, atol=1e-12)
+        if np.any(matches):
+            unique_xyz[np.flatnonzero(matches)[0]] = endpoint_xyz
+        else:
+            unique_parameter = np.append(unique_parameter, endpoint_parameter)
+            unique_xyz = np.vstack([unique_xyz, endpoint_xyz])
+    order = np.argsort(unique_parameter)
+    unique_parameter = unique_parameter[order]
+    unique_xyz = unique_xyz[order]
     if len(unique_parameter) < 3:
         raise ValueError("At least three distinct parameter values are required to fit a curve.")
     center = float(np.mean(unique_parameter))
@@ -461,6 +521,7 @@ def _fit_parameterized_spline(
         train_xyz,
         degree=model_parameters["degree"],
         smoothing=model_parameters["smoothing"],
+        endpoints=endpoints,
         knots=normalized_knots,
     )
 
@@ -537,6 +598,8 @@ def _fit_parameterized_spline(
 def fit_geometric_spline(
     coordinates: np.ndarray,
     *,
+    start_point: np.ndarray,
+    end_point: np.ndarray,
     parameters: dict[str, Any] | None = None,
     sample_count: int = 240,
     padding_fraction: float = 0.0,
@@ -558,6 +621,13 @@ def fit_geometric_spline(
     xyz = xyz[finite]
     if len(xyz) < 4:
         raise ValueError("At least four finite points are required for a geometric spline.")
+    start = np.asarray(start_point, dtype=np.float64).reshape(-1)
+    end = np.asarray(end_point, dtype=np.float64).reshape(-1)
+    if start.shape != (3,) or end.shape != (3,) or not np.isfinite([start, end]).all():
+        raise ValueError("Spline start and end must each contain three finite coordinates.")
+    if np.allclose(start, end):
+        raise ValueError("Spline start and end coordinates must be different.")
+    endpoints = np.vstack([start, end])
 
     if max_fit_points is None:
         max_fit_points = min(len(xyz), 3_000)
@@ -571,18 +641,24 @@ def fit_geometric_spline(
         backbone_source = xyz[backbone_indices]
     else:
         backbone_source = xyz
-    backbone, backbone_parameter = _mst_backbone(backbone_source)
+    backbone, backbone_parameter = _mst_backbone(backbone_source, start, end)
     _, nearest_backbone = cKDTree(backbone).query(xyz)
     parameter = backbone_parameter[np.asarray(nearest_backbone, dtype=int)]
 
     model_parameters = dict(parameters or {})
     model_parameters["parameterization"] = "geometric_principal_curve"
+    model_parameters["endpoint_constraint"] = "exact"
+    model_parameters["start_point"] = start.tolist()
+    model_parameters["end_point"] = end.tolist()
+    model_parameters["spline_implementation"] = "scipy.interpolate.BSpline"
+    model_parameters["extrapolation"] = "endpoint_tangent_linear"
     model_parameters["refinement_iterations"] = int(refinement_iterations)
     fitted: CurveFitResult | None = None
     for _ in range(refinement_iterations):
         fitted = _fit_parameterized_spline(
             parameter,
             xyz,
+            endpoint_coordinates=endpoints,
             parameters=model_parameters,
             sample_count=sample_count,
             padding_fraction=padding_fraction,
@@ -603,6 +679,7 @@ def fit_geometric_spline(
     fitted = _fit_parameterized_spline(
         parameter,
         xyz,
+        endpoint_coordinates=endpoints,
         parameters=model_parameters,
         sample_count=sample_count,
         padding_fraction=padding_fraction,
@@ -617,10 +694,6 @@ def fit_geometric_spline(
     parameter = project_onto_curve_parameter(fitted.model, xyz, grid_size=10_001)
     point_prediction = fitted.model.predict(parameter)
     geometric_metrics = _coordinate_metrics(xyz, point_prediction)
-    curve_parameter = np.linspace(
-        *fitted.model.training_parameter_bounds,
-        int(sample_count),
-    )
     metrics = {
         **fitted.metrics,
         "input_points": int(len(finite)),
@@ -644,8 +717,8 @@ def fit_geometric_spline(
         warnings.append(f"Dropped {dropped_nonfinite:,} non-finite row(s).")
     return CurveFitResult(
         model=fitted.model,
-        curve_parameter=curve_parameter,
-        curve_xyz=fitted.model.predict(curve_parameter),
+        curve_parameter=fitted.curve_parameter,
+        curve_xyz=fitted.curve_xyz,
         point_parameter=parameter,
         point_xyz=xyz,
         point_prediction=point_prediction,
@@ -721,6 +794,14 @@ def _validate_curve_model(model: CurveModel) -> None:
         raise ValueError("Only geometric spline curve artifacts are supported.")
     if model.parameter_feature != "t":
         raise ValueError("A geometric spline artifact must use the dummy parameter 't'.")
+    if model.parameters.get("endpoint_constraint") != "exact":
+        raise ValueError("A geometric spline artifact must contain exact endpoint constraints.")
+    if model.parameters.get("extrapolation") != "endpoint_tangent_linear":
+        raise ValueError("A geometric spline artifact must use endpoint-tangent extrapolation.")
+    start = np.asarray(model.parameters.get("start_point"), dtype=np.float64)
+    end = np.asarray(model.parameters.get("end_point"), dtype=np.float64)
+    if start.shape != (3,) or end.shape != (3,) or not np.isfinite([start, end]).all():
+        raise ValueError("The fitted curve has invalid endpoint coordinates.")
     if len(model.predictors) != 3 or len(model.coordinate_features) != 3:
         raise ValueError("The fitted curve must contain exactly three coordinate predictors.")
     if not np.isfinite(model.parameter_center) or not np.isfinite(model.parameter_scale):
@@ -736,6 +817,9 @@ def _validate_curve_model(model: CurveModel) -> None:
     if coordinate_bounds.shape != (3, 2) or not np.isfinite(coordinate_bounds).all():
         raise ValueError("The fitted curve has invalid coordinate bounds.")
     model.predict(parameter_bounds)
+    predicted_endpoints = model.predict(parameter_bounds)
+    if not np.allclose(predicted_endpoints, np.vstack([start, end]), rtol=1e-9, atol=1e-10):
+        raise ValueError("The fitted curve does not satisfy its endpoint constraints.")
 
 
 def serialize_curve_model(model: CurveModel, metadata: dict[str, Any] | None = None) -> bytes:
