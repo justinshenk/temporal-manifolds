@@ -821,6 +821,109 @@ def reconstruction_residual_rms(
     return residual_rms
 
 
+def reconstruction_residual_statistics(
+    activation_matrix: np.ndarray,
+    prepared_matrix: np.ndarray | None,
+    row_offsets: np.ndarray,
+    scores: np.ndarray,
+    model: PCA | IncrementalPCA | PLSRegression,
+    *,
+    n_components: int = 3,
+    batch_size: int = 2048,
+) -> tuple[np.ndarray, np.ndarray, IncrementalPCA]:
+    """Fit residual PCA and return RMS plus residual coordinates for every point."""
+    scores = np.asarray(scores)
+    row_count = len(scores)
+    if batch_size < 1:
+        raise ValueError("Reconstruction batch size must be positive.")
+    if not 1 <= n_components <= row_count:
+        raise ValueError("Residual PCA components must not exceed the projected row count.")
+    feature_count = int(activation_matrix.shape[1])
+    if n_components > feature_count:
+        raise ValueError("Residual PCA components must not exceed the activation width.")
+    if prepared_matrix is not None:
+        values = np.asarray(prepared_matrix)
+        if values.ndim != 2 or len(values) != row_count:
+            raise ValueError("Prepared activations and projection scores are misaligned.")
+    else:
+        if len(row_offsets) != row_count:
+            raise ValueError("Activation row offsets and projection scores are misaligned.")
+        values = None
+
+    residual_rms = np.empty(row_count, dtype=np.float64)
+    residual_pca = IncrementalPCA(n_components=n_components, batch_size=batch_size)
+    batches = list(_bounded_batches(row_count, batch_size, n_components))
+    for batch in batches:
+        batch_values = (
+            np.asarray(values[batch], dtype=np.float64)
+            if values is not None
+            else np.asarray(activation_matrix[row_offsets[batch]], dtype=np.float64)
+        )
+        reconstructed = np.asarray(model.inverse_transform(scores[batch]), dtype=np.float64)
+        if reconstructed.shape != batch_values.shape:
+            raise ValueError("Reconstructed activations have an invalid shape.")
+        residuals = batch_values - reconstructed
+        residual_rms[batch] = np.sqrt(np.mean(np.square(residuals), axis=1))
+        residual_pca.partial_fit(residuals)
+
+    residual_scores = np.empty((row_count, n_components), dtype=np.float64)
+    for batch in batches:
+        batch_values = (
+            np.asarray(values[batch], dtype=np.float64)
+            if values is not None
+            else np.asarray(activation_matrix[row_offsets[batch]], dtype=np.float64)
+        )
+        residuals = batch_values - np.asarray(
+            model.inverse_transform(scores[batch]), dtype=np.float64
+        )
+        residual_scores[batch] = residual_pca.transform(residuals)
+    return residual_rms, residual_scores, residual_pca
+
+
+def reconstruction_residual_projection(
+    activation_matrix: np.ndarray,
+    prepared_matrix: np.ndarray | None,
+    row_offsets: np.ndarray,
+    scores: np.ndarray,
+    model: PCA | IncrementalPCA | PLSRegression,
+    *,
+    residual_center: np.ndarray,
+    residual_components: np.ndarray,
+    batch_size: int = 2048,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project reconstruction residuals with residual-PCA parameters from a saved model."""
+    scores = np.asarray(scores)
+    center = np.asarray(residual_center, dtype=np.float64)
+    components = np.asarray(residual_components, dtype=np.float64)
+    if center.ndim != 1 or components.ndim != 2 or components.shape[1:] != center.shape:
+        raise ValueError("Saved residual PCA parameters have incompatible shapes.")
+    if center.shape[0] != int(activation_matrix.shape[1]):
+        raise ValueError(
+            "The spherical model residual PCA expects a different activation width."
+        )
+    row_count = len(scores)
+    values = np.asarray(prepared_matrix) if prepared_matrix is not None else None
+    if values is not None and (values.ndim != 2 or len(values) != row_count):
+        raise ValueError("Prepared activations and projection scores are misaligned.")
+    if values is None and len(row_offsets) != row_count:
+        raise ValueError("Activation row offsets and projection scores are misaligned.")
+
+    residual_rms = np.empty(row_count, dtype=np.float64)
+    residual_scores = np.empty((row_count, components.shape[0]), dtype=np.float64)
+    for batch in _bounded_batches(row_count, batch_size, 1):
+        batch_values = (
+            np.asarray(values[batch], dtype=np.float64)
+            if values is not None
+            else np.asarray(activation_matrix[row_offsets[batch]], dtype=np.float64)
+        )
+        residuals = batch_values - np.asarray(
+            model.inverse_transform(scores[batch]), dtype=np.float64
+        )
+        residual_rms[batch] = np.sqrt(np.mean(np.square(residuals), axis=1))
+        residual_scores[batch] = (residuals - center) @ components.T
+    return residual_rms, residual_scores
+
+
 def fit_pca_projection(
     activation_matrix: np.ndarray,
     prepared_matrix: np.ndarray | None,

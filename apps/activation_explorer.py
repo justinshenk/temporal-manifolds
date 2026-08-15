@@ -28,14 +28,13 @@ from temporal_manifolds.geometry.extrusion.rms_spline_surface_transformer import
     evaluate_rms_spline_surface,
     serialize_rms_spline_surface,
 )
-from temporal_manifolds.geometry.equivalent_horizon_metric.equivalent_horizon_metric_transform import (
-    DEFAULT_RESIDUAL_DEGREE as DEFAULT_METRIC_RESIDUAL_DEGREE,
-    DEFAULT_RIDGE as DEFAULT_METRIC_RIDGE,
-    apply_coordinate_metric_transform,
-    coordinate_metric_diagnostics,
-    fit_coordinate_metric_transform,
-    load_metric_transform,
-    serialize_metric_transform,
+from temporal_manifolds.geometry.spherical_temporal_basis import (
+    DEFAULT_PARAMETERS as SPHERICAL_DEFAULT_PARAMETERS,
+    OUTPUT_COLUMNS as SPHERICAL_OUTPUT_COLUMNS,
+    fit_spherical_temporal_basis,
+    load_spherical_temporal_basis,
+    serialize_spherical_temporal_basis,
+    transform_spherical_temporal_basis,
 )
 from temporal_manifolds.viz.activation_explorer import (
     PCA_PROJECTION_FINGERPRINT_VERSION,
@@ -51,7 +50,9 @@ from temporal_manifolds.viz.activation_explorer import (
     pca_projection_fingerprint,
     prepare_analysis_data,
     projection_details_table,
+    reconstruction_residual_projection,
     reconstruction_residual_rms,
+    reconstruction_residual_statistics,
     select_activation_batch_uploads,
     serialize_pca_model,
     serialize_pls_model,
@@ -125,14 +126,9 @@ def reset_loaded_data() -> None:
         "projection",
         "pca",
         "details",
-        "coordinate_metric_identity",
-        "coordinate_metric_projection",
-        "coordinate_metric_transform",
-        "coordinate_metric_metadata",
-        "coordinate_metric_diagnostics",
-        "coordinate_metric_validation",
-        "coordinate_metric_model_source",
-        "coordinate_metric_axis_default_identity",
+        "spherical_basis_identity",
+        "spherical_basis_model",
+        "residual_pca",
         "surface_result",
         "surface_identity",
         "surface_benchmark",
@@ -176,20 +172,6 @@ def clear_surface_fits() -> None:
         st.session_state.pop(key, None)
 
 
-def clear_coordinate_metric_result() -> None:
-    """Discard a transform fitted against a previous projection or configuration."""
-
-    for key in (
-        "coordinate_metric_identity",
-        "coordinate_metric_projection",
-        "coordinate_metric_transform",
-        "coordinate_metric_metadata",
-        "coordinate_metric_diagnostics",
-        "coordinate_metric_axis_default_identity",
-    ):
-        st.session_state.pop(key, None)
-
-
 def clear_visual_filters() -> None:
     for key in list(st.session_state):
         if key == "visual_filter_fields" or key.startswith("visual_filter::"):
@@ -218,14 +200,14 @@ def forget_loaded_pls() -> None:
         st.session_state.pop(key, None)
 
 
-def forget_loaded_coordinate_metric() -> None:
-    clear_coordinate_metric_result()
+def forget_loaded_spherical_basis() -> None:
     for key in (
-        "coordinate_metric_model_upload",
-        "loaded_coordinate_metric_digest",
-        "loaded_coordinate_metric_model",
-        "loaded_coordinate_metric_artifact",
-        "loaded_coordinate_metric_filename",
+        "spherical_basis_upload",
+        "loaded_spherical_basis_digest",
+        "loaded_spherical_basis_model",
+        "loaded_spherical_basis_filename",
+        "spherical_basis_identity",
+        "spherical_basis_model",
     ):
         st.session_state.pop(key, None)
 
@@ -3074,6 +3056,169 @@ with st.sidebar:
                 "Preparation changes retransform the selected points without refitting the model."
             )
 
+    st.divider()
+    st.subheader("Spherical temporal basis")
+    spherical_enabled = bool(
+        st.toggle(
+            "Apply spherical temporal basis",
+            value=False,
+            key="spherical_basis_enabled",
+            disabled=direction_method != "PLS",
+            help=(
+                "Apply the notebook's 6D z-score sphere transform to PLS1-3 and three "
+                "reconstruction-residual PCA coordinates. The fitted basis uses every "
+                "selected source folder."
+            ),
+        )
+        and direction_method == "PLS"
+    )
+    spherical_mode = "Fit new"
+    loaded_spherical_model = None
+    spherical_parameters = dict(SPHERICAL_DEFAULT_PARAMETERS)
+    spherical_upload_digest = None
+    if spherical_enabled:
+        if n_components < 3:
+            st.error("The spherical temporal basis requires at least three PLS components.")
+            st.stop()
+        spherical_mode = st.segmented_control(
+            "Spherical model",
+            ["Fit new", "Use saved"],
+            default="Fit new",
+            key="spherical_basis_mode",
+        )
+        if spherical_mode == "Fit new":
+            with st.form("spherical_basis_configuration"):
+                spherical_parameters = {
+                    "within_weight": float(
+                        st.number_input(
+                            "Within-source weight",
+                            min_value=0.0,
+                            value=SPHERICAL_DEFAULT_PARAMETERS["within_weight"],
+                            step=0.1,
+                            key="spherical_within_weight",
+                            persist_state="page",
+                        )
+                    ),
+                    "pair_weight": float(
+                        st.number_input(
+                            "Paired-task weight",
+                            min_value=0.0,
+                            value=SPHERICAL_DEFAULT_PARAMETERS["pair_weight"],
+                            step=0.5,
+                            key="spherical_pair_weight",
+                            persist_state="page",
+                        )
+                    ),
+                    "local_weight": float(
+                        st.number_input(
+                            "Temporal smoothing weight",
+                            min_value=0.0,
+                            value=SPHERICAL_DEFAULT_PARAMETERS["local_weight"],
+                            step=0.01,
+                            format="%.3f",
+                            key="spherical_local_weight",
+                            persist_state="page",
+                        )
+                    ),
+                    "ridge_fraction": float(
+                        st.number_input(
+                            "Ridge fraction",
+                            min_value=0.0,
+                            value=SPHERICAL_DEFAULT_PARAMETERS["ridge_fraction"],
+                            step=0.01,
+                            format="%.3f",
+                            key="spherical_ridge_fraction",
+                            persist_state="page",
+                        )
+                    ),
+                }
+                st.form_submit_button(
+                    "Apply spherical configuration",
+                    icon=":material/tune:",
+                    width="stretch",
+                )
+            st.caption(
+                "Defaults are the selected notebook values. Changes refit the basis and "
+                "residual PCA on the prepared data."
+            )
+        else:
+            spherical_upload = st.file_uploader(
+                "Saved spherical model",
+                type=["npz"],
+                key="spherical_basis_upload",
+                help="Accepts spherical temporal basis artifacts downloaded from this app.",
+            )
+            if spherical_upload is not None:
+                spherical_bytes = spherical_upload.getvalue()
+                spherical_upload_digest = sha256(spherical_bytes).hexdigest()
+                if (
+                    st.session_state.get("loaded_spherical_basis_digest")
+                    != spherical_upload_digest
+                    or "loaded_spherical_basis_model" not in st.session_state
+                ):
+                    if st.button(
+                        "Load uploaded spherical model",
+                        type="primary",
+                        icon=":material/upload_file:",
+                        width="stretch",
+                    ):
+                        try:
+                            loaded_spherical_model = load_spherical_temporal_basis(
+                                spherical_bytes
+                            )
+                        except ValueError as exc:
+                            st.error(str(exc))
+                            st.stop()
+                        st.session_state.loaded_spherical_basis_digest = (
+                            spherical_upload_digest
+                        )
+                        st.session_state.loaded_spherical_basis_model = (
+                            loaded_spherical_model
+                        )
+                        st.session_state.loaded_spherical_basis_filename = (
+                            spherical_upload.name
+                        )
+                else:
+                    loaded_spherical_model = st.session_state.loaded_spherical_basis_model
+            elif "loaded_spherical_basis_model" in st.session_state:
+                spherical_upload_digest = st.session_state.get(
+                    "loaded_spherical_basis_digest"
+                )
+                loaded_spherical_model = st.session_state.loaded_spherical_basis_model
+            if loaded_spherical_model is None:
+                st.info("Choose a saved model and click **Load uploaded spherical model**.")
+                st.stop()
+            spherical_parameters = dict(loaded_spherical_model["parameters"])
+            st.success(
+                st.session_state.get(
+                    "loaded_spherical_basis_filename", "Saved spherical model"
+                )
+            )
+            st.caption(
+                "Parameters: "
+                f"within={spherical_parameters['within_weight']:g}, "
+                f"paired={spherical_parameters['pair_weight']:g}, "
+                f"smooth={spherical_parameters['local_weight']:g}, "
+                f"ridge={spherical_parameters['ridge_fraction']:g}."
+            )
+            st.button(
+                "Forget loaded spherical model",
+                icon=":material/delete:",
+                on_click=forget_loaded_spherical_basis,
+                width="stretch",
+            )
+    elif direction_method != "PLS":
+        st.caption("Select PLS to enable this transform.")
+
+analysis_aggregation_fields = list(aggregation_fields)
+if spherical_enabled:
+    for required_field in ("time_horizon_months", SOURCE_FOLDER_FIELD, "task"):
+        if required_field not in candidate_fields and required_field != "time_horizon_months":
+            st.error(f"The spherical temporal basis requires metadata field {required_field!r}.")
+            st.stop()
+        if required_field not in analysis_aggregation_fields:
+            analysis_aggregation_fields.append(required_field)
+
 slice_key = (component, position_index, st.session_state.get("source_revision", 0))
 if st.session_state.get("slice_key") != slice_key:
     try:
@@ -3101,7 +3246,6 @@ if st.session_state.get("slice_key") != slice_key:
         st.session_state.slice_key = slice_key
         st.session_state.pop("prepared_key", None)
         st.session_state.pop("pca_key", None)
-        clear_coordinate_metric_result()
         clear_surface_fits()
     except Exception as exc:  # noqa: BLE001 - surface local extraction errors in the UI
         st.error(f"Activation slice could not be prepared: {exc}")
@@ -3131,7 +3275,7 @@ if loaded_pls_model is not None and int(loaded_pls_model.components_.shape[1]) !
 
 prepared_key = (
     tuple((field, tuple(filters[field])) for field in filter_fields),
-    tuple(aggregation_fields),
+    tuple(analysis_aggregation_fields),
     max_samples,
 )
 if st.session_state.get("prepared_key") != prepared_key:
@@ -3154,7 +3298,7 @@ if st.session_state.get("prepared_key") != prepared_key:
                     inspection["metadata_index"],
                     cached_position=inspection["positions"][position_index],
                     metadata_filters=filters,
-                    aggregation_fields=aggregation_fields,
+                    aggregation_fields=analysis_aggregation_fields,
                     max_samples=max_samples,
                 )
             )
@@ -3164,13 +3308,17 @@ if st.session_state.get("prepared_key") != prepared_key:
         st.session_state.prepared_metadata = prepared_metadata
         st.session_state.prepared_details = prepared_details
         st.session_state.pop("pca_key", None)
-        clear_coordinate_metric_result()
         clear_surface_fits()
     except Exception as exc:  # noqa: BLE001 - surface analysis/data errors in the UI
         st.error(f"Analysis data could not be prepared: {exc}")
         st.stop()
 
-pca_key = (prepared_key, pca_identity)
+spherical_residual_identity = (
+    (spherical_mode, spherical_upload_digest)
+    if spherical_enabled
+    else ("disabled", None)
+)
+pca_key = (prepared_key, pca_identity, spherical_residual_identity)
 if st.session_state.get("pca_key") != pca_key:
     try:
         for key in ("projection", "pca", "details"):
@@ -3228,13 +3376,47 @@ if st.session_state.get("pca_key") != pca_key:
             score_fields = [
                 f"{score_prefix}{index + 1}" for index in range(pca.components_.shape[0])
             ]
-            projection["reconstruction_residual_rms"] = reconstruction_residual_rms(
-                activation_matrix,
-                st.session_state.get("prepared_matrix"),
-                st.session_state["prepared_row_offsets"],
-                projection[score_fields].to_numpy(),
-                pca,
-            )
+            if spherical_enabled and spherical_mode == "Fit new":
+                residual_rms, residual_scores, residual_pca = (
+                    reconstruction_residual_statistics(
+                        activation_matrix,
+                        st.session_state.get("prepared_matrix"),
+                        st.session_state["prepared_row_offsets"],
+                        projection[score_fields].to_numpy(),
+                        pca,
+                    )
+                )
+                st.session_state.residual_pca = residual_pca
+                projection["reconstruction_residual_rms"] = residual_rms
+                for residual_index in range(3):
+                    projection[f"reconstruction_residual_PC{residual_index + 1}"] = (
+                        residual_scores[:, residual_index]
+                    )
+            elif spherical_enabled:
+                residual_rms, residual_scores = reconstruction_residual_projection(
+                    activation_matrix,
+                    st.session_state.get("prepared_matrix"),
+                    st.session_state["prepared_row_offsets"],
+                    projection[score_fields].to_numpy(),
+                    pca,
+                    residual_center=loaded_spherical_model["residual_pca_center"],
+                    residual_components=loaded_spherical_model[
+                        "residual_pca_components"
+                    ],
+                )
+                projection["reconstruction_residual_rms"] = residual_rms
+                for residual_index in range(3):
+                    projection[f"reconstruction_residual_PC{residual_index + 1}"] = (
+                        residual_scores[:, residual_index]
+                    )
+            else:
+                projection["reconstruction_residual_rms"] = reconstruction_residual_rms(
+                    activation_matrix,
+                    st.session_state.get("prepared_matrix"),
+                    st.session_state["prepared_row_offsets"],
+                    projection[score_fields].to_numpy(),
+                    pca,
+                )
             if (
                 "log10_time_horizon_months" not in projection
                 and "time_horizon_months" in projection
@@ -3248,7 +3430,6 @@ if st.session_state.get("pca_key") != pca_key:
         st.session_state.projection = projection
         st.session_state.pca = pca
         st.session_state.details = details
-        clear_coordinate_metric_result()
         clear_surface_fits()
     except Exception as exc:  # noqa: BLE001 - surface analysis/data errors in the UI
         st.error(f"{direction_method} projection could not be prepared: {exc}")
@@ -3273,335 +3454,57 @@ metric_columns[3].metric(variance_metric_label, f"{sum(details['explained_varian
 if details.get("pca_source") == "loaded":
     st.caption("Explained variance describes the loaded model's original training data.")
 
-metric_input_fields = tuple(pc_fields[:3])
-metric_transform_available = (
-    component_count >= 3
-    and "log10_time_horizon_months" in base_projection
-    and "reconstruction_residual_rms" in base_projection
-)
-transformed_pc_fields: list[str] = []
-with st.container(border=True):
-    st.subheader("Equivalent-horizon coordinate transform")
-    st.caption(
-        "Fit or apply a three-dimensional Fisher metric after the current PCA or PLS projection. "
-        "The original coordinates remain available alongside the transformed coordinates."
+active_spherical_model = None
+if spherical_enabled:
+    spherical_identity = (
+        ("fit", pca_key, tuple(sorted(spherical_parameters.items())))
+        if spherical_mode == "Fit new"
+        else ("loaded", pca_key, spherical_upload_digest)
     )
-    metric_transform_enabled = st.toggle(
-        "Apply coordinate transform",
-        value=False,
-        key="coordinate_metric_enabled",
-        disabled=not metric_transform_available,
-        help=(
-            "Uses the first three projected coordinates, reconstruction residual RMS, and "
-            "log10 time horizon."
-        ),
-        persist_state="page",
-    )
-    if component_count < 3:
-        st.info("Fit or load at least three PCA/PLS components to enable this transform.")
-    elif "log10_time_horizon_months" not in base_projection:
-        st.info("The projection needs positive time-horizon metadata to fit this transform.")
-    elif metric_transform_enabled:
-        with st.form("coordinate_metric_configuration", border=False):
-            configuration_columns = st.columns(2)
-            metric_residual_degree = int(
-                configuration_columns[0].number_input(
-                    "Residual polynomial degree",
-                    min_value=1,
-                    max_value=20,
-                    value=DEFAULT_METRIC_RESIDUAL_DEGREE,
-                    step=1,
-                    key="coordinate_metric_residual_degree",
-                    help="Highest reconstruction-residual power included in the fit.",
-                    persist_state="page",
-                )
-            )
-            metric_ridge = float(
-                configuration_columns[1].number_input(
-                    "Ridge regularization",
-                    min_value=0.0,
-                    value=DEFAULT_METRIC_RIDGE,
-                    step=DEFAULT_METRIC_RIDGE,
-                    format="%.2e",
-                    key="coordinate_metric_ridge",
-                    help="Diagonal regularization added to within-horizon scatter.",
-                    persist_state="page",
-                )
-            )
-            metric_fit_submitted = st.form_submit_button(
-                "Fit and apply transform",
-                type="primary",
-                icon=":material/linear_scale:",
-                width="stretch",
-            )
-
-        fit_metric_identity = (
-            pca_key,
-            "fitted",
-            metric_input_fields,
-            metric_residual_degree,
-            metric_ridge,
-        )
-        metric_identity = fit_metric_identity
-        if metric_fit_submitted:
-            try:
-                with st.spinner("Fitting equivalent-horizon coordinate transformâ€¦"):
-                    (
-                        transformed_projection,
-                        fitted_metric_transform,
-                        metric_fit_metadata,
-                        metric_diagnostics,
-                    ) = fit_coordinate_metric_transform(
+    try:
+        if spherical_mode == "Fit new":
+            if st.session_state.get("spherical_basis_identity") != spherical_identity:
+                residual_pca = st.session_state.get("residual_pca")
+                if residual_pca is None:
+                    raise ValueError("Residual PCA is unavailable for spherical fitting.")
+                with st.spinner("Fitting the spherical temporal basisâ€¦"):
+                    active_spherical_model = fit_spherical_temporal_basis(
                         base_projection,
-                        metric_input_fields,
-                        residual_degree=metric_residual_degree,
-                        ridge=metric_ridge,
+                        residual_pca_center=residual_pca.mean_,
+                        residual_pca_components=residual_pca.components_,
+                        **spherical_parameters,
                     )
-            except (ValueError, np.linalg.LinAlgError) as exc:
-                clear_coordinate_metric_result()
-                st.error(f"Coordinate transform could not be fitted: {exc}")
-            else:
-                st.session_state.coordinate_metric_identity = fit_metric_identity
-                st.session_state.coordinate_metric_projection = transformed_projection
-                st.session_state.coordinate_metric_transform = fitted_metric_transform
-                st.session_state.coordinate_metric_metadata = metric_fit_metadata
-                st.session_state.coordinate_metric_diagnostics = metric_diagnostics
-                st.session_state.coordinate_metric_validation = {
-                    "current_projection": metric_diagnostics
-                }
-                st.session_state.coordinate_metric_model_source = "fitted"
-                st.session_state.pop("coordinate_metric_axis_default_identity", None)
+                st.session_state.spherical_basis_model = active_spherical_model
+                st.session_state.spherical_basis_identity = spherical_identity
                 clear_surface_fits()
-
-        with st.expander("Use a saved metric model"):
-            st.warning(
-                "Only load metric files you trust. Joblib files can execute code when opened."
-            )
-            metric_upload = st.file_uploader(
-                "Saved equivalent-horizon model",
-                type=["joblib"],
-                key="coordinate_metric_model_upload",
-                help="Accepts equivalent-horizon models downloaded from this app.",
-            )
-            uploaded_metric_digest = None
-            loaded_metric_now = False
-            if metric_upload is not None:
-                metric_model_bytes = metric_upload.getvalue()
-                uploaded_metric_digest = sha256(metric_model_bytes).hexdigest()
-                needs_metric_load = (
-                    st.session_state.get("loaded_coordinate_metric_digest")
-                    != uploaded_metric_digest
-                    or "loaded_coordinate_metric_model" not in st.session_state
-                )
-                if needs_metric_load and st.button(
-                    "Load uploaded metric",
-                    type="primary",
-                    icon=":material/upload_file:",
-                    width="stretch",
-                ):
-                    try:
-                        loaded_metric_model, loaded_metric_artifact = load_metric_transform(
-                            metric_model_bytes
-                        )
-                    except Exception as exc:  # noqa: BLE001 - artifact errors belong in the UI
-                        st.error(f"Equivalent-horizon model could not be loaded: {exc}")
-                    else:
-                        st.session_state.loaded_coordinate_metric_digest = (
-                            uploaded_metric_digest
-                        )
-                        st.session_state.loaded_coordinate_metric_model = loaded_metric_model
-                        st.session_state.loaded_coordinate_metric_artifact = (
-                            loaded_metric_artifact
-                        )
-                        st.session_state.loaded_coordinate_metric_filename = metric_upload.name
-                        loaded_metric_now = True
-            elif "loaded_coordinate_metric_model" in st.session_state:
-                uploaded_metric_digest = st.session_state.get(
-                    "loaded_coordinate_metric_digest"
-                )
-
-            loaded_metric_model = st.session_state.get("loaded_coordinate_metric_model")
-            loaded_metric_artifact = st.session_state.get("loaded_coordinate_metric_artifact")
-            apply_loaded_metric = False
-            if loaded_metric_model is not None and loaded_metric_artifact is not None:
-                if not loaded_metric_now:
-                    apply_loaded_metric = st.button(
-                        "Apply loaded metric",
-                        icon=":material/linear_scale:",
-                        width="stretch",
-                    )
-                st.button(
-                    "Forget loaded metric",
-                    icon=":material/delete:",
-                    on_click=forget_loaded_coordinate_metric,
-                    width="stretch",
-                )
-
-                loaded_metric_metadata = dict(loaded_metric_artifact.get("metadata", {}))
-                loaded_input_fields = tuple(
-                    loaded_metric_metadata.get(
-                        "coordinate_columns", ("PLS1", "PLS2", "PLS3")
-                    )
-                )
-                loaded_output_fields = tuple(
-                    loaded_metric_metadata.get(
-                        "output_columns",
-                        tuple(f"{field}_metric" for field in loaded_input_fields),
-                    )
-                )
-                loaded_metric_identity = (
-                    pca_key,
-                    "loaded",
-                    uploaded_metric_digest,
-                    loaded_input_fields,
-                    loaded_output_fields,
-                )
-                if st.session_state.get("coordinate_metric_model_source") == "loaded":
-                    metric_identity = loaded_metric_identity
-
-                if loaded_metric_now or apply_loaded_metric:
-                    missing_metric_fields = [
-                        field for field in loaded_input_fields if field not in base_projection
-                    ]
-                    if missing_metric_fields:
-                        clear_coordinate_metric_result()
-                        st.error(
-                            "The saved metric expects unavailable projection fields: "
-                            + ", ".join(missing_metric_fields)
-                        )
-                    else:
-                        try:
-                            transformed_projection = apply_coordinate_metric_transform(
-                                base_projection,
-                                loaded_metric_model,
-                                loaded_input_fields,
-                                output_columns=loaded_output_fields,
-                            )
-                            metric_diagnostics = coordinate_metric_diagnostics(
-                                transformed_projection,
-                                loaded_input_fields,
-                                loaded_output_fields,
-                            )
-                        except ValueError as exc:
-                            clear_coordinate_metric_result()
-                            st.error(f"Saved coordinate transform could not be applied: {exc}")
-                        else:
-                            loaded_metric_metadata["coordinate_columns"] = list(
-                                loaded_input_fields
-                            )
-                            loaded_metric_metadata["output_columns"] = list(
-                                loaded_output_fields
-                            )
-                            metric_identity = loaded_metric_identity
-                            st.session_state.coordinate_metric_identity = loaded_metric_identity
-                            st.session_state.coordinate_metric_projection = (
-                                transformed_projection
-                            )
-                            st.session_state.coordinate_metric_transform = loaded_metric_model
-                            st.session_state.coordinate_metric_metadata = (
-                                loaded_metric_metadata
-                            )
-                            st.session_state.coordinate_metric_diagnostics = metric_diagnostics
-                            st.session_state.coordinate_metric_validation = (
-                                loaded_metric_artifact.get("validation", {})
-                            )
-                            st.session_state.coordinate_metric_model_source = "loaded"
-                            st.session_state.pop(
-                                "coordinate_metric_axis_default_identity", None
-                            )
-                            clear_surface_fits()
-
-                st.caption(
-                    f"{st.session_state.get('loaded_coordinate_metric_filename', 'Saved metric')} "
-                    f"- residual degree {loaded_metric_model.residual_degree}"
-                )
             else:
-                st.info("Choose a saved model and click **Load uploaded metric**.")
-
-        if st.session_state.get("coordinate_metric_identity") == metric_identity:
-            projection = st.session_state.coordinate_metric_projection
-            metric_fit_metadata = st.session_state.coordinate_metric_metadata
-            metric_diagnostics = st.session_state.coordinate_metric_diagnostics
-            transformed_pc_fields = list(metric_fit_metadata["output_columns"])
-            if (
-                st.session_state.get("coordinate_metric_axis_default_identity")
-                != metric_identity
-            ):
-                st.session_state["projection_x_axis"] = transformed_pc_fields[0]
-                st.session_state["projection_y_axis"] = transformed_pc_fields[1]
-                st.session_state["projection_z_axis"] = transformed_pc_fields[2]
-                st.session_state.coordinate_metric_axis_default_identity = metric_identity
-            metric_model_source = st.session_state.get(
-                "coordinate_metric_model_source", "fitted"
-            )
-            st.success(
-                f"Transform {metric_model_source} and applied to all projected points: "
-                + ", ".join(transformed_pc_fields)
-            )
-            metric_model_bytes = serialize_metric_transform(
-                st.session_state.coordinate_metric_transform,
-                metric_fit_metadata,
-                st.session_state.get("coordinate_metric_validation", {}),
-            )
-            st.download_button(
-                "Download equivalent-horizon model",
-                data=metric_model_bytes,
-                file_name="equivalent_horizon_metric.joblib",
-                mime="application/octet-stream",
-                icon=":material/download:",
-                on_click="ignore",
-            )
-
-            st.markdown("**Leading generalized eigenvalues**")
-            with st.container(horizontal=True):
-                for index, eigenvalue in enumerate(
-                    metric_fit_metadata["leading_generalized_eigenvalues"], start=1
-                ):
-                    st.metric(
-                        f"Eigenvalue {index}",
-                        _format_metric(eigenvalue),
-                        border=True,
-                    )
-
-            metric_labels = {
-                "equal_horizon_pairwise_rms": "Equal-horizon pairwise RMS",
-                "horizon_centroid_rms": "Horizon-centroid RMS",
-                "normalized_equal_horizon_rms": "Normalized equal-horizon RMS",
-            }
-            diagnostic_table = pd.DataFrame(
-                [
-                    {
-                        "metric": label,
-                        "before": metric_diagnostics["before"][key],
-                        "after": metric_diagnostics["after"][key],
-                        "reduction": metric_diagnostics["improvement"][key],
-                    }
-                    for key, label in metric_labels.items()
-                ]
-            )
-            st.dataframe(
-                diagnostic_table,
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "before": st.column_config.NumberColumn(format="%.5g"),
-                    "after": st.column_config.NumberColumn(format="%.5g"),
-                    "reduction": st.column_config.NumberColumn(format="percent"),
-                },
-            )
-            st.caption(
-                "These diagnostics describe the current fit data; lower equal-horizon "
-                "distance is better. The normalized value accounts for horizon-centroid spread."
-            )
-        elif st.session_state.get("coordinate_metric_projection") is not None:
-            st.info("The configuration changed. Fit again to refresh the transform.")
+                active_spherical_model = st.session_state.spherical_basis_model
         else:
-            st.info("Edit the configuration, then fit the transform.")
+            active_spherical_model = loaded_spherical_model
+            if st.session_state.get("spherical_basis_identity") != spherical_identity:
+                st.session_state.spherical_basis_identity = spherical_identity
+                st.session_state.spherical_basis_model = active_spherical_model
+                clear_surface_fits()
+        projection = transform_spherical_temporal_basis(
+            base_projection, active_spherical_model
+        )
+    except Exception as exc:  # noqa: BLE001 - surface transform/data errors in the UI
+        st.error(f"Spherical temporal basis could not be applied: {exc}")
+        st.stop()
+    with st.container(border=True):
+        st.success(
+            "Spherical temporal basis active Â· "
+            f"{len(active_spherical_model['training_sources']):,} sources Â· "
+            f"{len(active_spherical_model['training_horizons']):,} shared horizons"
+        )
+        st.caption(
+            "Coordinates use a balanced 6D z-score sphere: two learned angular time axes "
+            "plus standardized log-radius. Downloaded CSVs include all three."
+        )
 
-if not metric_transform_enabled:
-    st.session_state.pop("coordinate_metric_axis_default_identity", None)
-
-coordinate_fields = [*pc_fields, *transformed_pc_fields]
+coordinate_fields = [*pc_fields]
+if spherical_enabled:
+    coordinate_fields.extend(SPHERICAL_OUTPUT_COLUMNS)
 axis_fields = [*coordinate_fields, "reconstruction_residual_rms"]
 metadata_fields = sorted(
     column for column in projection if column not in {*coordinate_fields, "sample_index"}
@@ -3622,7 +3525,9 @@ if len(axis_fields) < required_axes:
         f"At least {required_axes} numeric projection fields are required for a {plot_mode} plot."
     )
     st.stop()
-preferred_axis_fields = transformed_pc_fields or pc_fields
+preferred_axis_fields = (
+    list(SPHERICAL_OUTPUT_COLUMNS) if spherical_enabled else pc_fields
+)
 if st.session_state.get("projection_x_axis") not in axis_fields:
     st.session_state["projection_x_axis"] = preferred_axis_fields[0]
 x_component = controls[1].selectbox(
@@ -4067,7 +3972,7 @@ else:
                             ),
                             "layer_component": component,
                             "cached_position": inspection["positions"][position_index],
-                            "aggregation_fields": list(aggregation_fields),
+                            "aggregation_fields": list(analysis_aggregation_fields),
                             "fit_points": fit_metrics["fit_points"],
                             "input_points": fit_metrics["input_points"],
                             "random_state": random_state,
@@ -4424,7 +4329,7 @@ else:
                 direction_method=direction_method,
                 layer_component=component,
                 cached_position=inspection["positions"][position_index],
-                aggregation_fields=list(aggregation_fields),
+                aggregation_fields=list(analysis_aggregation_fields),
             )
         elif curve_enabled:
             curve_result, curve_appearance = loaded_curve_controls(
@@ -4823,13 +4728,28 @@ with st.expander(f"{direction_method} details and downloads"):
     st.caption("Downloads contain the full projection, independent of visual filters.")
     safe_component = component.replace("/", "-").replace("\\", "-")
     with st.container(horizontal=True):
+        if spherical_enabled:
+            st.download_button(
+                "Download spherical model",
+                data=lambda: serialize_spherical_temporal_basis(
+                    active_spherical_model
+                ),
+                file_name=f"spherical_temporal_basis_{safe_component}.npz",
+                mime="application/octet-stream",
+                icon=":material/download:",
+                on_click="ignore",
+                help=(
+                    "Includes the fitted residual-PCA projection, spherical preprocessor, "
+                    "basis, algorithm parameters, and training provenance."
+                ),
+            )
         if direction_method == "PCA":
             if pca_mode == "Fit new":
                 model_metadata = {
                     "layer_component": component,
                     "cached_position": inspection["positions"][position_index],
                     "pca_solver": details.get("pca_solver"),
-                    "aggregation_fields": list(aggregation_fields),
+                    "aggregation_fields": list(analysis_aggregation_fields),
                 }
             else:
                 artifact_fields = {
@@ -4858,7 +4778,7 @@ with st.expander(f"{direction_method} details and downloads"):
                     "layer_component": component,
                     "cached_position": inspection["positions"][position_index],
                     "pls_target": "log10_time_horizon_months",
-                    "aggregation_fields": list(aggregation_fields),
+                    "aggregation_fields": list(analysis_aggregation_fields),
                 }
             else:
                 artifact_fields = {
@@ -4907,8 +4827,7 @@ with st.expander(f"{direction_method} details and downloads"):
             icon=":material/download:",
             on_click="ignore",
             help=(
-                "Includes the original coordinates and any fitted *_metric coordinates. "
-                "Also includes t (spline parameter) and u (extrusion parameter) when an "
-                "extruded surface is loaded."
+                "Includes the projected coordinates. Also includes t (spline parameter) "
+                "and u (extrusion parameter) when an extruded surface is loaded."
             ),
         )

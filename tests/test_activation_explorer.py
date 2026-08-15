@@ -50,15 +50,6 @@ from temporal_manifolds.viz.curve_fitting import serialize_curve_model
 from temporal_manifolds.geometry.extrusion.rms_spline_surface_transformer import (
     serialize_rms_spline_surface,
 )
-from temporal_manifolds.geometry.equivalent_horizon_metric.equivalent_horizon_metric_transform import (
-    DEFAULT_RESIDUAL_DEGREE,
-    DEFAULT_RIDGE,
-    apply_coordinate_metric_transform,
-    coordinate_metric_diagnostics,
-    fit_coordinate_metric_transform,
-    load_metric_transform,
-    serialize_metric_transform,
-)
 
 
 def test_pca_projection_fingerprint_includes_whitening_scale() -> None:
@@ -174,6 +165,15 @@ def test_curve_overlay_is_available_only_for_three_dimensional_plots(tmp_path: P
         button for button in app.button if button.label == "Apply PLS configuration"
     ).click().run(timeout=30)
     assert not app.exception
+    next(
+        selectbox for selectbox in app.selectbox if selectbox.label == "X axis"
+    ).set_value("PLS1").run(timeout=30)
+    next(
+        selectbox for selectbox in app.selectbox if selectbox.label == "Y axis"
+    ).set_value("PLS2").run(timeout=30)
+    next(
+        selectbox for selectbox in app.selectbox if selectbox.label == "Z axis"
+    ).set_value("PLS3").run(timeout=30)
     assert "Curve overlay" in [toggle.label for toggle in app.toggle]
     assert "Extruded surface" in [toggle.label for toggle in app.toggle]
     curve_toggle = next(toggle for toggle in app.toggle if toggle.label == "Curve overlay")
@@ -307,98 +307,6 @@ def test_curve_overlay_is_available_only_for_three_dimensional_plots(tmp_path: P
     assert any(
         "surface and curve overlays" in caption.value for caption in app.caption
     )
-
-
-@pytest.mark.parametrize("direction_method", ["PCA", "PLS"])
-def test_app_fits_and_exposes_equivalent_horizon_coordinates(
-    tmp_path: Path,
-    direction_method: str,
-) -> None:
-    path = tmp_path / "activations_batch_000.pt"
-    _curve_batch(path)
-    app_path = Path(__file__).resolve().parents[1] / "apps" / "activation_explorer.py"
-    app = AppTest.from_file(app_path)
-    app.session_state["sources"] = [str(path)]
-    app.session_state["source_label"] = str(tmp_path)
-    app.session_state["source_is_local"] = True
-    app.session_state["source_revision"] = 1
-
-    app.run(timeout=30)
-
-    assert not app.exception
-    if direction_method == "PLS":
-        direction = next(
-            control for control in app.segmented_control if control.label == "Direction method"
-        )
-        direction.set_value("PLS").run(timeout=30)
-        next(
-            button for button in app.button if button.label == "Apply PLS configuration"
-        ).click().run(timeout=30)
-        assert not app.exception
-
-    transform_toggle = next(
-        toggle for toggle in app.toggle if toggle.label == "Apply coordinate transform"
-    )
-    transform_toggle.set_value(True).run(timeout=30)
-
-    degree = next(
-        field for field in app.number_input if field.label == "Residual polynomial degree"
-    )
-    ridge = next(field for field in app.number_input if field.label == "Ridge regularization")
-    assert degree.value == 6
-    assert ridge.value == pytest.approx(1e-6)
-    assert "Saved equivalent-horizon model" in [
-        uploader.label for uploader in app.file_uploader
-    ]
-
-    next(
-        button for button in app.button if button.label == "Fit and apply transform"
-    ).click().run(timeout=30)
-
-    assert not app.exception
-    assert {"Eigenvalue 1", "Eigenvalue 2", "Eigenvalue 3"}.issubset(
-        {metric.label for metric in app.metric}
-    )
-    assert "Download equivalent-horizon model" in [
-        button.label for button in app.download_button
-    ]
-    metric_artifact = serialize_metric_transform(
-        app.session_state["coordinate_metric_transform"],
-        app.session_state["coordinate_metric_metadata"],
-        app.session_state["coordinate_metric_validation"],
-    )
-    metric_uploader = next(
-        uploader
-        for uploader in app.file_uploader
-        if uploader.label == "Saved equivalent-horizon model"
-    )
-    metric_uploader.set_value(
-        ("equivalent_horizon_metric.joblib", metric_artifact, "application/octet-stream")
-    ).run(timeout=30)
-    next(button for button in app.button if button.label == "Load uploaded metric").click().run(
-        timeout=30
-    )
-
-    assert not app.exception
-    assert app.session_state["coordinate_metric_model_source"] == "loaded"
-    x_axis = next(selectbox for selectbox in app.selectbox if selectbox.label == "X axis")
-    prefix = "PC" if direction_method == "PCA" else "PLS"
-    expected_coordinates = {
-        *[f"{prefix}{index}" for index in range(1, 4)],
-        *[f"{prefix}{index}_metric" for index in range(1, 4)],
-    }
-    assert expected_coordinates.issubset(set(x_axis.options))
-    y_axis = next(selectbox for selectbox in app.selectbox if selectbox.label == "Y axis")
-    z_axis = next(selectbox for selectbox in app.selectbox if selectbox.label == "Z axis")
-    assert (x_axis.value, y_axis.value, z_axis.value) == (
-        f"{prefix}1_metric",
-        f"{prefix}2_metric",
-        f"{prefix}3_metric",
-    )
-
-    x_axis.set_value(f"{prefix}1").run(timeout=30)
-    x_axis = next(selectbox for selectbox in app.selectbox if selectbox.label == "X axis")
-    assert x_axis.value == f"{prefix}1"
 
 
 def _batch(path: Path) -> None:
@@ -817,116 +725,6 @@ def test_reconstruction_residual_rms_records_one_scalar_per_point(model_kind: st
 
     assert actual.shape == (len(values),)
     assert np.allclose(actual, expected)
-
-
-@pytest.mark.parametrize("coordinate_prefix", ["PC", "PLS"])
-def test_coordinate_metric_preserves_original_and_appends_transformed_coordinates(
-    coordinate_prefix: str,
-) -> None:
-    rng = np.random.default_rng(91)
-    horizon = np.repeat(np.linspace(-1.0, 1.0, 5), 6)
-    coordinates = np.column_stack(
-        [
-            8.0 * horizon + rng.normal(scale=1.2, size=len(horizon)),
-            -3.0 * horizon + rng.normal(scale=0.8, size=len(horizon)),
-            horizon**2 + rng.normal(scale=0.5, size=len(horizon)),
-        ]
-    )
-    coordinate_columns = tuple(f"{coordinate_prefix}{index}" for index in range(1, 4))
-    frame = pd.DataFrame(coordinates, columns=coordinate_columns)
-    frame["reconstruction_residual_rms"] = 0.2 + rng.uniform(0.0, 0.1, len(frame))
-    frame["log10_time_horizon_months"] = horizon
-    frame["source_folder"] = np.where(np.arange(len(frame)) % 2, "plain", "conv")
-    original = frame.copy(deep=True)
-
-    transformed, _, metadata, diagnostics = fit_coordinate_metric_transform(
-        frame,
-        coordinate_columns,
-    )
-
-    pd.testing.assert_frame_equal(transformed[list(frame)], original)
-    output_columns = [f"{column}_metric" for column in coordinate_columns]
-    assert metadata["residual_degree"] == DEFAULT_RESIDUAL_DEGREE == 6
-    assert metadata["ridge"] == DEFAULT_RIDGE == pytest.approx(1e-6)
-    assert metadata["output_columns"] == output_columns
-    assert len(metadata["leading_generalized_eigenvalues"]) == 3
-    assert np.isfinite(transformed[output_columns].to_numpy()).all()
-    assert set(diagnostics) == {"before", "after", "improvement"}
-    assert np.isfinite(list(diagnostics["before"].values())).all()
-    assert np.isfinite(list(diagnostics["after"].values())).all()
-
-    downloaded = pd.read_csv(io.StringIO(transformed.to_csv(index=False)))
-    assert set([*coordinate_columns, *output_columns]).issubset(downloaded.columns)
-
-
-def test_coordinate_metric_artifact_round_trip_applies_without_refitting() -> None:
-    rng = np.random.default_rng(29)
-    horizon = np.repeat(np.linspace(-1.0, 1.0, 6), 5)
-    coordinate_columns = ("PLS1", "PLS2", "PLS3")
-    frame = pd.DataFrame(
-        {
-            "PLS1": 4.0 * horizon + rng.normal(scale=0.3, size=len(horizon)),
-            "PLS2": -2.0 * horizon + rng.normal(scale=0.4, size=len(horizon)),
-            "PLS3": horizon**2 + rng.normal(scale=0.2, size=len(horizon)),
-            "reconstruction_residual_rms": rng.uniform(0.1, 0.4, len(horizon)),
-            "log10_time_horizon_months": horizon,
-            "source_folder": "plain",
-        }
-    )
-    expected, fitted, metadata, fit_diagnostics = fit_coordinate_metric_transform(
-        frame,
-        coordinate_columns,
-    )
-
-    payload = serialize_metric_transform(
-        fitted,
-        metadata,
-        {"current_projection": fit_diagnostics},
-    )
-    restored, artifact = load_metric_transform(payload)
-    output_columns = tuple(artifact["metadata"]["output_columns"])
-    actual = apply_coordinate_metric_transform(
-        frame,
-        restored,
-        tuple(artifact["metadata"]["coordinate_columns"]),
-        output_columns=output_columns,
-    )
-    restored_diagnostics = coordinate_metric_diagnostics(
-        actual,
-        coordinate_columns,
-        output_columns,
-    )
-
-    assert artifact["metadata"]["residual_degree"] == DEFAULT_RESIDUAL_DEGREE
-    assert artifact["validation"]["current_projection"] == fit_diagnostics
-    np.testing.assert_allclose(actual[list(output_columns)], expected[list(output_columns)])
-    for section in ("before", "after", "improvement"):
-        assert restored_diagnostics[section] == pytest.approx(fit_diagnostics[section])
-
-
-def test_natural_basis_metric_bundle_is_compatible_with_upload_flow() -> None:
-    root = Path(__file__).resolve().parents[1]
-    bundle = root / "data" / "natural_basis_equivalent_horizon_metric_bundle"
-    model, artifact = load_metric_transform(
-        bundle / "natural_basis_equivalent_horizon_metric.joblib"
-    )
-    frame = pd.read_csv(bundle / "natural_basis_transformed_coordinates_no_conv.csv", nrows=8)
-    output_columns = tuple(artifact["metadata"]["output_columns"])
-
-    actual = apply_coordinate_metric_transform(
-        frame.drop(columns=list(output_columns)),
-        model,
-        tuple(artifact["metadata"].get("coordinate_columns", ("PLS1", "PLS2", "PLS3"))),
-        output_columns=output_columns,
-    )
-
-    assert model.residual_degree == 6
-    np.testing.assert_allclose(
-        actual[list(output_columns)],
-        frame[list(output_columns)],
-        rtol=1e-10,
-        atol=1e-10,
-    )
 
 
 def test_saved_pls_round_trip_reproduces_projection() -> None:
