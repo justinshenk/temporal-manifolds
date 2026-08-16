@@ -14,6 +14,7 @@ try:
     from . import abstract as abstract_dataset
     from . import conversational as conversational_dataset
     from . import plain_english as plain_english_dataset
+    from . import plain_long as plain_long_dataset
     from .utils import (
         NUMBER_FORMATS,
         NumberFormat,
@@ -27,6 +28,7 @@ except ImportError:
     import abstract as abstract_dataset  # type: ignore
     import conversational as conversational_dataset  # type: ignore
     import plain_english as plain_english_dataset  # type: ignore
+    import plain_long as plain_long_dataset  # type: ignore
 
     from temporal_manifolds.dataset.utils import (  # type: ignore
         NUMBER_FORMATS,
@@ -67,12 +69,13 @@ class PromptRecord(TypedDict):
     unit: str | None
 
 
-DatasetName = Literal["conversational", "abstract", "plain_english"]
+DatasetName = Literal["conversational", "abstract", "plain_english", "plain_long"]
 
 DATASETS = {
     "conversational": conversational_dataset,
     "abstract": abstract_dataset,
     "plain_english": plain_english_dataset,
+    "plain_long": plain_long_dataset,
 }
 
 TIME_CONSTRAINT_LINE = re.compile(
@@ -126,7 +129,9 @@ def load_dataset_config(
     )
 
 
-def normalize_task_configs(task_configs: Mapping[str, TaskConfig]) -> dict[str, NormalizedTaskConfig]:
+def normalize_task_configs(
+    task_configs: Mapping[str, TaskConfig],
+) -> dict[str, NormalizedTaskConfig]:
     """Return task units plus optional analysis metadata for each task."""
     normalized: dict[str, NormalizedTaskConfig] = {}
     units_by_task: dict[str, set[str]] = {}

@@ -14,8 +14,14 @@ from tqdm import tqdm
 
 from temporal_manifolds.activations.extraction_policy import (
     PROMPT_TOKEN_POSITION as POSITION,
+)
+from temporal_manifolds.activations.extraction_policy import (
     TARGET_COMPONENT as COMPONENT,
+)
+from temporal_manifolds.activations.extraction_policy import (
     TARGET_LAYER as LAYER,
+)
+from temporal_manifolds.activations.extraction_policy import (
     TARGET_LAYER_COMPONENT,
     canonical_prompt_metadata,
     validate_activation_payload,
@@ -29,7 +35,7 @@ GCS_PREFIX = "selected_acts"
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 DEFAULT_OUTPUT_DIR = Path("results/selected_acts")
 DEFAULT_BATCH_SIZE = 128
-SUPPORTED_DATASETS = ("conversational", "plain_english")
+SUPPORTED_DATASETS = ("conversational", "plain_english", "plain_long")
 
 
 def build_payload(

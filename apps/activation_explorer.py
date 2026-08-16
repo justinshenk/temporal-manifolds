@@ -30,7 +30,11 @@ from temporal_manifolds.geometry.extrusion.rms_spline_surface_transformer import
 )
 from temporal_manifolds.geometry.spherical_temporal_basis import (
     DEFAULT_PARAMETERS as SPHERICAL_DEFAULT_PARAMETERS,
+)
+from temporal_manifolds.geometry.spherical_temporal_basis import (
     OUTPUT_COLUMNS as SPHERICAL_OUTPUT_COLUMNS,
+)
+from temporal_manifolds.geometry.spherical_temporal_basis import (
     fit_spherical_temporal_basis,
     load_spherical_temporal_basis,
     serialize_spherical_temporal_basis,
@@ -62,10 +66,10 @@ from temporal_manifolds.viz.curve_fitting import (
     CURVE_ALGORITHMS,
     CURVE_DESCRIPTIONS,
     CURVE_MODEL_ARTIFACT_VERSION,
-    CurveModel,
     CurveDisplayResult,
     CurveEvaluationResult,
     CurveFitResult,
+    CurveModel,
     evaluate_curve_model,
     fit_geometric_spline,
     geometric_spline_endpoint_defaults,
@@ -903,9 +907,7 @@ def curve_appearance_controls(result: CurveDisplayResult) -> dict[str, Any]:
             key="curve_color",
             persist_state="page",
         )
-        line_width = st.slider(
-            "Line width", 1, 14, 6, key="curve_line_width", persist_state="page"
-        )
+        line_width = st.slider("Line width", 1, 14, 6, key="curve_line_width", persist_state="page")
         opacity = st.slider(
             "Curve opacity",
             0.1,
@@ -1069,16 +1071,16 @@ def new_curve_controls(
         )
         st.caption(CURVE_DESCRIPTIONS[algorithm])
 
-        if direction_method != "PLS" or set(coordinate_features) != {
-            "PLS1",
-            "PLS2",
-            "PLS3",
-        }:
-            st.warning(
-                "Endpoint-constrained curve fitting requires a 3D PLS plot using "
-                "PLS1, PLS2, and PLS3."
-            )
-            return None, {}
+        # if direction_method != "PLS" or set(coordinate_features) != {
+        #     "PLS1",
+        #     "PLS2",
+        #     "PLS3",
+        # }:
+        #     st.warning(
+        #         "Endpoint-constrained curve fitting requires a 3D PLS plot using "
+        #         "PLS1, PLS2, and PLS3."
+        #     )
+        #     return None, {}
 
         curve_source = plot_data if fit_scope == "Visible" else projection
         coordinates = curve_source[list(coordinate_features)].to_numpy(dtype=np.float64)
@@ -1096,9 +1098,7 @@ def new_curve_controls(
         minimum_unique = 4
         if unique_count < minimum_unique:
             st.warning(
-                f"At least {minimum_unique} distinct finite "
-                + "3D locations"
-                + " are required."
+                f"At least {minimum_unique} distinct finite " + "3D locations" + " are required."
             )
             return None, {}
 
@@ -1283,9 +1283,7 @@ def new_curve_controls(
             "random_state": random_state,
             "coordinate_features": coordinate_features,
         }
-        data_digest = sha256(
-            np.ascontiguousarray(coordinates).tobytes()
-        ).hexdigest()
+        data_digest = sha256(np.ascontiguousarray(coordinates).tobytes()).hexdigest()
         curve_identity = (
             data_digest,
             parameter_feature,
@@ -1300,9 +1298,7 @@ def new_curve_controls(
                 if knot_error is not None:
                     raise ValueError(knot_error)
                 with st.spinner(f"Fitting {CURVE_ALGORITHMS[algorithm]}…"):
-                    fitted_curve = fit_geometric_spline_cached(
-                        coordinates, fit_options
-                    )
+                    fitted_curve = fit_geometric_spline_cached(coordinates, fit_options)
             except (ValueError, MemoryError) as exc:
                 st.session_state.pop("curve_result", None)
                 st.session_state.pop("curve_identity", None)
@@ -1332,9 +1328,7 @@ def new_curve_controls(
         diagnostic_columns[1].metric(
             "Geometric 3D MAE", _format_metric(metrics["geometric_mae_3d"])
         )
-        diagnostic_columns[2].metric(
-            "Training 3D RMSE", _format_metric(metrics["train_rmse_3d"])
-        )
+        diagnostic_columns[2].metric("Training 3D RMSE", _format_metric(metrics["train_rmse_3d"]))
         diagnostic_columns[3].metric("Fit values", f"{int(metrics['fit_points']):,}")
         if result.warnings:
             st.warning(" ".join(result.warnings))
@@ -1557,9 +1551,7 @@ def loaded_curve_controls(
             1,
             format="%d%%",
             key="loaded_curve_padding",
-            help=(
-                "Extends the saved curve beyond t=0 and t=1 along its endpoint tangents."
-            ),
+            help=("Extends the saved curve beyond t=0 and t=1 along its endpoint tangents."),
             persist_state="page",
         )
         preview_submitted = st.button(
@@ -1582,9 +1574,7 @@ def loaded_curve_controls(
         display_coordinate_bounds = np.column_stack(
             [finite_display.min(axis=0), finite_display.max(axis=0)]
         )
-        data_digest = sha256(
-            np.ascontiguousarray(coordinates).tobytes()
-        ).hexdigest()
+        data_digest = sha256(np.ascontiguousarray(coordinates).tobytes()).hexdigest()
         preview_identity = (
             loaded_digest,
             current_pca_digest,
@@ -1621,9 +1611,7 @@ def loaded_curve_controls(
             return None, {}
         metrics = result.metrics
         diagnostic_columns = st.columns(3)
-        diagnostic_columns[0].metric(
-            "Current 3D RMSE", _format_metric(metrics["current_rmse_3d"])
-        )
+        diagnostic_columns[0].metric("Current 3D RMSE", _format_metric(metrics["current_rmse_3d"]))
         diagnostic_columns[1].metric("Current R²", _format_metric(metrics["current_r2"]))
         diagnostic_columns[2].metric(
             "Outside fit range", f"{int(metrics['extrapolation_points']):,}"
@@ -1670,7 +1658,9 @@ def loaded_extruded_surface_controls(
         model_upload = st.file_uploader(
             "Cubic spline model" if fitting_direction else "Saved extruded surface",
             type=["joblib"],
-            key=("extrusion_curve_upload" if fitting_direction else "extruded_surface_model_upload"),
+            key=(
+                "extrusion_curve_upload" if fitting_direction else "extruded_surface_model_upload"
+            ),
             help=(
                 "Choose a degree-3 smoothing-spline model downloaded from the curve overlay."
                 if fitting_direction
@@ -1710,8 +1700,8 @@ def loaded_extruded_surface_controls(
                             "The extrusion input must be a degree-3 cubic spline curve model."
                         )
                 else:
-                    loaded_model, loaded_provenance = (
-                        RMSSplineSurfaceTransformer.load_artifact(model_bytes)
+                    loaded_model, loaded_provenance = RMSSplineSurfaceTransformer.load_artifact(
+                        model_bytes
                     )
             except (TypeError, ValueError) as exc:
                 st.error(str(exc))
@@ -1729,13 +1719,11 @@ def loaded_extruded_surface_controls(
                 st.session_state.pop("loaded_extruded_surface_identity", None)
                 load_succeeded = True
 
-        loaded_curve_model: CurveModel | None = st.session_state.get(
-            "loaded_extrusion_curve_model"
-        ) if fitting_direction else None
+        loaded_curve_model: CurveModel | None = (
+            st.session_state.get("loaded_extrusion_curve_model") if fitting_direction else None
+        )
         loaded_surface_model = (
-            st.session_state.get("loaded_extruded_surface_model")
-            if not fitting_direction
-            else None
+            st.session_state.get("loaded_extruded_surface_model") if not fitting_direction else None
         )
         loaded_model = loaded_curve_model if fitting_direction else loaded_surface_model
         loaded_provenance = st.session_state.get("loaded_extruded_surface_provenance", {})
@@ -1827,9 +1815,7 @@ def loaded_extruded_surface_controls(
             compatible = False
         saved_layer = loaded_provenance.get("layer_component")
         if saved_layer is not None and saved_layer != layer_component:
-            st.warning(
-                f"This model was saved for {saved_layer!r}, not {layer_component!r}."
-            )
+            st.warning(f"This model was saved for {saved_layer!r}, not {layer_component!r}.")
         saved_position = loaded_provenance.get("cached_position")
         if saved_position is not None and saved_position != cached_position:
             st.warning(
@@ -1893,9 +1879,9 @@ def loaded_extruded_surface_controls(
         preview_source = plot_data if preview_scope == "Visible" else projection
         saved_coordinates = list(loaded_model.coordinate_features)
         point_xyz = preview_source[saved_coordinates].to_numpy(dtype=np.float64)
-        point_residual = pd.to_numeric(
-            preview_source[residual_feature], errors="coerce"
-        ).to_numpy(dtype=np.float64)
+        point_residual = pd.to_numeric(preview_source[residual_feature], errors="coerce").to_numpy(
+            dtype=np.float64
+        )
         if fitting_direction:
             finite_point_xyz = np.isfinite(point_xyz).all(axis=1)
             point_parameter = np.full(len(point_xyz), np.nan, dtype=np.float64)
@@ -2151,9 +2137,7 @@ def loaded_extruded_surface_controls(
         if st.session_state.get("loaded_extruded_surface_identity") == preview_identity:
             result = st.session_state.get("loaded_extruded_surface_result")
         elif st.session_state.get("loaded_extruded_surface_result") is not None:
-            action_label = (
-                "Fit / update extrusion" if fitting_direction else "Apply loaded surface"
-            )
+            action_label = "Fit / update extrusion" if fitting_direction else "Apply loaded surface"
             st.info(f"The points or controls changed. Click **{action_label}**.")
         if result is None:
             return None, {}
@@ -2214,14 +2198,10 @@ def loaded_extruded_surface_controls(
                     base_source if fitting_direction else artifact_metadata.get("base_source")
                 ),
                 "fit_sources": (
-                    list(fit_sources)
-                    if fitting_direction
-                    else artifact_metadata.get("fit_sources")
+                    list(fit_sources) if fitting_direction else artifact_metadata.get("fit_sources")
                 ),
                 "fit_scope": (
-                    preview_scope
-                    if fitting_direction
-                    else artifact_metadata.get("fit_scope")
+                    preview_scope if fitting_direction else artifact_metadata.get("fit_scope")
                 ),
                 "fit_metrics": {
                     key: metrics[key]
@@ -2240,9 +2220,7 @@ def loaded_extruded_surface_controls(
         safe_coordinates = "-".join(result.model.coordinate_features).replace("/", "-")
         st.download_button(
             "Download extruded surface",
-            data=lambda: serialize_rms_spline_surface(
-                result.model, metadata=artifact_metadata
-            ),
+            data=lambda: serialize_rms_spline_surface(result.model, metadata=artifact_metadata),
             file_name=f"activation_rms_spline_surface_{safe_coordinates}.joblib",
             mime="application/octet-stream",
             icon=":material/download:",
@@ -3152,8 +3130,7 @@ with st.sidebar:
                 spherical_bytes = spherical_upload.getvalue()
                 spherical_upload_digest = sha256(spherical_bytes).hexdigest()
                 if (
-                    st.session_state.get("loaded_spherical_basis_digest")
-                    != spherical_upload_digest
+                    st.session_state.get("loaded_spherical_basis_digest") != spherical_upload_digest
                     or "loaded_spherical_basis_model" not in st.session_state
                 ):
                     if st.button(
@@ -3163,36 +3140,24 @@ with st.sidebar:
                         width="stretch",
                     ):
                         try:
-                            loaded_spherical_model = load_spherical_temporal_basis(
-                                spherical_bytes
-                            )
+                            loaded_spherical_model = load_spherical_temporal_basis(spherical_bytes)
                         except ValueError as exc:
                             st.error(str(exc))
                             st.stop()
-                        st.session_state.loaded_spherical_basis_digest = (
-                            spherical_upload_digest
-                        )
-                        st.session_state.loaded_spherical_basis_model = (
-                            loaded_spherical_model
-                        )
-                        st.session_state.loaded_spherical_basis_filename = (
-                            spherical_upload.name
-                        )
+                        st.session_state.loaded_spherical_basis_digest = spherical_upload_digest
+                        st.session_state.loaded_spherical_basis_model = loaded_spherical_model
+                        st.session_state.loaded_spherical_basis_filename = spherical_upload.name
                 else:
                     loaded_spherical_model = st.session_state.loaded_spherical_basis_model
             elif "loaded_spherical_basis_model" in st.session_state:
-                spherical_upload_digest = st.session_state.get(
-                    "loaded_spherical_basis_digest"
-                )
+                spherical_upload_digest = st.session_state.get("loaded_spherical_basis_digest")
                 loaded_spherical_model = st.session_state.loaded_spherical_basis_model
             if loaded_spherical_model is None:
                 st.info("Choose a saved model and click **Load uploaded spherical model**.")
                 st.stop()
             spherical_parameters = dict(loaded_spherical_model["parameters"])
             st.success(
-                st.session_state.get(
-                    "loaded_spherical_basis_filename", "Saved spherical model"
-                )
+                st.session_state.get("loaded_spherical_basis_filename", "Saved spherical model")
             )
             st.caption(
                 "Parameters: "
@@ -3314,9 +3279,7 @@ if st.session_state.get("prepared_key") != prepared_key:
         st.stop()
 
 spherical_residual_identity = (
-    (spherical_mode, spherical_upload_digest)
-    if spherical_enabled
-    else ("disabled", None)
+    (spherical_mode, spherical_upload_digest) if spherical_enabled else ("disabled", None)
 )
 pca_key = (prepared_key, pca_identity, spherical_residual_identity)
 if st.session_state.get("pca_key") != pca_key:
@@ -3377,21 +3340,19 @@ if st.session_state.get("pca_key") != pca_key:
                 f"{score_prefix}{index + 1}" for index in range(pca.components_.shape[0])
             ]
             if spherical_enabled and spherical_mode == "Fit new":
-                residual_rms, residual_scores, residual_pca = (
-                    reconstruction_residual_statistics(
-                        activation_matrix,
-                        st.session_state.get("prepared_matrix"),
-                        st.session_state["prepared_row_offsets"],
-                        projection[score_fields].to_numpy(),
-                        pca,
-                    )
+                residual_rms, residual_scores, residual_pca = reconstruction_residual_statistics(
+                    activation_matrix,
+                    st.session_state.get("prepared_matrix"),
+                    st.session_state["prepared_row_offsets"],
+                    projection[score_fields].to_numpy(),
+                    pca,
                 )
                 st.session_state.residual_pca = residual_pca
                 projection["reconstruction_residual_rms"] = residual_rms
                 for residual_index in range(3):
-                    projection[f"reconstruction_residual_PC{residual_index + 1}"] = (
-                        residual_scores[:, residual_index]
-                    )
+                    projection[f"reconstruction_residual_PC{residual_index + 1}"] = residual_scores[
+                        :, residual_index
+                    ]
             elif spherical_enabled:
                 residual_rms, residual_scores = reconstruction_residual_projection(
                     activation_matrix,
@@ -3400,15 +3361,13 @@ if st.session_state.get("pca_key") != pca_key:
                     projection[score_fields].to_numpy(),
                     pca,
                     residual_center=loaded_spherical_model["residual_pca_center"],
-                    residual_components=loaded_spherical_model[
-                        "residual_pca_components"
-                    ],
+                    residual_components=loaded_spherical_model["residual_pca_components"],
                 )
                 projection["reconstruction_residual_rms"] = residual_rms
                 for residual_index in range(3):
-                    projection[f"reconstruction_residual_PC{residual_index + 1}"] = (
-                        residual_scores[:, residual_index]
-                    )
+                    projection[f"reconstruction_residual_PC{residual_index + 1}"] = residual_scores[
+                        :, residual_index
+                    ]
             else:
                 projection["reconstruction_residual_rms"] = reconstruction_residual_rms(
                     activation_matrix,
@@ -3485,9 +3444,7 @@ if spherical_enabled:
                 st.session_state.spherical_basis_identity = spherical_identity
                 st.session_state.spherical_basis_model = active_spherical_model
                 clear_surface_fits()
-        projection = transform_spherical_temporal_basis(
-            base_projection, active_spherical_model
-        )
+        projection = transform_spherical_temporal_basis(base_projection, active_spherical_model)
     except Exception as exc:  # noqa: BLE001 - surface transform/data errors in the UI
         st.error(f"Spherical temporal basis could not be applied: {exc}")
         st.stop()
@@ -3525,9 +3482,7 @@ if len(axis_fields) < required_axes:
         f"At least {required_axes} numeric projection fields are required for a {plot_mode} plot."
     )
     st.stop()
-preferred_axis_fields = (
-    list(SPHERICAL_OUTPUT_COLUMNS) if spherical_enabled else pc_fields
-)
+preferred_axis_fields = list(SPHERICAL_OUTPUT_COLUMNS) if spherical_enabled else pc_fields
 if st.session_state.get("projection_x_axis") not in axis_fields:
     st.session_state["projection_x_axis"] = preferred_axis_fields[0]
 x_component = controls[1].selectbox(
@@ -3553,11 +3508,7 @@ z_component = None
 if plot_mode == "3D":
     z_choices = [field for field in axis_fields if field not in {x_component, y_component}]
     preferred_z = next(
-        (
-            field
-            for field in preferred_axis_fields
-            if field not in {x_component, y_component}
-        ),
+        (field for field in preferred_axis_fields if field not in {x_component, y_component}),
         z_choices[0],
     )
     if st.session_state.get("projection_z_axis") not in z_choices:
@@ -3674,8 +3625,7 @@ else:
             value=False,
             key="curve_enabled",
             help=(
-                "Fit or load a parameterized trajectory through the three displayed "
-                "coordinates."
+                "Fit or load a parameterized trajectory through the three displayed coordinates."
             ),
             persist_state="page",
         )
@@ -3966,9 +3916,7 @@ else:
                             "pca_fingerprint_version": (PCA_PROJECTION_FINGERPRINT_VERSION),
                             "direction_method": direction_method,
                             "direction_target": (
-                                "log10_time_horizon_months"
-                                if direction_method == "PLS"
-                                else None
+                                "log10_time_horizon_months" if direction_method == "PLS" else None
                             ),
                             "layer_component": component,
                             "cached_position": inspection["positions"][position_index],
@@ -4344,18 +4292,16 @@ else:
                 cached_position=inspection["positions"][position_index],
             )
         if extruded_surface_enabled:
-            extruded_surface_result, extruded_surface_appearance = (
-                loaded_extruded_surface_controls(
-                    plot_data=plot_data,
-                    projection=projection,
-                    x_component=x_component,
-                    y_component=y_component,
-                    z_component=z_component,
-                    active_pca=active_pca,
-                    direction_method=direction_method,
-                    layer_component=component,
-                    cached_position=inspection["positions"][position_index],
-                )
+            extruded_surface_result, extruded_surface_appearance = loaded_extruded_surface_controls(
+                plot_data=plot_data,
+                projection=projection,
+                x_component=x_component,
+                y_component=y_component,
+                z_component=z_component,
+                active_pca=active_pca,
+                direction_method=direction_method,
+                layer_component=component,
+                cached_position=inspection["positions"][position_index],
             )
     else:
         st.caption(
@@ -4605,9 +4551,7 @@ else:
             )
             curve_plot_bounds = saved_display_bounds[coordinate_indices]
             curve_xyz = curve_result.curve_xyz[:, coordinate_indices]
-            curve_mode = (
-                "lines+markers" if curve_appearance.get("show_samples") else "lines"
-            )
+            curve_mode = "lines+markers" if curve_appearance.get("show_samples") else "lines"
             curve_color = curve_appearance.get("color", "#d81b60")
             figure.add_trace(
                 go.Scatter3d(
@@ -4731,9 +4675,7 @@ with st.expander(f"{direction_method} details and downloads"):
         if spherical_enabled:
             st.download_button(
                 "Download spherical model",
-                data=lambda: serialize_spherical_temporal_basis(
-                    active_spherical_model
-                ),
+                data=lambda: serialize_spherical_temporal_basis(active_spherical_model),
                 file_name=f"spherical_temporal_basis_{safe_component}.npz",
                 mime="application/octet-stream",
                 icon=":material/download:",
@@ -4801,20 +4743,22 @@ with st.expander(f"{direction_method} details and downloads"):
                 icon=":material/download:",
                 on_click="ignore",
             )
-        active_extruded_surface_model = st.session_state.get(
-            "loaded_extruded_surface_model"
-        )
+        active_extruded_surface_model = st.session_state.get("loaded_extruded_surface_model")
         if active_extruded_surface_model is not None:
             clip_surface_residual = bool(
                 st.session_state.get("extruded_surface_clip_residual", True)
             )
 
             def transformed_csv_data() -> bytes:
-                return add_surface_parameter_columns(
-                    projection,
-                    active_extruded_surface_model,
-                    clip=clip_surface_residual,
-                ).to_csv(index=False).encode("utf-8")
+                return (
+                    add_surface_parameter_columns(
+                        projection,
+                        active_extruded_surface_model,
+                        clip=clip_surface_residual,
+                    )
+                    .to_csv(index=False)
+                    .encode("utf-8")
+                )
 
             csv_data = transformed_csv_data
         else:
