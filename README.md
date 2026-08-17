@@ -33,6 +33,13 @@ prefix with the same extraction settings:
 bash scripts/run_activation_caching_plain_english_selected_acts.sh
 ```
 
+Cache task-only prompts, which state the task with no horizon at all, to the
+isolated `task_only_selected_acts` GCS prefix:
+
+```bash
+bash scripts/run_activation_caching_task_only_selected_acts.sh
+```
+
 Cache abstract prompts with:
 
 ```bash
@@ -45,6 +52,15 @@ the conversational dataset without labelled fields or a required answer shape:
 ```bash
 uv run python -m temporal_manifolds.dataset.generate --dataset plain_english \
   --randomize-template --output-path data/plain_english_prompts.json
+```
+
+Generate the task-only dataset, the time-free control condition. It reuses the
+conversational tasks but never mentions a horizon, so it produces one prompt per
+template and task rather than a product over the time grid:
+
+```bash
+uv run python -m temporal_manifolds.dataset.generate --dataset task_only \
+  --output-path data/task_only_prompts.json
 ```
 
 The no-output-format conversational variant uses the same fixed extraction

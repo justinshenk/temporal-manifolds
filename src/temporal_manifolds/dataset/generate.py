@@ -15,6 +15,7 @@ try:
     from . import conversational as conversational_dataset
     from . import plain_english as plain_english_dataset
     from . import plain_long as plain_long_dataset
+    from . import task_only as task_only_dataset
     from .utils import (
         NUMBER_FORMATS,
         NumberFormat,
@@ -29,6 +30,7 @@ except ImportError:
     import conversational as conversational_dataset  # type: ignore
     import plain_english as plain_english_dataset  # type: ignore
     import plain_long as plain_long_dataset  # type: ignore
+    import task_only as task_only_dataset  # type: ignore
 
     from temporal_manifolds.dataset.utils import (  # type: ignore
         NUMBER_FORMATS,
@@ -69,13 +71,14 @@ class PromptRecord(TypedDict):
     unit: str | None
 
 
-DatasetName = Literal["conversational", "abstract", "plain_english", "plain_long"]
+DatasetName = Literal["conversational", "abstract", "plain_english", "plain_long", "task_only"]
 
 DATASETS = {
     "conversational": conversational_dataset,
     "abstract": abstract_dataset,
     "plain_english": plain_english_dataset,
     "plain_long": plain_long_dataset,
+    "task_only": task_only_dataset,
 }
 
 TIME_CONSTRAINT_LINE = re.compile(
@@ -127,6 +130,12 @@ def load_dataset_config(
         dataset_module.values,
         getattr(dataset_module, "quantities", (None,)),
     )
+
+
+def is_time_free_dataset(dataset: str) -> bool:
+    """Return whether a dataset's prompts never express a time horizon."""
+    dataset_module = DATASETS[normalize_dataset_name(dataset)]
+    return bool(getattr(dataset_module, "time_free", False))
 
 
 def normalize_task_configs(
@@ -309,10 +318,17 @@ def generate_task_dataset(
     once and choose one template from ``template_list`` at random for that sample.
     Format-neutral conversational templates are selected only when no explicit
     ``template_list`` is supplied.
+
+    Datasets whose prompts never express a horizon declare ``time_free = True``
+    and are always generated without time parameters, because iterating the
+    horizon grid would emit identical duplicate prompts rather than new
+    conditions.
     """
     dataset_templates, dataset_tasks, dataset_values, dataset_quantities = load_dataset_config(
         dataset
     )
+    if is_time_free_dataset(dataset):
+        remove_time_constraints = True
     if template_list is None:
         template_list = (
             conversational_dataset.format_neutral_templates

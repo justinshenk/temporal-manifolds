@@ -35,7 +35,7 @@ GCS_PREFIX = "selected_acts"
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 DEFAULT_OUTPUT_DIR = Path("results/selected_acts")
 DEFAULT_BATCH_SIZE = 128
-SUPPORTED_DATASETS = ("conversational", "plain_english", "plain_long")
+SUPPORTED_DATASETS = ("conversational", "plain_english", "plain_long", "task_only")
 
 
 def build_payload(

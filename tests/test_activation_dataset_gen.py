@@ -310,6 +310,100 @@ def test_plain_english_time_constraints_can_be_removed_naturally() -> None:
     assert all(record["value"] is None and record["unit"] is None for record in records)
 
 
+def test_task_only_dataset_reuses_conversational_tasks_without_sharing_state() -> None:
+    from temporal_manifolds.dataset import conversational, task_only
+
+    assert task_only.tasks == conversational.tasks
+    assert task_only.tasks is not conversational.tasks
+    assert all(
+        task_only.tasks[task]["units"] is not config["units"]
+        for task, config in conversational.tasks.items()
+    )
+
+
+def test_task_only_prompts_state_the_task_and_never_a_horizon() -> None:
+    import re
+
+    from temporal_manifolds.dataset import task_only
+    from temporal_manifolds.dataset.generate import generate_task_dataset
+
+    records = generate_task_dataset(dataset="task_only")
+    time_words = re.compile(
+        r"\b(seconds?|minutes?|hours?|weeks?|months?|years?|decades?|centur\w*"
+        r"|millenni\w*|deadline|available time|time budget)\b",
+        re.IGNORECASE,
+    )
+
+    assert records
+    assert all(record["task"] in record["text"] for record in records)
+    assert all("{" not in record["text"] for record in records)
+    # A task such as "pack a bag with essentials for the day" legitimately
+    # contains a time word, so only the template wording around it is checked.
+    assert not [
+        record
+        for record in records
+        if time_words.search(record["text"].replace(record["task"], ""))
+    ]
+    assert {record["template_id"] for record in records} == {
+        template["id"] for template in task_only.templates
+    }
+
+
+def test_task_only_records_carry_no_time_parameters() -> None:
+    from temporal_manifolds.dataset.generate import generate_task_dataset
+
+    records = generate_task_dataset(dataset="task_only")
+
+    assert all(record["value"] is None and record["unit"] is None for record in records)
+    assert all(
+        record["base_value"] is None and record["base_unit"] is None for record in records
+    )
+    assert all(record["unit_variant"] is None for record in records)
+    assert all(record["value_text"] is None for record in records)
+
+
+def test_task_only_generation_skips_the_horizon_grid_instead_of_duplicating() -> None:
+    from temporal_manifolds.dataset import task_only
+    from temporal_manifolds.dataset.generate import generate_task_dataset
+
+    records = generate_task_dataset(dataset="task_only")
+
+    expected = len(task_only.templates) * len(task_only.tasks)
+    assert len(records) == expected
+    assert len({record["text"] for record in records}) == expected
+    # A wider horizon grid must not multiply prompts that never render one.
+    assert len(generate_task_dataset(dataset="task_only", time_values=[1, 2, 3])) == expected
+
+
+def test_task_only_dataset_ignores_the_remove_time_constraints_flag() -> None:
+    from temporal_manifolds.dataset.generate import generate_task_dataset
+
+    without_flag = generate_task_dataset(dataset="task_only")
+    with_flag = generate_task_dataset(dataset="task_only", remove_time_constraints=True)
+
+    assert [record["text"] for record in without_flag] == [
+        record["text"] for record in with_flag
+    ]
+
+
+def test_time_free_datasets_are_declared_explicitly() -> None:
+    from temporal_manifolds.dataset.generate import is_time_free_dataset
+
+    assert is_time_free_dataset("task_only") is True
+    assert is_time_free_dataset("conversational") is False
+    assert is_time_free_dataset("plain_english") is False
+
+
+def test_task_only_dataset_is_available_from_the_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from temporal_manifolds.dataset.generate import parse_args
+
+    monkeypatch.setattr(sys, "argv", ["generate", "--dataset", "task_only"])
+
+    assert parse_args().dataset == "task_only"
+
+
 def test_abstract_tasks_cover_the_complete_supported_time_range() -> None:
     from temporal_manifolds.dataset import abstract
     from temporal_manifolds.dataset.utils import SUPPORTED_UNITS
