@@ -25,7 +25,7 @@ CURVE_ALGORITHMS = {
 CURVE_DESCRIPTIONS = {
     "spline": (
         "Fits a constrained SciPy BSpline through the 3D point cloud. A dummy parameter "
-        "t from 0 to 1 is inferred geometrically, while the supplied PLS endpoints are "
+        "t from 0 to 1 is inferred geometrically, while the supplied endpoints are "
         "enforced exactly at t=0 and t=1."
     ),
 }
@@ -120,12 +120,12 @@ class TangentExtrapolatingBSpline:
             derivative = self.spline.derivative()
             below = flat < self.lower_bound
             above = flat > self.upper_bound
-            result[below] = self.spline(self.lower_bound) + derivative(
-                self.lower_bound
-            ) * (flat[below] - self.lower_bound)
-            result[above] = self.spline(self.upper_bound) + derivative(
-                self.upper_bound
-            ) * (flat[above] - self.upper_bound)
+            result[below] = self.spline(self.lower_bound) + derivative(self.lower_bound) * (
+                flat[below] - self.lower_bound
+            )
+            result[above] = self.spline(self.upper_bound) + derivative(self.upper_bound) * (
+                flat[above] - self.upper_bound
+            )
         elif self.derivative_order == 1:
             derivative = self.spline.derivative()
             result = np.asarray(derivative(clipped), dtype=np.float64)
@@ -202,9 +202,7 @@ def _fit_splines(
             raise ValueError("Spline knots must lie strictly inside the fitted parameter range.")
     else:
         automatic_count = min(12, max(1, len(parameter) // 8))
-        interior_knots = np.quantile(
-            parameter, np.linspace(0, 1, automatic_count + 2)[1:-1]
-        )
+        interior_knots = np.quantile(parameter, np.linspace(0, 1, automatic_count + 2)[1:-1])
         interior_knots = np.unique(interior_knots)
     knot_vector = np.concatenate(
         [
@@ -213,16 +211,12 @@ def _fit_splines(
             np.repeat(parameter[-1], degree + 1),
         ]
     )
-    design = BSpline.design_matrix(
-        parameter, knot_vector, degree, extrapolate=False
-    ).toarray()
+    design = BSpline.design_matrix(parameter, knot_vector, degree, extrapolate=False).toarray()
     coefficient_count = design.shape[1]
     if coefficient_count < 2:
         raise ValueError("The spline basis cannot represent two constrained endpoints.")
     free_design = design[:, 1:-1]
-    fixed_fit = np.outer(design[:, 0], boundary[0]) + np.outer(
-        design[:, -1], boundary[1]
-    )
+    fixed_fit = np.outer(design[:, 0], boundary[0]) + np.outer(design[:, -1], boundary[1])
     difference = np.diff(np.eye(coefficient_count), n=2, axis=0)
     free_difference = difference[:, 1:-1]
     fixed_difference = np.outer(difference[:, 0], boundary[0]) + np.outer(
@@ -307,9 +301,7 @@ def _mst_backbone(
     if start_point is None or end_point is None:
         first_distances = dijkstra(graph, indices=0)
         endpoint = int(np.argmax(first_distances))
-        second_distances, predecessors = dijkstra(
-            graph, indices=endpoint, return_predecessors=True
-        )
+        second_distances, predecessors = dijkstra(graph, indices=endpoint, return_predecessors=True)
         opposite = int(np.argmax(second_distances))
     else:
         endpoint = int(np.flatnonzero(np.all(unique_coordinates == start_point, axis=1))[0])
@@ -433,9 +425,7 @@ def _fit_parameterized_spline(
     if len(parameter) < 3:
         raise ValueError("At least three finite points are required to fit a curve.")
 
-    unique_parameter, unique_xyz = _merge_duplicate_parameters(
-        parameter, xyz, duplicate_reducer
-    )
+    unique_parameter, unique_xyz = _merge_duplicate_parameters(parameter, xyz, duplicate_reducer)
     endpoints = np.asarray(endpoint_coordinates, dtype=np.float64)
     if endpoints.shape != (2, 3) or not np.isfinite(endpoints).all():
         raise ValueError("Spline endpoints must contain two finite 3D coordinates.")
@@ -504,9 +494,7 @@ def _fit_parameterized_spline(
         model_parameters["knot_count"] = raw_count
     else:
         quantiles = []
-    normalized_knots = (
-        np.quantile(train_t, quantiles).astype(float).tolist() if quantiles else None
-    )
+    normalized_knots = np.quantile(train_t, quantiles).astype(float).tolist() if quantiles else None
     if normalized_knots is not None:
         if len(np.unique(normalized_knots)) != len(normalized_knots):
             raise ValueError(
@@ -556,9 +544,7 @@ def _fit_parameterized_spline(
         else np.empty((0, 3), dtype=np.float64)
     )
     training_metrics = _coordinate_metrics(unique_xyz[train_mask], training_prediction)
-    validation_metrics = _coordinate_metrics(
-        unique_xyz[validation_indices], validation_prediction
-    )
+    validation_metrics = _coordinate_metrics(unique_xyz[validation_indices], validation_prediction)
     warnings = []
     if dropped_nonfinite:
         warnings.append(f"Dropped {dropped_nonfinite:,} non-finite row(s).")
@@ -635,9 +621,7 @@ def fit_geometric_spline(
         raise ValueError("Maximum geometric spline fit points must be at least 4.")
     rng = np.random.default_rng(random_state)
     if len(xyz) > max_fit_points:
-        backbone_indices = np.sort(
-            rng.choice(len(xyz), size=max_fit_points, replace=False)
-        )
+        backbone_indices = np.sort(rng.choice(len(xyz), size=max_fit_points, replace=False))
         backbone_source = xyz[backbone_indices]
     else:
         backbone_source = xyz
@@ -709,9 +693,7 @@ def fit_geometric_spline(
         "geometric_mae_3d": geometric_metrics["mae_3d"],
     }
     warnings = [
-        warning
-        for warning in fitted.warnings
-        if not warning.startswith("Held-out validation")
+        warning for warning in fitted.warnings if not warning.startswith("Held-out validation")
     ]
     if dropped_nonfinite:
         warnings.append(f"Dropped {dropped_nonfinite:,} non-finite row(s).")
@@ -839,14 +821,21 @@ def serialize_curve_model(model: CurveModel, metadata: dict[str, Any] | None = N
     return buffer.getvalue()
 
 
-def load_curve_model(source: bytes | bytearray | str | Path | BinaryIO) -> tuple[CurveModel, dict[str, Any]]:
+def load_curve_model(
+    source: bytes | bytearray | str | Path | BinaryIO,
+) -> tuple[CurveModel, dict[str, Any]]:
     """Load and validate a versioned curve artifact from bytes, a path, or a file."""
 
     try:
-        payload = joblib.load(io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source)
+        payload = joblib.load(
+            io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source
+        )
     except Exception as exc:  # noqa: BLE001 - normalize untrusted artifact errors
         raise ValueError(f"Curve artifact could not be loaded: {exc}") from exc
-    if not isinstance(payload, dict) or payload.get("artifact_kind") != "temporal_manifolds_curve_model":
+    if (
+        not isinstance(payload, dict)
+        or payload.get("artifact_kind") != "temporal_manifolds_curve_model"
+    ):
         raise ValueError("This is not a supported curve model artifact.")
     version = payload.get("artifact_version")
     if version != CURVE_MODEL_ARTIFACT_VERSION:

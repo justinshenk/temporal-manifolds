@@ -22,6 +22,7 @@ from pandas.api.types import is_scalar
 
 from temporal_manifolds.activations.extraction_policy import (
     CACHED_POSITION_INDEX,
+    NOT_APPLICABLE,
     PROMPT_TOKEN_POSITION,
     TARGET_LAYER_COMPONENT,
     validate_activation_payload,
@@ -760,7 +761,7 @@ def _build_projection_result(
     result = analysis_metadata.copy().reset_index(drop=True)
     for index in range(component_count):
         result[f"PC{index + 1}"] = projections[:, index]
-    result["log10_time_horizon_months"] = np.log10(result["time_horizon_months"])
+    result["log10_time_horizon_months"] = log10_time_horizon(result["time_horizon_months"])
     projection_details = {
         **details,
         "explained_variance": np.asarray(pca.explained_variance_ratio_),
@@ -771,13 +772,24 @@ def _build_projection_result(
 
 
 def projection_details_table(projection: pd.DataFrame) -> pd.DataFrame:
-    """Return an Arrow-compatible frame for the Streamlit projection details table."""
-    value_field = "base_value" if "base_value" in projection else "value"
-    if value_field not in projection or not projection[value_field].eq("<averaged>").any():
+    """Return an Arrow-compatible frame for the Streamlit projection details table.
+
+    Horizon columns mix numbers with the "<averaged>" aggregate marker and the
+    NOT_APPLICABLE marker of unconstrained prompts. Arrow cannot serialize such object
+    columns, so any column carrying a marker is rendered as text.
+    """
+    markers = ("<averaged>", NOT_APPLICABLE)
+    horizon_fields = [
+        field
+        for field in ("base_value", "value", "base_unit", "unit")
+        if field in projection and projection[field].isin(markers).any()
+    ]
+    if not horizon_fields:
         return projection
 
     table = projection.copy()
-    table[value_field] = table[value_field].astype("string")
+    for field in horizon_fields:
+        table[field] = table[field].astype("string")
     return table
 
 
@@ -878,50 +890,6 @@ def reconstruction_residual_statistics(
         )
         residual_scores[batch] = residual_pca.transform(residuals)
     return residual_rms, residual_scores, residual_pca
-
-
-def reconstruction_residual_projection(
-    activation_matrix: np.ndarray,
-    prepared_matrix: np.ndarray | None,
-    row_offsets: np.ndarray,
-    scores: np.ndarray,
-    model: PCA | IncrementalPCA | PLSRegression,
-    *,
-    residual_center: np.ndarray,
-    residual_components: np.ndarray,
-    batch_size: int = 2048,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Project reconstruction residuals with residual-PCA parameters from a saved model."""
-    scores = np.asarray(scores)
-    center = np.asarray(residual_center, dtype=np.float64)
-    components = np.asarray(residual_components, dtype=np.float64)
-    if center.ndim != 1 or components.ndim != 2 or components.shape[1:] != center.shape:
-        raise ValueError("Saved residual PCA parameters have incompatible shapes.")
-    if center.shape[0] != int(activation_matrix.shape[1]):
-        raise ValueError(
-            "The spherical model residual PCA expects a different activation width."
-        )
-    row_count = len(scores)
-    values = np.asarray(prepared_matrix) if prepared_matrix is not None else None
-    if values is not None and (values.ndim != 2 or len(values) != row_count):
-        raise ValueError("Prepared activations and projection scores are misaligned.")
-    if values is None and len(row_offsets) != row_count:
-        raise ValueError("Activation row offsets and projection scores are misaligned.")
-
-    residual_rms = np.empty(row_count, dtype=np.float64)
-    residual_scores = np.empty((row_count, components.shape[0]), dtype=np.float64)
-    for batch in _bounded_batches(row_count, batch_size, 1):
-        batch_values = (
-            np.asarray(values[batch], dtype=np.float64)
-            if values is not None
-            else np.asarray(activation_matrix[row_offsets[batch]], dtype=np.float64)
-        )
-        residuals = batch_values - np.asarray(
-            model.inverse_transform(scores[batch]), dtype=np.float64
-        )
-        residual_rms[batch] = np.sqrt(np.mean(np.square(residuals), axis=1))
-        residual_scores[batch] = (residuals - center) @ components.T
-    return residual_rms, residual_scores
 
 
 def fit_pca_projection(
@@ -1199,6 +1167,124 @@ def prepare_projection(
     return result, pca, details
 
 
+def _unconstrained_mask(
+    metadata_df: pd.DataFrame,
+    *,
+    value_field: str | None = None,
+    unit_field: str | None = None,
+) -> np.ndarray:
+    """Flag rows whose prompt states no time horizon.
+
+    Unconstrained prompts are serialized with NOT_APPLICABLE in both the horizon value and
+    unit, which distinguishes them from constrained prompts regardless of which folder the
+    batch was cached in.
+    """
+    value_field = value_field or ("base_value" if "base_value" in metadata_df else "value")
+    unit_field = unit_field or ("base_unit" if "base_unit" in metadata_df else "unit")
+    missing = [field for field in (value_field, unit_field) if field not in metadata_df]
+    if missing:
+        raise ValueError(f"Time-horizon metadata is missing fields: {missing}")
+    values = metadata_df[value_field].astype(str).str.strip().str.casefold()
+    units = metadata_df[unit_field].astype(str).str.strip().str.casefold()
+    marker = NOT_APPLICABLE.casefold()
+    return ((values == marker) & (units == marker)).to_numpy(dtype=bool)
+
+
+def log10_time_horizon(horizons: Any) -> np.ndarray:
+    """Return log10 horizons, mapping unconstrained rows' missing horizons to NaN."""
+    values = pd.to_numeric(pd.Series(horizons).reset_index(drop=True), errors="coerce").to_numpy(
+        dtype=np.float64
+    )
+    result = np.full(values.shape, np.nan, dtype=np.float64)
+    positive = np.isfinite(values) & (values > 0)
+    result[positive] = np.log10(values[positive])
+    return result
+
+
+def subtract_unconstrained_baseline(
+    prepared_matrix: np.ndarray | None,
+    row_offsets: np.ndarray,
+    analysis_metadata: pd.DataFrame,
+    activation_matrix: np.ndarray,
+    *,
+    baseline_field: str = "task",
+    chunk_size: int = 2048,
+) -> tuple[np.ndarray, np.ndarray, pd.DataFrame, dict[str, Any]]:
+    """Subtract each task's mean unconstrained activation from its constrained rows.
+
+    Unconstrained rows are averaged per ``baseline_field`` value to form one baseline vector
+    per task, then removed from the returned data. Constrained rows whose task has no
+    unconstrained counterpart are dropped, because there is nothing to subtract for them.
+    """
+    if baseline_field not in analysis_metadata:
+        raise ValueError(f"Baseline subtraction requires metadata field {baseline_field!r}.")
+
+    row_offsets = np.asarray(row_offsets, dtype=np.int64)
+    analysis_rows = len(analysis_metadata)
+    if prepared_matrix is not None:
+        values = np.asarray(prepared_matrix, dtype=np.float32)
+        if values.ndim != 2 or len(values) != analysis_rows:
+            raise ValueError("Prepared activations and metadata are misaligned.")
+    else:
+        if len(row_offsets) != analysis_rows:
+            raise ValueError("Activation row offsets and metadata are misaligned.")
+        values = None
+
+    unconstrained = _unconstrained_mask(analysis_metadata)
+    if not unconstrained.any():
+        raise ValueError(
+            "No unconstrained rows are selected. Include the unconstrained activation folder "
+            "and keep its rows in the metadata filters."
+        )
+    if unconstrained.all():
+        raise ValueError("Only unconstrained rows are selected, so there is nothing to subtract.")
+
+    def read_rows(positions: np.ndarray) -> np.ndarray:
+        if values is not None:
+            return np.asarray(values[positions], dtype=np.float32)
+        source_offsets = row_offsets[positions]
+        block = np.empty((len(source_offsets), activation_matrix.shape[1]), dtype=np.float32)
+        for start in range(0, len(source_offsets), chunk_size):
+            chunk = source_offsets[start : start + chunk_size]
+            block[start : start + len(chunk)] = np.asarray(
+                activation_matrix[chunk], dtype=np.float32
+            )
+        return block
+
+    tasks = analysis_metadata[baseline_field].reset_index(drop=True)
+    baseline_positions = pd.Series(np.flatnonzero(unconstrained)).groupby(
+        tasks.iloc[unconstrained].to_numpy(), sort=False
+    )
+    baselines: dict[Any, np.ndarray] = {
+        task: read_rows(positions.to_numpy(dtype=np.int64)).mean(axis=0, dtype=np.float32)
+        for task, positions in baseline_positions
+    }
+
+    constrained = np.flatnonzero(~unconstrained)
+    matched = np.array(
+        [task in baselines for task in tasks.iloc[constrained]],
+        dtype=bool,
+    )
+    kept = constrained[matched]
+    if not len(kept):
+        raise ValueError(
+            "No constrained row shares a "
+            f"{baseline_field!r} value with an unconstrained row, so every point was dropped."
+        )
+
+    centered = read_rows(kept)
+    centered -= np.stack([baselines[task] for task in tasks.iloc[kept]])
+    metadata = analysis_metadata.iloc[kept].reset_index(drop=True)
+
+    details = {
+        "baseline_field": baseline_field,
+        "baseline_groups": len(baselines),
+        "baseline_rows": int(unconstrained.sum()),
+        "baseline_dropped_rows": int(len(constrained) - len(kept)),
+    }
+    return centered, row_offsets[kept], metadata, details
+
+
 def _add_time_horizon_months(metadata_df: pd.DataFrame) -> None:
     value_field = "base_value" if "base_value" in metadata_df else "value"
     unit_field = "base_unit" if "base_unit" in metadata_df else "unit"
@@ -1206,12 +1292,17 @@ def _add_time_horizon_months(metadata_df: pd.DataFrame) -> None:
     if missing:
         raise ValueError(f"Time-horizon metadata is missing fields: {missing}")
     units = metadata_df[unit_field].astype(str).str.lower()
-    unknown_units = sorted(set(units) - set(UNIT_TO_MONTHS))
+    # Unconstrained prompts state no horizon at all, so their value and unit are serialized
+    # as NOT_APPLICABLE. They carry a NaN horizon instead of failing the whole selection.
+    unconstrained = _unconstrained_mask(metadata_df, value_field=value_field, unit_field=unit_field)
+    unknown_units = sorted(set(units[~unconstrained]) - set(UNIT_TO_MONTHS))
     if unknown_units:
         raise ValueError(f"Cannot convert time-horizon units to months: {unknown_units}")
     metadata_df["time_horizon_months"] = [
-        round(float(value) * UNIT_TO_MONTHS[unit], 12)
-        for value, unit in zip(metadata_df[value_field], units, strict=True)
+        float("nan") if is_unconstrained else round(float(value) * UNIT_TO_MONTHS[unit], 12)
+        for value, unit, is_unconstrained in zip(
+            metadata_df[value_field], units, unconstrained, strict=True
+        )
     ]
 
 

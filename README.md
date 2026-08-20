@@ -98,13 +98,98 @@ uv run streamlit run apps/activation_explorer.py
 The explorer accepts only batches whose sole activation is `layer_out/21` and
 whose sole cached position is `-1`. It rejects broader or inconsistent caches.
 Filtering, aggregation, PCA fitting, PCA reuse, and surface fitting all operate
-on that fixed slice.
+on that fixed slice. **Aggregate by** starts empty of anything you did not pick:
+the app never adds a grouping field on your behalf.
+
+Every projection carries the reconstruction residual — what the retained
+components could not rebuild — as `reconstruction_residual_rms` plus its leading
+three PCA coordinates, `reconstruction_residual_PC1` through
+`reconstruction_residual_PC3`. All of them are in the downloadable projection
+CSV by default.
 
 For large datasets, use **Local folders** instead of **Upload folders** and enter
 one path per line. The app indexes metadata once and streams the fixed activation
 slice into a disk-backed cache under `data/activation_explorer_cache/`.
 
-Only load PCA or surface-model joblib artifacts that you trust.
+## Nonlinear manifold explorer
+
+The linear explorer fits PCA and log-time-horizon-supervised PLS. Its nonlinear
+counterpart embeds the same fixed activation slice with Kernel PCA, which
+applies PCA in an implicit feature space defined by a kernel and so can unfold
+curvature that a linear subspace flattens:
+
+```bash
+uv run streamlit run apps/manifold_explorer.py
+```
+
+Kernel PCA was selected after comparing it against Isomap and UMAP on this data;
+it outperformed both by a clear margin, so it is the only method offered.
+
+The optimization target is fixed at `log10_time_horizon_months`. Kernel PCA is
+unsupervised, so the target never influences the fit — it drives the reported
+metrics only:
+
+- **Variance captured** — cumulative share of kernel-space variance carried by
+  the retained components, with a per-component table mirroring the linear
+  explorer's.
+- **Target R²** — how much of the horizon a linear readout of the embedding
+  coordinates explains. Fitted and scored on the same points, so it measures
+  geometric organization rather than predictive accuracy.
+- **Target rank correlation** — the strongest single-axis Spearman correlation,
+  which catches monotone but curved layouts.
+- **Neighborhood target error** — mean absolute horizon difference among
+  embedded neighbors, in target standard deviations. Lower is better.
+- **Trustworthiness and continuity** — whether the embedding preserved genuine
+  activation-space neighborhoods rather than inventing proximity.
+
+Two caveats on explained variance. It is measured in the kernel's implicit
+feature space, which is not activation-space variance: it describes how the
+kernel's geometry is distributed, not how much of the original signal was kept.
+And by default the ratios are shares *among the retained components*, so the
+cumulative column reaches 100% by construction. Enable **Report variance against
+the full spectrum** for the retained share of total kernel variance, which costs
+a full N×N eigendecomposition. With a linear kernel the full-spectrum ratios
+reproduce ordinary PCA's `explained_variance_ratio_` exactly, which the test
+suite pins.
+
+Source selection, metadata filtering, aggregation, and unconstrained-baseline
+subtraction behave as in the linear explorer. **Aggregate by** is chosen by you
+and defaults to `time_horizon_months`, plus `source_folder` when several folders
+are loaded; nothing is added to the grouping behind your back. Adding `task`
+is what makes each point belong to exactly one task, which the horizon
+regression's split relies on — the app warns when it is absent rather than
+forcing it.
+
+### Horizon regression
+
+The **Horizon regression** section fits a polynomial ridge model predicting
+`log10_time_horizon_months` from the embedding coordinates, and reports R² and
+RMSE on both the training and held-out splits. Degree, ridge alpha,
+interaction-only terms, test fraction, and optional grouped cross-validation are
+all configurable.
+
+The train/test split is **disjoint by `task`**: every point sharing a task value
+lands wholly in one side. This matters because each task recurs at many
+horizons, so a random split would leave near-duplicate siblings of every test
+point in the training set. The split reads whatever `task` label each point
+carries; when `task` is not an aggregation field a point can mix tasks, and the
+app says so rather than re-grouping the data. On a synthetic fixture with per-task offsets, a
+random split reports R²=0.92 where the task-disjoint split reports 0.59 — the
+gap is leakage, not skill. Cross-validation folds are grouped the same way.
+
+Because `task` defines the split, the number of distinct tasks bounds what the
+split can do: at least two are required, and the fold count is capped at the
+task count. A negative test R² is meaningful rather than a bug — it says the
+model does worse on unseen tasks than predicting their mean horizon.
+
+Both the Kernel PCA embedding and the fitted regression can be downloaded as
+versioned joblib artifacts and re-uploaded later via **Use saved**. A loaded
+embedding re-projects the current points through its stored kernel; a loaded
+regression is scored on whatever points are currently prepared, which the app
+flags may overlap its original training data.
+
+Only load PCA, manifold, regression, or surface-model joblib artifacts that you
+trust.
 
 ```python
 from temporal_manifolds.viz.surface_fitting import load_surface_model
@@ -117,7 +202,7 @@ outside_fit_range = surface.extrapolation_mask([[new_pc1, new_pc2]])[0]
 ## Layout
 
 ```text
-apps/                      local Streamlit explorer
+apps/                      local Streamlit explorers (linear and nonlinear)
 notebooks/                 fixed-slice analysis notebooks
 scripts/                   fixed-contract caching and GCS wrappers
 src/temporal_manifolds/    datasets, extraction policy, utilities, visualization

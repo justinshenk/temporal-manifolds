@@ -18,6 +18,7 @@ from sklearn.cross_decomposition import PLSRegression
 
 from temporal_manifolds.activations.extraction_policy import (
     CACHED_POSITION_INDEX,
+    NOT_APPLICABLE,
     PROMPT_TOKEN_POSITION,
     TARGET_LAYER_COMPONENT,
 )
@@ -27,18 +28,6 @@ from temporal_manifolds.geometry.extrusion.rms_spline_surface_transformer import
     add_surface_parameter_columns,
     evaluate_rms_spline_surface,
     serialize_rms_spline_surface,
-)
-from temporal_manifolds.geometry.spherical_temporal_basis import (
-    DEFAULT_PARAMETERS as SPHERICAL_DEFAULT_PARAMETERS,
-)
-from temporal_manifolds.geometry.spherical_temporal_basis import (
-    OUTPUT_COLUMNS as SPHERICAL_OUTPUT_COLUMNS,
-)
-from temporal_manifolds.geometry.spherical_temporal_basis import (
-    fit_spherical_temporal_basis,
-    load_spherical_temporal_basis,
-    serialize_spherical_temporal_basis,
-    transform_spherical_temporal_basis,
 )
 from temporal_manifolds.viz.activation_explorer import (
     PCA_PROJECTION_FINGERPRINT_VERSION,
@@ -54,12 +43,11 @@ from temporal_manifolds.viz.activation_explorer import (
     pca_projection_fingerprint,
     prepare_analysis_data,
     projection_details_table,
-    reconstruction_residual_projection,
-    reconstruction_residual_rms,
     reconstruction_residual_statistics,
     select_activation_batch_uploads,
     serialize_pca_model,
     serialize_pls_model,
+    subtract_unconstrained_baseline,
     transform_pca_projection,
 )
 from temporal_manifolds.viz.curve_fitting import (
@@ -78,6 +66,20 @@ from temporal_manifolds.viz.curve_fitting import (
     project_onto_curve_parameter,
     serialize_curve_model,
 )
+from temporal_manifolds.viz.manifold_regression import (
+    GROUP_FEATURE,
+    RegressionFitResult,
+)
+from temporal_manifolds.viz.manifold_regression import (
+    TARGET_FEATURE as REGRESSION_TARGET_FEATURE,
+)
+from temporal_manifolds.viz.manifold_regression import (
+    evaluate_regression_model,
+    fit_manifold_regression,
+    load_regression_model,
+    regression_scores_table,
+    serialize_regression_model,
+)
 from temporal_manifolds.viz.surface_fitting import (
     ALGORITHM_POINT_CAPS,
     SURFACE_ALGORITHMS,
@@ -94,6 +96,11 @@ from temporal_manifolds.viz.surface_fitting import (
 )
 
 SurfaceDisplayResult = SurfaceFitResult | SurfaceEvaluationResult
+
+#: Leading reconstruction-residual PCA coordinates added to every projection, and so to the
+#: downloadable CSV. The residual is what the retained components could not rebuild, so these
+#: axes describe the structure the projection discarded.
+RESIDUAL_PCA_COMPONENTS = 3
 
 st.set_page_config(
     page_title="Activation Atlas",
@@ -130,9 +137,6 @@ def reset_loaded_data() -> None:
         "projection",
         "pca",
         "details",
-        "spherical_basis_identity",
-        "spherical_basis_model",
-        "residual_pca",
         "surface_result",
         "surface_identity",
         "surface_benchmark",
@@ -176,6 +180,11 @@ def clear_surface_fits() -> None:
         st.session_state.pop(key, None)
 
 
+def reset_prompt_framing_filter() -> None:
+    """Re-derive the framing filter so toggling subtraction re-applies its default."""
+    st.session_state.pop("filter::template_metadata.prompt_framing", None)
+
+
 def clear_visual_filters() -> None:
     for key in list(st.session_state):
         if key == "visual_filter_fields" or key.startswith("visual_filter::"):
@@ -200,18 +209,6 @@ def forget_loaded_pls() -> None:
         "loaded_pls_model",
         "loaded_pls_provenance",
         "loaded_pls_filename",
-    ):
-        st.session_state.pop(key, None)
-
-
-def forget_loaded_spherical_basis() -> None:
-    for key in (
-        "spherical_basis_upload",
-        "loaded_spherical_basis_digest",
-        "loaded_spherical_basis_model",
-        "loaded_spherical_basis_filename",
-        "spherical_basis_identity",
-        "spherical_basis_model",
     ):
         st.session_state.pop(key, None)
 
@@ -257,6 +254,33 @@ def forget_loaded_extruded_surface() -> None:
         st.session_state.pop(key, None)
 
 
+def forget_loaded_regression() -> None:
+    for key in (
+        "regression_model_upload",
+        "loaded_regression_digest",
+        "loaded_regression_model",
+        "loaded_regression_provenance",
+        "loaded_regression_filename",
+    ):
+        st.session_state.pop(key, None)
+
+
+@st.cache_data(max_entries=16, show_spinner=False)
+def fit_regression_cached(
+    coordinates: np.ndarray,
+    target: np.ndarray,
+    groups: list[str],
+    options: dict[str, Any],
+) -> RegressionFitResult:
+    """Cache one horizon regression keyed by its points and every control value.
+
+    Caching is what lets the section refit on every control change without a submit button:
+    a repeated parameter set is served from the cache instead of refitted.
+    """
+
+    return fit_manifold_regression(coordinates, target, groups, **options)
+
+
 @st.cache_data(max_entries=16, show_spinner=False)
 def fit_surface_cached(
     x_values: np.ndarray,
@@ -283,7 +307,7 @@ def fit_geometric_spline_cached(
 def geometric_spline_endpoint_defaults_cached(
     coordinates: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Cache automatic PLS endpoint suggestions for the current point cloud."""
+    """Cache automatic endpoint suggestions for the current point cloud."""
 
     return geometric_spline_endpoint_defaults(coordinates)
 
@@ -320,7 +344,11 @@ def fit_pls_projection(
         dtype=np.float64
     )
     if not np.isfinite(horizons).all() or np.any(horizons <= 0):
-        raise ValueError("PLS requires positive, finite time horizons.")
+        raise ValueError(
+            "PLS requires positive, finite time horizons. Unconstrained prompts state no "
+            "horizon, so exclude them with the metadata filters or enable "
+            "**Subtract unconstrained activations**."
+        )
     target = np.log10(horizons)
     if np.ptp(target) <= np.finfo(np.float64).eps:
         raise ValueError("PLS requires at least two distinct log-time-horizon values.")
@@ -1071,17 +1099,6 @@ def new_curve_controls(
         )
         st.caption(CURVE_DESCRIPTIONS[algorithm])
 
-        # if direction_method != "PLS" or set(coordinate_features) != {
-        #     "PLS1",
-        #     "PLS2",
-        #     "PLS3",
-        # }:
-        #     st.warning(
-        #         "Endpoint-constrained curve fitting requires a 3D PLS plot using "
-        #         "PLS1, PLS2, and PLS3."
-        #     )
-        #     return None, {}
-
         curve_source = plot_data if fit_scope == "Visible" else projection
         coordinates = curve_source[list(coordinate_features)].to_numpy(dtype=np.float64)
         finite = np.isfinite(coordinates).all(axis=1)
@@ -1108,10 +1125,13 @@ def new_curve_controls(
                 feature: (default_start[index], default_end[index])
                 for index, feature in enumerate(coordinate_features)
             }
-            st.markdown("**Required endpoints in PLS coordinates**")
+            st.markdown(f"**Required endpoints in {direction_method} coordinates**")
             endpoint_columns = st.columns(3)
             entered_endpoints: dict[str, tuple[float, float]] = {}
-            for column, feature in zip(endpoint_columns, ("PLS1", "PLS2", "PLS3"), strict=True):
+            # The endpoints are named after the displayed axes, so both PCA and PLS
+            # coordinates work; the keys stay per-axis so switching axes re-derives the
+            # geometric defaults instead of reusing another axis' entry.
+            for column, feature in zip(endpoint_columns, coordinate_features, strict=True):
                 start_default, end_default = endpoint_by_feature[feature]
                 entered_endpoints[feature] = (
                     float(
@@ -1662,7 +1682,8 @@ def loaded_extruded_surface_controls(
                 "extrusion_curve_upload" if fitting_direction else "extruded_surface_model_upload"
             ),
             help=(
-                "Choose a degree-3 smoothing-spline model downloaded from the curve overlay."
+                "Choose a degree-2 or degree-3 smoothing-spline model downloaded from the "
+                "curve overlay."
                 if fitting_direction
                 else "Choose an extruded-surface artifact downloaded from this overlay."
             ),
@@ -1694,10 +1715,11 @@ def loaded_extruded_surface_controls(
                     loaded_model, loaded_provenance = load_curve_model(model_bytes)
                     if (
                         loaded_model.algorithm != "spline"
-                        or int(loaded_model.parameters.get("degree", 0)) != 3
+                        or int(loaded_model.parameters.get("degree", 0)) not in (2, 3)
                     ):
                         raise ValueError(
-                            "The extrusion input must be a degree-3 cubic spline curve model."
+                            "The extrusion input must be a degree-2 or degree-3 spline "
+                            "curve model."
                         )
                 else:
                     loaded_model, loaded_provenance = RMSSplineSurfaceTransformer.load_artifact(
@@ -1755,75 +1777,8 @@ def loaded_extruded_surface_controls(
             key="forget_extruded_surface_button",
         )
 
-        compatible = True
-        chart_components = (x_component, y_component, z_component)
-        if set(chart_components) != set(loaded_model.coordinate_features):
-            st.error(
-                "Select the saved model coordinates on the chart: "
-                f"{', '.join(loaded_model.coordinate_features)}."
-            )
-            compatible = False
-
-        saved_direction_method = loaded_provenance.get("direction_method")
-        if saved_direction_method is not None and saved_direction_method != direction_method:
-            st.error(
-                f"This model was created in {saved_direction_method} coordinates, but the "
-                f"current projection uses {direction_method}."
-            )
-            compatible = False
-        current_pca_digest = pca_projection_fingerprint(active_pca)
-        saved_pca_digest = loaded_provenance.get("pca_sha256")
-        saved_fingerprint_version = loaded_provenance.get("pca_fingerprint_version")
-        if saved_pca_digest is None:
-            st.warning(
-                "This artifact does not identify its fitted coordinate basis. "
-                "Coordinate labels match, but basis compatibility cannot be verified."
-            )
-        elif saved_fingerprint_version == PCA_PROJECTION_FINGERPRINT_VERSION:
-            if saved_pca_digest != current_pca_digest:
-                st.error(
-                    "This model was created in a different coordinate basis. Use the "
-                    "matching direction model."
-                )
-                compatible = False
-        elif saved_fingerprint_version in (None, 1):
-            if saved_pca_digest != pca_projection_fingerprint(active_pca, version=1):
-                st.error(
-                    "This model was created in a different coordinate basis. Use the "
-                    "matching direction model."
-                )
-                compatible = False
-        else:
-            st.error(
-                "This model uses an unsupported coordinate fingerprint version: "
-                f"{saved_fingerprint_version!r}."
-            )
-            compatible = False
-
         residual_feature = "reconstruction_residual_rms"
-        residual_available = residual_feature in projection
-        if not residual_available:
-            st.error(
-                "Reconstruction residual RMS is unavailable. Recompute the current "
-                "projection before fitting or applying this surface."
-            )
-            compatible = False
-        elif not is_numeric_dtype(projection[residual_feature]) or is_bool_dtype(
-            projection[residual_feature]
-        ):
-            st.error("Reconstruction residual RMS must be numeric.")
-            compatible = False
-        saved_layer = loaded_provenance.get("layer_component")
-        if saved_layer is not None and saved_layer != layer_component:
-            st.warning(f"This model was saved for {saved_layer!r}, not {layer_component!r}.")
-        saved_position = loaded_provenance.get("cached_position")
-        if saved_position is not None and saved_position != cached_position:
-            st.warning(
-                f"This model was saved for token position {saved_position!r}, not "
-                f"{cached_position!r}."
-            )
-        if not compatible:
-            return None, {}
+        current_pca_digest = pca_projection_fingerprint(active_pca)
 
         with st.expander("Saved model details"):
             model_details = {
@@ -2742,10 +2697,20 @@ with st.sidebar:
         for field in filter_fields
     }
     filters = {}
+    # The subtraction toggle is rendered below, so its previous value is read from session
+    # state. Unconstrained prompts carry the NOT_APPLICABLE framing, and dropping them by
+    # default would leave subtraction with no baselines to compute.
+    baseline_framings = (
+        [NOT_APPLICABLE] if st.session_state.get("subtract_unconstrained_baseline") else []
+    )
     for field in filter_fields:
         values = filter_options[field]
         default_values = (
-            ["task_available_time"]
+            [
+                framing
+                for framing in ("task_available_time", *baseline_framings)
+                if framing in values
+            ]
             if field == "template_metadata.prompt_framing" and "task_available_time" in values
             else values
         )
@@ -2764,6 +2729,24 @@ with st.sidebar:
         default=default_aggregation_fields,
         help="Rows in each group are averaged before fitting the selected directions.",
     )
+    subtract_baseline = st.toggle(
+        "Subtract unconstrained activations",
+        value=False,
+        key="subtract_unconstrained_baseline",
+        on_change=reset_prompt_framing_filter,
+        help=(
+            "Average the unconstrained prompts of each task and subtract that baseline from "
+            "the task's constrained points. Constrained points whose task has no "
+            "unconstrained counterpart are dropped."
+        ),
+    )
+    if subtract_baseline:
+        st.caption(
+            "Load the unconstrained batches (`.acts/no_constraints`) alongside the "
+            "constrained folders, and keep their rows in the filters below. Unconstrained "
+            "rows share one missing horizon, so add `task` to **Aggregate by** to keep each "
+            "task's baseline separate."
+        )
     max_samples_enabled = st.toggle("Limit source samples", value=False)
     max_samples = (
         int(st.number_input("Maximum samples", min_value=1, value=1000, step=100))
@@ -3034,156 +3017,10 @@ with st.sidebar:
                 "Preparation changes retransform the selected points without refitting the model."
             )
 
-    st.divider()
-    st.subheader("Spherical temporal basis")
-    spherical_enabled = bool(
-        st.toggle(
-            "Apply spherical temporal basis",
-            value=False,
-            key="spherical_basis_enabled",
-            disabled=direction_method != "PLS",
-            help=(
-                "Apply the notebook's 6D z-score sphere transform to PLS1-3 and three "
-                "reconstruction-residual PCA coordinates. The fitted basis uses every "
-                "selected source folder."
-            ),
-        )
-        and direction_method == "PLS"
-    )
-    spherical_mode = "Fit new"
-    loaded_spherical_model = None
-    spherical_parameters = dict(SPHERICAL_DEFAULT_PARAMETERS)
-    spherical_upload_digest = None
-    if spherical_enabled:
-        if n_components < 3:
-            st.error("The spherical temporal basis requires at least three PLS components.")
-            st.stop()
-        spherical_mode = st.segmented_control(
-            "Spherical model",
-            ["Fit new", "Use saved"],
-            default="Fit new",
-            key="spherical_basis_mode",
-        )
-        if spherical_mode == "Fit new":
-            with st.form("spherical_basis_configuration"):
-                spherical_parameters = {
-                    "within_weight": float(
-                        st.number_input(
-                            "Within-source weight",
-                            min_value=0.0,
-                            value=SPHERICAL_DEFAULT_PARAMETERS["within_weight"],
-                            step=0.1,
-                            key="spherical_within_weight",
-                            persist_state="page",
-                        )
-                    ),
-                    "pair_weight": float(
-                        st.number_input(
-                            "Paired-task weight",
-                            min_value=0.0,
-                            value=SPHERICAL_DEFAULT_PARAMETERS["pair_weight"],
-                            step=0.5,
-                            key="spherical_pair_weight",
-                            persist_state="page",
-                        )
-                    ),
-                    "local_weight": float(
-                        st.number_input(
-                            "Temporal smoothing weight",
-                            min_value=0.0,
-                            value=SPHERICAL_DEFAULT_PARAMETERS["local_weight"],
-                            step=0.01,
-                            format="%.3f",
-                            key="spherical_local_weight",
-                            persist_state="page",
-                        )
-                    ),
-                    "ridge_fraction": float(
-                        st.number_input(
-                            "Ridge fraction",
-                            min_value=0.0,
-                            value=SPHERICAL_DEFAULT_PARAMETERS["ridge_fraction"],
-                            step=0.01,
-                            format="%.3f",
-                            key="spherical_ridge_fraction",
-                            persist_state="page",
-                        )
-                    ),
-                }
-                st.form_submit_button(
-                    "Apply spherical configuration",
-                    icon=":material/tune:",
-                    width="stretch",
-                )
-            st.caption(
-                "Defaults are the selected notebook values. Changes refit the basis and "
-                "residual PCA on the prepared data."
-            )
-        else:
-            spherical_upload = st.file_uploader(
-                "Saved spherical model",
-                type=["npz"],
-                key="spherical_basis_upload",
-                help="Accepts spherical temporal basis artifacts downloaded from this app.",
-            )
-            if spherical_upload is not None:
-                spherical_bytes = spherical_upload.getvalue()
-                spherical_upload_digest = sha256(spherical_bytes).hexdigest()
-                if (
-                    st.session_state.get("loaded_spherical_basis_digest") != spherical_upload_digest
-                    or "loaded_spherical_basis_model" not in st.session_state
-                ):
-                    if st.button(
-                        "Load uploaded spherical model",
-                        type="primary",
-                        icon=":material/upload_file:",
-                        width="stretch",
-                    ):
-                        try:
-                            loaded_spherical_model = load_spherical_temporal_basis(spherical_bytes)
-                        except ValueError as exc:
-                            st.error(str(exc))
-                            st.stop()
-                        st.session_state.loaded_spherical_basis_digest = spherical_upload_digest
-                        st.session_state.loaded_spherical_basis_model = loaded_spherical_model
-                        st.session_state.loaded_spherical_basis_filename = spherical_upload.name
-                else:
-                    loaded_spherical_model = st.session_state.loaded_spherical_basis_model
-            elif "loaded_spherical_basis_model" in st.session_state:
-                spherical_upload_digest = st.session_state.get("loaded_spherical_basis_digest")
-                loaded_spherical_model = st.session_state.loaded_spherical_basis_model
-            if loaded_spherical_model is None:
-                st.info("Choose a saved model and click **Load uploaded spherical model**.")
-                st.stop()
-            spherical_parameters = dict(loaded_spherical_model["parameters"])
-            st.success(
-                st.session_state.get("loaded_spherical_basis_filename", "Saved spherical model")
-            )
-            st.caption(
-                "Parameters: "
-                f"within={spherical_parameters['within_weight']:g}, "
-                f"paired={spherical_parameters['pair_weight']:g}, "
-                f"smooth={spherical_parameters['local_weight']:g}, "
-                f"ridge={spherical_parameters['ridge_fraction']:g}."
-            )
-            st.button(
-                "Forget loaded spherical model",
-                icon=":material/delete:",
-                on_click=forget_loaded_spherical_basis,
-                width="stretch",
-            )
-    elif direction_method != "PLS":
-        st.caption("Select PLS to enable this transform.")
-
 analysis_aggregation_fields = list(aggregation_fields)
-if spherical_enabled:
-    for required_field in ("time_horizon_months", SOURCE_FOLDER_FIELD, "task"):
-        if required_field not in candidate_fields and required_field != "time_horizon_months":
-            st.error(f"The spherical temporal basis requires metadata field {required_field!r}.")
-            st.stop()
-        if required_field not in analysis_aggregation_fields:
-            analysis_aggregation_fields.append(required_field)
-
+if subtract_baseline and "task" not in candidate_fields:
+    st.error("Subtracting unconstrained activations requires the 'task' metadata field.")
+    st.stop()
 slice_key = (component, position_index, st.session_state.get("source_revision", 0))
 if st.session_state.get("slice_key") != slice_key:
     try:
@@ -3242,6 +3079,7 @@ prepared_key = (
     tuple((field, tuple(filters[field])) for field in filter_fields),
     tuple(analysis_aggregation_fields),
     max_samples,
+    subtract_baseline,
 )
 if st.session_state.get("prepared_key") != prepared_key:
     try:
@@ -3267,6 +3105,24 @@ if st.session_state.get("prepared_key") != prepared_key:
                     max_samples=max_samples,
                 )
             )
+            if subtract_baseline:
+                (
+                    prepared_matrix,
+                    prepared_row_offsets,
+                    prepared_metadata,
+                    baseline_details,
+                ) = subtract_unconstrained_baseline(
+                    prepared_matrix,
+                    prepared_row_offsets,
+                    prepared_metadata,
+                    activation_matrix,
+                )
+                prepared_details = {
+                    **prepared_details,
+                    **baseline_details,
+                    "analysis_rows": len(prepared_metadata),
+                    "baseline_subtracted": True,
+                }
         st.session_state.prepared_key = prepared_key
         st.session_state.prepared_matrix = prepared_matrix
         st.session_state.prepared_row_offsets = prepared_row_offsets
@@ -3278,10 +3134,7 @@ if st.session_state.get("prepared_key") != prepared_key:
         st.error(f"Analysis data could not be prepared: {exc}")
         st.stop()
 
-spherical_residual_identity = (
-    (spherical_mode, spherical_upload_digest) if spherical_enabled else ("disabled", None)
-)
-pca_key = (prepared_key, pca_identity, spherical_residual_identity)
+pca_key = (prepared_key, pca_identity)
 if st.session_state.get("pca_key") != pca_key:
     try:
         for key in ("projection", "pca", "details"):
@@ -3339,43 +3192,25 @@ if st.session_state.get("pca_key") != pca_key:
             score_fields = [
                 f"{score_prefix}{index + 1}" for index in range(pca.components_.shape[0])
             ]
-            if spherical_enabled and spherical_mode == "Fit new":
-                residual_rms, residual_scores, residual_pca = reconstruction_residual_statistics(
-                    activation_matrix,
-                    st.session_state.get("prepared_matrix"),
-                    st.session_state["prepared_row_offsets"],
-                    projection[score_fields].to_numpy(),
-                    pca,
-                )
-                st.session_state.residual_pca = residual_pca
-                projection["reconstruction_residual_rms"] = residual_rms
-                for residual_index in range(3):
-                    projection[f"reconstruction_residual_PC{residual_index + 1}"] = residual_scores[
-                        :, residual_index
-                    ]
-            elif spherical_enabled:
-                residual_rms, residual_scores = reconstruction_residual_projection(
-                    activation_matrix,
-                    st.session_state.get("prepared_matrix"),
-                    st.session_state["prepared_row_offsets"],
-                    projection[score_fields].to_numpy(),
-                    pca,
-                    residual_center=loaded_spherical_model["residual_pca_center"],
-                    residual_components=loaded_spherical_model["residual_pca_components"],
-                )
-                projection["reconstruction_residual_rms"] = residual_rms
-                for residual_index in range(3):
-                    projection[f"reconstruction_residual_PC{residual_index + 1}"] = residual_scores[
-                        :, residual_index
-                    ]
-            else:
-                projection["reconstruction_residual_rms"] = reconstruction_residual_rms(
-                    activation_matrix,
-                    st.session_state.get("prepared_matrix"),
-                    st.session_state["prepared_row_offsets"],
-                    projection[score_fields].to_numpy(),
-                    pca,
-                )
+            # Residual PCA always runs so every projection carries the leading directions
+            # of what the retained components failed to reconstruct. Very small selections
+            # cannot support three components, so the count is clamped rather than skipped.
+            residual_component_count = min(
+                RESIDUAL_PCA_COMPONENTS, len(projection), int(activation_matrix.shape[1])
+            )
+            residual_rms, residual_scores, _ = reconstruction_residual_statistics(
+                activation_matrix,
+                st.session_state.get("prepared_matrix"),
+                st.session_state["prepared_row_offsets"],
+                projection[score_fields].to_numpy(),
+                pca,
+                n_components=residual_component_count,
+            )
+            projection["reconstruction_residual_rms"] = residual_rms
+            for residual_index in range(residual_component_count):
+                projection[f"reconstruction_residual_PC{residual_index + 1}"] = residual_scores[
+                    :, residual_index
+                ]
             if (
                 "log10_time_horizon_months" not in projection
                 and "time_horizon_months" in projection
@@ -3394,8 +3229,7 @@ if st.session_state.get("pca_key") != pca_key:
         st.error(f"{direction_method} projection could not be prepared: {exc}")
         st.stop()
 
-base_projection: pd.DataFrame = st.session_state.projection
-projection = base_projection
+projection: pd.DataFrame = st.session_state.projection
 details = st.session_state.details
 active_pca = st.session_state.pca
 component_count = int(active_pca.components_.shape[0])
@@ -3412,56 +3246,20 @@ variance_metric_label = (
 metric_columns[3].metric(variance_metric_label, f"{sum(details['explained_variance']):.1%}")
 if details.get("pca_source") == "loaded":
     st.caption("Explained variance describes the loaded model's original training data.")
-
-active_spherical_model = None
-if spherical_enabled:
-    spherical_identity = (
-        ("fit", pca_key, tuple(sorted(spherical_parameters.items())))
-        if spherical_mode == "Fit new"
-        else ("loaded", pca_key, spherical_upload_digest)
+if details.get("baseline_subtracted"):
+    dropped = details.get("baseline_dropped_rows", 0)
+    st.info(
+        f"Unconstrained baselines subtracted · {details['baseline_groups']:,} "
+        f"`{details['baseline_field']}` groups from {details['baseline_rows']:,} unconstrained "
+        + (
+            f"point(s) · {dropped:,} point(s) dropped without a matching baseline."
+            if dropped
+            else "point(s) · every point had a matching baseline."
+        ),
+        icon=":material/exposure_neg_1:",
     )
-    try:
-        if spherical_mode == "Fit new":
-            if st.session_state.get("spherical_basis_identity") != spherical_identity:
-                residual_pca = st.session_state.get("residual_pca")
-                if residual_pca is None:
-                    raise ValueError("Residual PCA is unavailable for spherical fitting.")
-                with st.spinner("Fitting the spherical temporal basisâ€¦"):
-                    active_spherical_model = fit_spherical_temporal_basis(
-                        base_projection,
-                        residual_pca_center=residual_pca.mean_,
-                        residual_pca_components=residual_pca.components_,
-                        **spherical_parameters,
-                    )
-                st.session_state.spherical_basis_model = active_spherical_model
-                st.session_state.spherical_basis_identity = spherical_identity
-                clear_surface_fits()
-            else:
-                active_spherical_model = st.session_state.spherical_basis_model
-        else:
-            active_spherical_model = loaded_spherical_model
-            if st.session_state.get("spherical_basis_identity") != spherical_identity:
-                st.session_state.spherical_basis_identity = spherical_identity
-                st.session_state.spherical_basis_model = active_spherical_model
-                clear_surface_fits()
-        projection = transform_spherical_temporal_basis(base_projection, active_spherical_model)
-    except Exception as exc:  # noqa: BLE001 - surface transform/data errors in the UI
-        st.error(f"Spherical temporal basis could not be applied: {exc}")
-        st.stop()
-    with st.container(border=True):
-        st.success(
-            "Spherical temporal basis active Â· "
-            f"{len(active_spherical_model['training_sources']):,} sources Â· "
-            f"{len(active_spherical_model['training_horizons']):,} shared horizons"
-        )
-        st.caption(
-            "Coordinates use a balanced 6D z-score sphere: two learned angular time axes "
-            "plus standardized log-radius. Downloaded CSVs include all three."
-        )
 
 coordinate_fields = [*pc_fields]
-if spherical_enabled:
-    coordinate_fields.extend(SPHERICAL_OUTPUT_COLUMNS)
 axis_fields = [*coordinate_fields, "reconstruction_residual_rms"]
 metadata_fields = sorted(
     column for column in projection if column not in {*coordinate_fields, "sample_index"}
@@ -3482,7 +3280,7 @@ if len(axis_fields) < required_axes:
         f"At least {required_axes} numeric projection fields are required for a {plot_mode} plot."
     )
     st.stop()
-preferred_axis_fields = list(SPHERICAL_OUTPUT_COLUMNS) if spherical_enabled else pc_fields
+preferred_axis_fields = pc_fields
 if st.session_state.get("projection_x_axis") not in axis_fields:
     st.session_state["projection_x_axis"] = preferred_axis_fields[0]
 x_component = controls[1].selectbox(
@@ -4651,6 +4449,430 @@ else:
     )
     st.plotly_chart(figure, width="stretch", config={"displaylogo": False})
 
+st.subheader("Horizon regression")
+with st.container(border=True):
+    st.caption(
+        f"Fit a polynomial ridge model predicting `{REGRESSION_TARGET_FEATURE}` from the "
+        f"projection coordinates. The train/test split is **disjoint by `{GROUP_FEATURE}`**: "
+        "every point sharing a task lands wholly in one side. The same task recurs at many "
+        "horizons, so a random split would leave near-duplicates of each test point in "
+        "training. Scores refresh as soon as a control changes."
+    )
+    if REGRESSION_TARGET_FEATURE not in projection:
+        st.info(
+            f"The projection carries no `{REGRESSION_TARGET_FEATURE}` column, so there is no "
+            "horizon to regress. It is derived from positive, finite `time_horizon_months` "
+            "values.",
+            icon=":material/info:",
+        )
+    elif GROUP_FEATURE not in projection:
+        st.info(
+            f"The prepared metadata has no `{GROUP_FEATURE}` field, so a task-disjoint split "
+            "cannot be built.",
+            icon=":material/info:",
+        )
+    else:
+        regression_groups = projection[GROUP_FEATURE].astype(str)
+        regression_task_count = int(regression_groups.nunique())
+        regression_finite_rows = int(
+            np.isfinite(projection[REGRESSION_TARGET_FEATURE].to_numpy(dtype=np.float64)).sum()
+        )
+        st.caption(
+            f"{regression_task_count:,} distinct task(s) · {regression_finite_rows:,} point(s) "
+            f"with a finite `{REGRESSION_TARGET_FEATURE}`."
+        )
+        if GROUP_FEATURE not in analysis_aggregation_fields:
+            st.warning(
+                f"`{GROUP_FEATURE}` is not one of the aggregation fields, so an aggregated "
+                "point can mix tasks and carries only its first row's task label. Add "
+                f"`{GROUP_FEATURE}` to **Aggregate by** for a clean task-disjoint split.",
+                icon=":material/warning:",
+            )
+        if direction_method == "PLS":
+            st.warning(
+                "PLS directions were supervised by the horizon using every point, including "
+                "the ones held out below, so these scores are optimistic. Refit the "
+                "projection with PCA for an unsupervised coordinate system.",
+                icon=":material/warning:",
+            )
+        if regression_task_count < 2:
+            st.warning(
+                "A task-disjoint split needs at least two distinct tasks. Widen the metadata "
+                "filters to include more."
+            )
+        elif regression_finite_rows < 4:
+            st.info(
+                "At least four points with a finite horizon are required to fit and score a "
+                f"regression; the current selection has {regression_finite_rows:,}.",
+                icon=":material/info:",
+            )
+        else:
+            regression_mode = st.segmented_control(
+                "Regression model",
+                ["Fit new", "Use saved"],
+                default="Fit new",
+                key="horizon_regression_mode",
+                persist_state="page",
+            )
+            stored_regression_features = st.session_state.get("horizon_regression_features")
+            if stored_regression_features is not None:
+                valid_regression_features = [
+                    field for field in stored_regression_features if field in coordinate_fields
+                ]
+                if valid_regression_features != stored_regression_features:
+                    st.session_state.horizon_regression_features = valid_regression_features
+            regression_features = st.multiselect(
+                "Feature coordinates",
+                coordinate_fields,
+                default=list(pc_fields),
+                key="horizon_regression_features",
+                help=(
+                    "Projection coordinates the regression consumes. Order follows this "
+                    "selection and is recorded in the saved model."
+                ),
+                persist_state="page",
+            )
+            if not regression_features:
+                st.info("Choose at least one projection coordinate to regress on.")
+            else:
+                regression_coordinates = projection[regression_features].to_numpy(dtype=np.float64)
+                regression_target = projection[REGRESSION_TARGET_FEATURE].to_numpy(dtype=np.float64)
+
+                if regression_mode == "Use saved":
+                    st.warning(
+                        "Only load model files you trust. Joblib and pickle artifacts can "
+                        "execute code when opened."
+                    )
+                    regression_upload = st.file_uploader(
+                        "Saved regression model",
+                        type=["joblib"],
+                        key="regression_model_upload",
+                        help="Choose a regression artifact downloaded from this app.",
+                    )
+                    regression_bytes = (
+                        regression_upload.getvalue() if regression_upload is not None else None
+                    )
+                    regression_digest = (
+                        sha256(regression_bytes).hexdigest()
+                        if regression_bytes is not None
+                        else None
+                    )
+                    regression_already_loaded = (
+                        regression_digest is not None
+                        and regression_digest == st.session_state.get("loaded_regression_digest")
+                        and st.session_state.get("loaded_regression_model") is not None
+                    )
+                    if st.button(
+                        "Load uploaded regression",
+                        type="primary",
+                        icon=":material/upload_file:",
+                        width="stretch",
+                        disabled=regression_bytes is None or regression_already_loaded,
+                        key="load_regression_button",
+                    ):
+                        try:
+                            loaded_regression, regression_provenance = load_regression_model(
+                                regression_bytes
+                            )
+                        except ValueError as exc:
+                            st.error(str(exc))
+                        else:
+                            st.session_state.loaded_regression_digest = regression_digest
+                            st.session_state.loaded_regression_model = loaded_regression
+                            st.session_state.loaded_regression_provenance = regression_provenance
+                            st.session_state.loaded_regression_filename = regression_upload.name
+
+                    loaded_regression = st.session_state.get("loaded_regression_model")
+                    if loaded_regression is None:
+                        st.info("Choose a saved regression and click **Load uploaded regression**.")
+                    else:
+                        st.success(
+                            f"{st.session_state.get('loaded_regression_filename', 'Saved model')}"
+                            f" · degree {loaded_regression.degree} · alpha "
+                            f"{loaded_regression.alpha:g}"
+                        )
+                        st.button(
+                            "Forget loaded regression",
+                            icon=":material/delete:",
+                            on_click=forget_loaded_regression,
+                            key="forget_regression_button",
+                        )
+                        saved_regression_features = list(loaded_regression.coordinate_features)
+                        if saved_regression_features != regression_features:
+                            st.error(
+                                "This model consumes "
+                                f"{', '.join(saved_regression_features)}, but the current "
+                                f"selection provides {', '.join(regression_features)}. Match "
+                                "**Feature coordinates** to score it."
+                            )
+                        else:
+                            try:
+                                loaded_regression_scores = evaluate_regression_model(
+                                    loaded_regression,
+                                    regression_coordinates,
+                                    regression_target,
+                                )
+                            except ValueError as exc:
+                                st.error(f"The loaded regression could not be scored: {exc}")
+                            else:
+                                loaded_score_columns = st.columns(3)
+                                loaded_score_columns[0].metric(
+                                    "R² on current points",
+                                    _format_metric(loaded_regression_scores["r2"]),
+                                )
+                                loaded_score_columns[1].metric(
+                                    "RMSE on current points",
+                                    _format_metric(loaded_regression_scores["rmse"]),
+                                )
+                                loaded_score_columns[2].metric(
+                                    "Scored points",
+                                    f"{loaded_regression_scores['points']:,}",
+                                )
+                                st.warning(
+                                    "These points may overlap the model's original training "
+                                    "data, which this app cannot verify. Treat the scores as "
+                                    "held-out only if the current selection is genuinely "
+                                    "unseen.",
+                                    icon=":material/warning:",
+                                )
+                else:
+                    regression_model_columns = st.columns(3)
+                    regression_degree = int(
+                        regression_model_columns[0].number_input(
+                            "Polynomial degree",
+                            min_value=1,
+                            max_value=6,
+                            value=2,
+                            key="horizon_regression_degree",
+                            help=(
+                                "Degree 1 is plain ridge on the coordinates. Higher degrees add "
+                                "curvature but grow the term count quickly."
+                            ),
+                            persist_state="page",
+                        )
+                    )
+                    regression_alpha = 10.0 ** regression_model_columns[1].slider(
+                        "log10 ridge alpha",
+                        -6.0,
+                        6.0,
+                        0.0,
+                        0.25,
+                        key="horizon_regression_alpha",
+                        help="L2 penalty. Larger values shrink the polynomial coefficients.",
+                        persist_state="page",
+                    )
+                    regression_interaction_only = regression_model_columns[2].checkbox(
+                        "Interactions only",
+                        value=False,
+                        key="horizon_regression_interactions",
+                        help="Drop pure powers and keep only cross-terms.",
+                        persist_state="page",
+                    )
+                    regression_split_columns = st.columns(3)
+                    regression_test_fraction = regression_split_columns[0].slider(
+                        "Test fraction (by task)",
+                        0.1,
+                        0.5,
+                        0.25,
+                        0.05,
+                        key="horizon_regression_test_fraction",
+                        help="Approximate share of *tasks* held out, not of points.",
+                        persist_state="page",
+                    )
+                    regression_maximum_folds = max(2, min(10, regression_task_count))
+                    # Only clamp a value the user already chose: writing the default into
+                    # session state before the widget exists makes Streamlit warn that the
+                    # default and the stored value were both supplied.
+                    if "horizon_regression_cv_folds" in st.session_state:
+                        clamp_integer_widget_state(
+                            "horizon_regression_cv_folds",
+                            minimum=0,
+                            maximum=regression_maximum_folds,
+                            default=0,
+                        )
+                    regression_cv_folds = int(
+                        regression_split_columns[1].number_input(
+                            "Cross-validation folds",
+                            min_value=0,
+                            max_value=regression_maximum_folds,
+                            value=0,
+                            key="horizon_regression_cv_folds",
+                            help=(
+                                "0 disables it. Folds are grouped by task, so each held-out "
+                                "fold contains only unseen tasks."
+                            ),
+                            persist_state="page",
+                        )
+                    )
+                    regression_seed = int(
+                        regression_split_columns[2].number_input(
+                            "Random seed",
+                            min_value=0,
+                            max_value=2_147_483_647,
+                            value=42,
+                            key="horizon_regression_seed",
+                            persist_state="page",
+                        )
+                    )
+                    regression_standardize = st.checkbox(
+                        "Standardize coordinates",
+                        value=True,
+                        key="horizon_regression_standardize",
+                        help=(
+                            "Z-score the coordinates before the polynomial expansion so the "
+                            "ridge penalty applies evenly across terms."
+                        ),
+                        persist_state="page",
+                    )
+
+                    regression_result: RegressionFitResult | None = None
+                    try:
+                        with st.spinner("Fitting the polynomial ridge model…"):
+                            regression_result = fit_regression_cached(
+                                regression_coordinates,
+                                regression_target,
+                                regression_groups.tolist(),
+                                {
+                                    "coordinate_features": tuple(regression_features),
+                                    "degree": regression_degree,
+                                    "alpha": regression_alpha,
+                                    "interaction_only": regression_interaction_only,
+                                    "standardize": regression_standardize,
+                                    "test_fraction": regression_test_fraction,
+                                    "random_state": regression_seed,
+                                    "cross_validation_folds": regression_cv_folds,
+                                },
+                            )
+                    except (ValueError, MemoryError) as exc:
+                        st.error(f"Regression failed: {exc}")
+
+                    if regression_result is not None:
+                        regression_metrics = regression_result.metrics
+                        regression_score_columns = st.columns(4)
+                        regression_score_columns[0].metric(
+                            "Train R²",
+                            _format_metric(regression_metrics["train_r2"]),
+                            help="Fit quality on the tasks the model trained on.",
+                        )
+                        regression_score_columns[1].metric(
+                            "Train RMSE",
+                            _format_metric(regression_metrics["train_rmse"]),
+                            help=f"In `{REGRESSION_TARGET_FEATURE}` units, so 1.0 is one decade.",
+                        )
+                        regression_score_columns[2].metric(
+                            "Test R²",
+                            _format_metric(regression_metrics["test_r2"]),
+                            help=(
+                                "Measured on held-out tasks. Negative means the model does "
+                                "worse than predicting the test split's mean horizon."
+                            ),
+                        )
+                        regression_score_columns[3].metric(
+                            "Test RMSE",
+                            _format_metric(regression_metrics["test_rmse"]),
+                            help=f"In `{REGRESSION_TARGET_FEATURE}` units, so 1.0 is one decade.",
+                        )
+                        st.dataframe(
+                            regression_scores_table(regression_metrics),
+                            hide_index=True,
+                            width="stretch",
+                            column_config={
+                                "R²": st.column_config.NumberColumn(format="%.4f"),
+                                "RMSE": st.column_config.NumberColumn(format="%.5g"),
+                            },
+                        )
+                        st.caption(
+                            f"{regression_metrics['train_tasks']:,} training task(s) and "
+                            f"{regression_metrics['test_tasks']:,} held-out task(s) share no "
+                            f"overlap · {regression_metrics['polynomial_terms']:,} polynomial "
+                            "term(s)."
+                        )
+                        if regression_result.warnings:
+                            st.warning(" ".join(regression_result.warnings))
+
+                        regression_parity_frame = pd.DataFrame(
+                            {
+                                "actual": np.concatenate(
+                                    [
+                                        regression_result.train_actual,
+                                        regression_result.test_actual,
+                                    ]
+                                ),
+                                "predicted": np.concatenate(
+                                    [
+                                        regression_result.train_prediction,
+                                        regression_result.test_prediction,
+                                    ]
+                                ),
+                                "split": ["Train"] * len(regression_result.train_actual)
+                                + ["Test"] * len(regression_result.test_actual),
+                            }
+                        )
+                        regression_parity_figure = px.scatter(
+                            regression_parity_frame,
+                            x="actual",
+                            y="predicted",
+                            color="split",
+                            opacity=0.75,
+                            labels={
+                                "actual": f"Actual {REGRESSION_TARGET_FEATURE}",
+                                "predicted": f"Predicted {REGRESSION_TARGET_FEATURE}",
+                            },
+                            color_discrete_map={"Train": "#7b9acc", "Test": "#d81b60"},
+                        )
+                        regression_parity_span = [
+                            float(
+                                regression_parity_frame[["actual", "predicted"]].to_numpy().min()
+                            ),
+                            float(
+                                regression_parity_frame[["actual", "predicted"]].to_numpy().max()
+                            ),
+                        ]
+                        regression_parity_figure.add_shape(
+                            type="line",
+                            x0=regression_parity_span[0],
+                            y0=regression_parity_span[0],
+                            x1=regression_parity_span[1],
+                            y1=regression_parity_span[1],
+                            line={"color": "rgba(120,120,120,0.7)", "dash": "dash"},
+                        )
+                        regression_parity_figure.update_layout(
+                            height=420,
+                            margin={"l": 12, "r": 12, "t": 28, "b": 12},
+                            paper_bgcolor="white",
+                            plot_bgcolor="white",
+                            font={
+                                "family": "Inter, ui-sans-serif, system-ui",
+                                "color": "#17201d",
+                            },
+                        )
+                        st.plotly_chart(
+                            regression_parity_figure,
+                            width="stretch",
+                            config={"displaylogo": False},
+                        )
+                        st.download_button(
+                            "Download regression model",
+                            data=lambda: serialize_regression_model(
+                                regression_result.model,
+                                metadata={
+                                    "layer_component": component,
+                                    "cached_position": inspection["positions"][position_index],
+                                    "aggregation_fields": list(analysis_aggregation_fields),
+                                    "direction_method": direction_method,
+                                    "projection_components": component_count,
+                                },
+                            ),
+                            file_name="activation_horizon_regression.joblib",
+                            mime="application/octet-stream",
+                            icon=":material/download:",
+                            on_click="ignore",
+                            help=(
+                                "Versioned joblib artifact containing the fitted pipeline, the "
+                                "coordinate names it consumes, and its split provenance."
+                            ),
+                        )
+
 with st.expander(f"{direction_method} details and downloads"):
     variance_column = (
         "explained_variance" if direction_method == "PCA" else "represented_x_variance"
@@ -4672,19 +4894,6 @@ with st.expander(f"{direction_method} details and downloads"):
     st.caption("Downloads contain the full projection, independent of visual filters.")
     safe_component = component.replace("/", "-").replace("\\", "-")
     with st.container(horizontal=True):
-        if spherical_enabled:
-            st.download_button(
-                "Download spherical model",
-                data=lambda: serialize_spherical_temporal_basis(active_spherical_model),
-                file_name=f"spherical_temporal_basis_{safe_component}.npz",
-                mime="application/octet-stream",
-                icon=":material/download:",
-                on_click="ignore",
-                help=(
-                    "Includes the fitted residual-PCA projection, spherical preprocessor, "
-                    "basis, algorithm parameters, and training provenance."
-                ),
-            )
         if direction_method == "PCA":
             if pca_mode == "Fit new":
                 model_metadata = {
@@ -4771,7 +4980,9 @@ with st.expander(f"{direction_method} details and downloads"):
             icon=":material/download:",
             on_click="ignore",
             help=(
-                "Includes the projected coordinates. Also includes t (spline parameter) "
-                "and u (extrusion parameter) when an extruded surface is loaded."
+                "Includes the projected coordinates, the reconstruction-residual RMS, and "
+                f"the leading {RESIDUAL_PCA_COMPONENTS} residual PCA coordinates. Also "
+                "includes t (spline parameter) and u (extrusion parameter) when an extruded "
+                "surface is loaded."
             ),
         )

@@ -474,8 +474,8 @@ def fit_extrusion_direction(
 
     if not isinstance(curve_model, CurveModel):
         raise ValueError("The extrusion input must be a saved curve model.")
-    if curve_model.algorithm != "spline" or int(curve_model.parameters.get("degree", 0)) != 3:
-        raise ValueError("The extrusion input must be a degree-3 cubic spline curve.")
+    if curve_model.algorithm != "spline" or int(curve_model.parameters.get("degree", 0)) not in (2, 3):
+        raise ValueError("The extrusion input must be a degree-2 or degree-3 spline curve.")
     if degree not in {1, 2}:
         raise ValueError("Extrusion degree must be 1 or 2.")
     if max_iterations < 1:
