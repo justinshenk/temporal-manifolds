@@ -5,8 +5,10 @@ caching scripts. Because the repository-wide extraction policy in
 ``temporal_manifolds.activations.extraction_policy`` pins analysis to
 ``layer_out/21`` at token -1, this script drives the caching hooks directly instead
 of going through :func:`get_activations`, and validates its own payload shape.
-Uploads land under GCS prefixes carrying an ``expanded_`` prefix so they never mix
-with the fixed-contract artifacts.
+Uploads land under GCS prefixes carrying a directory-name tag so layer ranges never
+mix with each other or with the fixed-contract artifacts: ``expanded_`` for the
+default 17..35 sweep, and ``early_`` for the 0..16 sweep run by
+scripts/run_activation_caching_early_selected_acts.sh.
 """
 
 from __future__ import annotations
@@ -114,9 +116,16 @@ def layer_component_key(layer: int) -> str:
     return f"{COMPONENT}/{layer}"
 
 
-def expanded_gcs_prefix(scenario_prefix: str) -> str:
-    """Return the ``expanded_`` GCS prefix for a scenario's fixed-contract prefix."""
-    return f"{GCS_PREFIX_PREFIX}{scenario_prefix}"
+def expanded_gcs_prefix(scenario_prefix: str, prefix_tag: str = GCS_PREFIX_PREFIX) -> str:
+    """Return the tagged GCS prefix for a scenario's fixed-contract prefix.
+
+    The tag keeps one layer range's uploads in their own directories: ``expanded_``
+    for the default 17..35 sweep, ``early_`` for the 0..16 sweep, and so on.
+    """
+    tag = prefix_tag.strip("/")
+    if not tag:
+        raise ValueError("prefix_tag must be a non-empty directory-name prefix.")
+    return f"{tag}{scenario_prefix}"
 
 
 def validate_expanded_payload(payload: Any, *, source_name: str = "Activation payload") -> None:
@@ -301,6 +310,7 @@ def cache_scenario_expanded_acts(
     upload_queue_capacity: int,
     overwrite: bool,
     skip_uploaded: bool,
+    prefix_tag: str = GCS_PREFIX_PREFIX,
 ) -> None:
     """Cache and upload one dataset scenario across every requested layer."""
     import torch
@@ -312,8 +322,8 @@ def cache_scenario_expanded_acts(
     if max_samples is not None:
         records = records[:max_samples]
 
-    gcs_prefix = expanded_gcs_prefix(scenario.gcs_prefix)
-    output_dir = output_root / f"{GCS_PREFIX_PREFIX}{scenario.output_dir_name}"
+    gcs_prefix = expanded_gcs_prefix(scenario.gcs_prefix, prefix_tag)
+    output_dir = output_root / expanded_gcs_prefix(scenario.output_dir_name, prefix_tag)
     if not save_to_gcp:
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -404,6 +414,7 @@ def cache_expanded_selected_acts(
     upload_queue_capacity: int = 128,
     overwrite: bool = False,
     skip_uploaded: bool = True,
+    prefix_tag: str = GCS_PREFIX_PREFIX,
 ) -> None:
     """Load the model once and cache every scenario across the requested layer range."""
     if batch_size < 1:
@@ -444,6 +455,7 @@ def cache_expanded_selected_acts(
             upload_queue_capacity=upload_queue_capacity,
             overwrite=overwrite,
             skip_uploaded=skip_uploaded,
+            prefix_tag=prefix_tag,
         )
         print(f"[expanded-caching] Finished scenario {scenario.name}", flush=True)
 
@@ -457,6 +469,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(SCENARIOS_BY_NAME),
         default=None,
         help="Restrict the run to one scenario; repeatable. Defaults to every scenario.",
+    )
+    parser.add_argument(
+        "--prefix-tag",
+        default=GCS_PREFIX_PREFIX,
+        help=(
+            "Directory-name prefix for the GCS uploads and local output dirs, so each "
+            "layer range lands in its own folders (default: %(default)s)."
+        ),
     )
     parser.add_argument("--first-layer", type=int, default=FIRST_LAYER)
     parser.add_argument("--last-layer", type=int, default=LAST_LAYER)
@@ -508,6 +528,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         upload_queue_capacity=args.upload_queue_capacity,
         overwrite=args.overwrite,
         skip_uploaded=args.skip_uploaded,
+        prefix_tag=args.prefix_tag,
     )
 
 
