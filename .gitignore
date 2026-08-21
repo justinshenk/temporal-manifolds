@@ -50,3 +50,4 @@ figures/*
 .claude/
 .streamlit/config.toml
 
+FULL*
