@@ -99,61 +99,7 @@ Give a plan appropriate for this deadline.""",
 ]
 
 
-strategy_formats = [
-    {
-        "id": "strategy",
-        "instruction": "Strategy: <one sentence>",
-    },
-    {
-        "id": "summary",
-        "instruction": "Summary: <one sentence>",
-    },
-    {
-        "id": "approach",
-        "instruction": "Approach: <one sentence>",
-    },
-]
-
-action_formats = [
-    {
-        "id": "steps",
-        "instruction": """Steps:
-1. ...
-2. ...
-3. ...""",
-    },
-    {
-        "id": "checklist",
-        "instruction": """Checklist:
-- ...
-- ...
-- ...""",
-    },
-    {
-        "id": "actions",
-        "instruction": """Actions:
-1. ...
-2. ...
-3. ...""",
-    },
-]
-
-
-output_formats = [
-    {
-        "id": f"{strategy_format['id']}_{action_format['id']}",
-        "instructions": (
-            "Output format:\n"
-            f"{strategy_format['instruction']}\n"
-            f"{action_format['instruction']}"
-        ),
-    }
-    for strategy_format in strategy_formats
-    for action_format in action_formats
-]
-
-
-format_neutral_templates = [
+templates = [
     {
         "id": framing["id"],
         "template": framing["body"],
@@ -161,19 +107,6 @@ format_neutral_templates = [
     }
     for framing in prompt_framings
 ]
-
-
-templates = [
-    {
-        "id": f"{framing['id']}__{output_format['id']}",
-        "template": f"{framing['body']}\n\n{output_format['instructions']}",
-        "prompt_framing": framing["id"],
-        "output_format": output_format["id"],
-    }
-    for framing in prompt_framings
-    for output_format in output_formats
-]
-
 tasks = {
     # Fast baseline tasks
     "answer a yes-or-no question": _task(
@@ -299,7 +232,7 @@ tasks = {
         difficulty="high",
         domain="creative",
         planning_type="creative",
-        stakes="medium",
+        stakes="low",
         agency="individual",
     ),
     "renovate an apartment": _task(
@@ -317,7 +250,7 @@ tasks = {
         difficulty="high",
         domain="business",
         planning_type="strategic",
-        stakes="high",
+        stakes="medium",
         agency="individual",
     ),
     "expand a local business to new markets": _task(
@@ -401,59 +334,14 @@ tasks = {
         stakes="high",
         agency="organization",
     ),
-    # Crossed task-family controls: compare within a family across difficulty
-    # and compare within a difficulty level across available time units.
-    "write a one-sentence email reply": _task(
-        {"minutes", "hours", "days"},
-        task_family="communication_plan",
-        difficulty="low",
-        domain="communication",
-        planning_type="procedural",
-        stakes="low",
-        agency="individual",
-    ),
-    "write a sensitive email addressing a team conflict": _task(
-        {"minutes", "hours", "days"},
-        task_family="communication_plan",
-        difficulty="medium",
-        domain="communication",
-        planning_type="coordination",
-        stakes="medium",
-        agency="individual",
-    ),
+    # Additional domain controls. The knowledge-archive family below is retained
+    # as an explicit within-family difficulty ladder.
     "design a communication plan for a company restructuring": _task(
         {"hours", "days", "weeks"},
         task_family="communication_plan",
         difficulty="high",
         domain="communication",
         planning_type="strategic",
-        stakes="high",
-        agency="organization",
-    ),
-    "organize files on a desk": _task(
-        {"minutes", "hours", "days"},
-        task_family="organization_project",
-        difficulty="low",
-        domain="administrative",
-        planning_type="procedural",
-        stakes="low",
-        agency="individual",
-    ),
-    "organize a shared drive for a small team": _task(
-        {"hours", "days", "weeks"},
-        task_family="organization_project",
-        difficulty="medium",
-        domain="administrative",
-        planning_type="logistical",
-        stakes="medium",
-        agency="multi_agent",
-    ),
-    "organize a company-wide knowledge management system": _task(
-        {"days", "weeks", "months"},
-        task_family="organization_project",
-        difficulty="high",
-        domain="knowledge_preservation",
-        planning_type="systems",
         stakes="high",
         agency="organization",
     ),
@@ -465,24 +353,6 @@ tasks = {
         planning_type="project",
         stakes="low",
         agency="individual",
-    ),
-    "create an e-commerce website": _task(
-        {"days", "weeks", "months"},
-        task_family="software_project",
-        difficulty="medium",
-        domain="software",
-        planning_type="project",
-        stakes="medium",
-        agency="individual",
-    ),
-    "create a scalable marketplace platform": _task(
-        {"days", "weeks", "months"},
-        task_family="software_project",
-        difficulty="high",
-        domain="software",
-        planning_type="project",
-        stakes="high",
-        agency="organization",
     ),
     "preserve a small folder of important documents": _task(
         {"days", "weeks", "months"},
@@ -510,6 +380,189 @@ tasks = {
         planning_type="strategic",
         stakes="high",
         agency="civilization",
+    ),
+    # Fully cover the difficulty x stakes grid without crossing tasks with
+    # implausible horizons. These controls fill combinations that the natural
+    # task collection above represents fewer than twice.
+    "replace a lost identification card using a standard process": _task(
+        {"hours", "days", "weeks"},
+        task_family="administrative_recovery",
+        difficulty="low",
+        domain="administrative",
+        planning_type="procedural",
+        stakes="medium",
+        agency="individual",
+    ),
+    "activate a building's emergency alarm after confirming a fire": _task(
+        {"seconds", "minutes"},
+        task_family="predefined_emergency_action",
+        difficulty="low",
+        domain="safety",
+        planning_type="reactive",
+        stakes="high",
+        agency="individual",
+    ),
+    "follow a shutdown checklist for overheating laboratory equipment": _task(
+        {"minutes", "hours"},
+        task_family="predefined_emergency_action",
+        difficulty="low",
+        domain="safety",
+        planning_type="procedural",
+        stakes="high",
+        agency="individual",
+    ),
+    "trigger a preauthorized shutdown of a runaway autonomous weapons system": _task(
+        {"seconds", "minutes"},
+        task_family="existential_safeguard_activation",
+        difficulty="low",
+        domain="civilization",
+        planning_type="reactive",
+        stakes="existential",
+        agency="individual",
+    ),
+    "send a prewritten global warning for a confirmed extinction-level impact": _task(
+        {"seconds", "minutes"},
+        task_family="existential_safeguard_activation",
+        difficulty="low",
+        domain="civilization",
+        planning_type="procedural",
+        stakes="existential",
+        agency="organization",
+    ),
+    "organize a community board-game tournament": _task(
+        {"days", "weeks", "months"},
+        task_family="recreational_event",
+        difficulty="medium",
+        domain="personal_lifestyle",
+        planning_type="logistical",
+        stakes="low",
+        agency="multi_agent",
+    ),
+    "restore drinking-water distribution after a regional outage": _task(
+        {"hours", "days", "weeks"},
+        task_family="utility_recovery",
+        difficulty="medium",
+        domain="infrastructure",
+        planning_type="recovery",
+        stakes="high",
+        agency="organization",
+    ),
+    "execute a prepared evacuation plan for a confirmed planet-wide impact": _task(
+        {"hours", "days", "weeks"},
+        task_family="prepared_existential_response",
+        difficulty="very_high",
+        domain="civilization",
+        planning_type="coordination",
+        stakes="existential",
+        agency="multi_agent",
+    ),
+    "restore a failed component in a global biosecurity containment system": _task(
+        {"hours", "days", "weeks"},
+        task_family="prepared_existential_response",
+        difficulty="high",
+        domain="safety",
+        planning_type="recovery",
+        stakes="existential",
+        agency="organization",
+    ),
+    "design a detailed ruleset for a fictional competitive league": _task(
+        {"weeks", "months"},
+        task_family="complex_recreational_design",
+        difficulty="high",
+        domain="creative",
+        planning_type="systems",
+        stakes="low",
+        agency="individual",
+    ),
+    "build a high-fidelity simulation of an imaginary city's transit network": _task(
+        {"days", "weeks", "months"},
+        task_family="complex_recreational_design",
+        difficulty="high",
+        domain="software",
+        planning_type="project",
+        stakes="low",
+        agency="individual",
+    ),
+    "coordinate international containment of a self-propagating engineered pathogen": _task(
+        {"hours", "days", "weeks", "months"},
+        task_family="existential_threat_response",
+        difficulty="high",
+        domain="safety",
+        planning_type="coordination",
+        stakes="existential",
+        agency="multi_agent",
+    ),
+    "develop a global response strategy for a newly detected extinction-level asteroid": _task(
+        {"days", "weeks", "months", "years"},
+        task_family="existential_threat_response",
+        difficulty="very_high",
+        domain="civilization",
+        planning_type="strategic",
+        stakes="existential",
+        agency="civilization",
+    ),
+    "apply a validated patch that prevents an imminent uncontrolled nuclear escalation": _task(
+        {"hours", "days"},
+        task_family="bounded_existential_intervention",
+        difficulty="medium",
+        domain="safety",
+        planning_type="procedural",
+        stakes="existential",
+        agency="organization",
+    ),
+    "restart a planetary-defense tracking network using its tested recovery procedure": _task(
+        {"hours", "days"},
+        task_family="bounded_existential_intervention",
+        difficulty="medium",
+        domain="infrastructure",
+        planning_type="recovery",
+        stakes="existential",
+        agency="organization",
+    ),
+    "coordinate deployment of a proven atmospheric intervention after a supervolcanic eruption": _task(
+        {"days", "weeks", "months"},
+        task_family="existential_threat_response",
+        difficulty="high",
+        domain="safety",
+        planning_type="coordination",
+        stakes="existential",
+        agency="multi_agent",
+    ),
+    "simulate the complete history of a richly detailed fictional civilization": _task(
+        {"years", "decades"},
+        task_family="extreme_recreational_research",
+        difficulty="very_high",
+        domain="creative",
+        planning_type="investigative",
+        stakes="low",
+        agency="organization",
+    ),
+    "design an exhaustive taxonomy for an open-ended generative art universe": _task(
+        {"years", "decades"},
+        task_family="extreme_recreational_research",
+        difficulty="very_high",
+        domain="creative",
+        planning_type="systems",
+        stakes="low",
+        agency="organization",
+    ),
+    "coordinate worldwide preservation of public-domain cultural works": _task(
+        {"years", "decades", "centuries"},
+        task_family="global_knowledge_coordination",
+        difficulty="very_high",
+        domain="knowledge_preservation",
+        planning_type="strategic",
+        stakes="medium",
+        agency="civilization",
+    ),
+    "design a globally interoperable scientific metadata system": _task(
+        {"years", "decades"},
+        task_family="global_knowledge_coordination",
+        difficulty="very_high",
+        domain="research_infrastructure",
+        planning_type="systems",
+        stakes="medium",
+        agency="organization",
     ),
 }
 

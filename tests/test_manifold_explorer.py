@@ -60,7 +60,6 @@ def _manifold_batch(path: Path, point_count: int = 24) -> None:
             "base_unit": "months",
             "template_metadata": {
                 "prompt_framing": "task_available_time",
-                "output_format": "steps",
             },
         }
         for index, value in enumerate(values)

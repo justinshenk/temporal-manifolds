@@ -16,7 +16,6 @@ def test_conversational_records_include_task_metadata() -> None:
             {
                 "id": "test_template",
                 "template": "Task: {task}\nTime: {value} {unit}",
-                "output_format": "strategy_steps",
             }
         ],
         task_units={
@@ -39,7 +38,7 @@ def test_conversational_records_include_task_metadata() -> None:
         "stakes": "low",
         "agency": "individual",
     }
-    assert records[0]["template_metadata"] == {"output_format": "strategy_steps"}
+    assert records[0]["template_metadata"] == {}
 
 
 def test_plain_task_unit_sets_remain_supported() -> None:
@@ -58,6 +57,28 @@ def test_plain_task_unit_sets_remain_supported() -> None:
 
     assert records[0]["task_metadata"] == {}
     assert records[0]["unit"] == "minute"
+
+
+def test_one_shot_time_value_iterables_cover_the_full_generation_grid() -> None:
+    from temporal_manifolds.dataset.generate import generate_task_dataset
+
+    kwargs = {
+        "template_list": [
+            {"id": "first", "template": "{task}: {value} {unit}"},
+            {"id": "second", "template": "{task}: {value} {unit}"},
+        ],
+        "task_units": {"test task": {"minutes", "hours"}},
+    }
+    from_list = generate_task_dataset(time_values=[1, 2], **kwargs)
+    from_iterator = generate_task_dataset(time_values=iter([1, 2]), **kwargs)
+
+    assert from_iterator == from_list
+
+
+def test_months_include_an_approximate_four_week_variant() -> None:
+    from temporal_manifolds.dataset.utils import smaller_unit_value
+
+    assert smaller_unit_value(1, "months") == (4, "weeks")
 
 
 def test_time_constraints_can_be_removed_from_generated_prompts() -> None:
@@ -97,37 +118,10 @@ def test_unconstrained_conversational_dataset_has_no_redundant_variants() -> Non
     assert len({record["text"] for record in records}) == len(records)
 
 
-def test_unconstrained_quantity_formats_are_preserved_when_they_change_text() -> None:
-    from temporal_manifolds.dataset.generate import generate_task_dataset
-
-    records = generate_task_dataset(
-        template_list=[
-            {
-                "id": "quantity_deadline",
-                "template": "Amount: {quantity}\nDeadline: {value} {unit}\n\nAllocate it.",
-            }
-        ],
-        task_units={"attention": {"minutes", "hours"}},
-        time_values=[1, 2],
-        quantity_values=[5],
-        remove_time_constraints=True,
-    )
-
-    assert [record["text"] for record in records] == [
-        "Amount: 5\n\nAllocate it.",
-        "Amount: five\n\nAllocate it.",
-    ]
-
-
 def test_conversational_dataset_has_crossed_difficulty_controls() -> None:
     from temporal_manifolds.dataset import conversational
 
-    controlled_families = {
-        "communication_plan",
-        "organization_project",
-        "software_project",
-        "knowledge_archive",
-    }
+    controlled_families = {"knowledge_archive"}
     variants_by_family = {family: [] for family in controlled_families}
 
     for config in conversational.tasks.values():
@@ -141,21 +135,30 @@ def test_conversational_dataset_has_crossed_difficulty_controls() -> None:
         assert all(len(variant["units"]) >= 3 for variant in variants), family
 
 
-def test_conversational_dataset_has_output_format_variations() -> None:
-    from temporal_manifolds.dataset import conversational
+def test_every_difficulty_and_stakes_combination_has_two_plausibly_ranged_tasks() -> None:
+    from collections import defaultdict
 
-    output_formats = {template["output_format"] for template in conversational.templates}
-    assert output_formats == {
-        "strategy_steps",
-        "strategy_checklist",
-        "strategy_actions",
-        "summary_steps",
-        "summary_checklist",
-        "summary_actions",
-        "approach_steps",
-        "approach_checklist",
-        "approach_actions",
+    from temporal_manifolds.dataset import conversational
+    from temporal_manifolds.dataset.utils import SUPPORTED_UNITS
+
+    tasks_by_combination: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for task, config in conversational.tasks.items():
+        tasks_by_combination[(config["difficulty"], config["stakes"])].add(task)
+        assert config["units"] != SUPPORTED_UNITS
+        assert 1 <= len(config["units"]) <= 4
+
+    difficulties = {config["difficulty"] for config in conversational.tasks.values()}
+    stakes = {config["stakes"] for config in conversational.tasks.values()}
+    expected_combinations = {
+        (difficulty, stake) for difficulty in difficulties for stake in stakes
     }
+
+    assert set(tasks_by_combination) == expected_combinations
+    assert min(len(tasks) for tasks in tasks_by_combination.values()) >= 2
+
+
+def test_conversational_templates_cover_all_prompt_framings() -> None:
+    from temporal_manifolds.dataset import conversational
 
     prompt_framings = {template["prompt_framing"] for template in conversational.templates}
     assert prompt_framings == {
@@ -170,13 +173,13 @@ def test_conversational_dataset_has_output_format_variations() -> None:
         "objective_deadline",
     }
 
-    assert len(conversational.templates) == len(output_formats) * len(prompt_framings)
+    assert len(conversational.templates) == len(prompt_framings) == 9
 
 
-def test_conversational_format_neutral_templates_follow_prompt_framings() -> None:
+def test_conversational_templates_follow_prompt_framings() -> None:
     from temporal_manifolds.dataset import conversational
 
-    assert conversational.format_neutral_templates == [
+    assert conversational.templates == [
         {
             "id": framing["id"],
             "template": framing["body"],
@@ -184,65 +187,7 @@ def test_conversational_format_neutral_templates_follow_prompt_framings() -> Non
         }
         for framing in conversational.prompt_framings
     ]
-    assert len(conversational.format_neutral_templates) == 9
-    assert all(
-        "Output format:" not in template["template"]
-        and "output_format" not in template
-        for template in conversational.format_neutral_templates
-    )
-
-
-def test_conversational_generation_can_remove_output_format_constraints() -> None:
-    from temporal_manifolds.dataset import conversational
-    from temporal_manifolds.dataset.generate import generate_task_dataset
-
-    records = generate_task_dataset(
-        dataset="conversational",
-        task_units={"test task": {"seconds"}},
-        time_values=[1],
-        remove_output_format_constraints=True,
-    )
-
-    assert {record["template_id"] for record in records} == {
-        framing["id"] for framing in conversational.prompt_framings
-    }
-    assert all("Output format:" not in record["text"] for record in records)
-    assert all("output_format" not in record["template_metadata"] for record in records)
-
-
-def test_custom_templates_override_format_neutral_generation_mode() -> None:
-    from temporal_manifolds.dataset.generate import generate_task_dataset
-
-    records = generate_task_dataset(
-        dataset="conversational",
-        template_list=[
-            {
-                "id": "custom",
-                "template": "Task: {task}\nTime: {value} {unit}\n\nOutput format: custom",
-                "output_format": "custom",
-            }
-        ],
-        task_units={"test task": {"seconds"}},
-        time_values=[1],
-        remove_output_format_constraints=True,
-    )
-
-    assert {record["template_id"] for record in records} == {"custom"}
-    assert all("Output format: custom" in record["text"] for record in records)
-    assert all(
-        record["template_metadata"] == {"output_format": "custom"}
-        for record in records
-    )
-
-
-def test_dataset_cli_accepts_remove_output_format_constraints(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from temporal_manifolds.dataset.generate import parse_args
-
-    monkeypatch.setattr(sys, "argv", ["generate", "--remove-output-format-constraints"])
-
-    assert parse_args().remove_output_format_constraints is True
+    assert len(conversational.templates) == 9
 
 
 def test_plain_english_dataset_reuses_conversational_tasks_and_time_values() -> None:
@@ -278,9 +223,8 @@ def test_plain_english_prompts_are_natural_and_format_neutral() -> None:
     assert all(
         label not in record["text"]
         for record in records
-        for label in ("Task:", "Goal:", "Objective:", "Output format:")
+        for label in ("Task:", "Goal:", "Objective:")
     )
-    assert all("output_format" not in record["template_metadata"] for record in records)
 
 
 def test_plain_english_dataset_is_available_from_the_cli(
@@ -390,6 +334,7 @@ def test_time_free_datasets_are_declared_explicitly() -> None:
     from temporal_manifolds.dataset.generate import is_time_free_dataset
 
     assert is_time_free_dataset("task_only") is True
+    assert is_time_free_dataset("conversational_no_time") is True
     assert is_time_free_dataset("conversational") is False
     assert is_time_free_dataset("plain_english") is False
 
@@ -402,6 +347,55 @@ def test_task_only_dataset_is_available_from_the_cli(
     monkeypatch.setattr(sys, "argv", ["generate", "--dataset", "task_only"])
 
     assert parse_args().dataset == "task_only"
+
+
+def test_conversational_no_time_templates_are_explicit_and_complete() -> None:
+    from temporal_manifolds.dataset import conversational_no_time
+
+    assert len(conversational_no_time.templates) == 3
+    assert len({template["id"] for template in conversational_no_time.templates}) == 3
+    assert {template["prompt_framing"] for template in conversational_no_time.templates} == {
+        "task",
+        "goal",
+        "objective",
+    }
+    assert all("{value}" not in template["template"] for template in conversational_no_time.templates)
+    assert all("{unit}" not in template["template"] for template in conversational_no_time.templates)
+
+
+def test_conversational_no_time_generates_one_record_per_template_and_task() -> None:
+    import re
+
+    from temporal_manifolds.dataset import conversational_no_time
+    from temporal_manifolds.dataset.generate import generate_task_dataset
+
+    records = generate_task_dataset(dataset="conversational_no_time")
+    temporal_language = re.compile(
+        r"\b(seconds?|minutes?|hours?|weeks?|months?|years?|decades?|centur\w*"
+        r"|millenni\w*|deadline|available time|time budget|time window)\b",
+        re.IGNORECASE,
+    )
+
+    assert len(records) == len(conversational_no_time.templates) * len(
+        conversational_no_time.tasks
+    )
+    assert all(record["base_value"] is None and record["base_unit"] is None for record in records)
+    assert all(record["value"] is None and record["unit"] is None for record in records)
+    assert not [
+        record
+        for record in records
+        if temporal_language.search(record["text"].replace(record["task"], ""))
+    ]
+
+
+def test_conversational_no_time_dataset_is_available_from_the_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from temporal_manifolds.dataset.generate import parse_args
+
+    monkeypatch.setattr(sys, "argv", ["generate", "--dataset", "conversational_no_time"])
+
+    assert parse_args().dataset == "conversational_no_time"
 
 
 def test_abstract_tasks_cover_the_complete_supported_time_range() -> None:
@@ -419,13 +413,11 @@ def test_abstract_tasks_cover_the_complete_supported_time_range() -> None:
     assert len({id(units) for units in task_unit_sets}) == len(task_unit_sets)
 
 
-def test_abstract_dataset_is_not_limited_to_quantity_optimization() -> None:
+def test_abstract_dataset_covers_distinct_task_families() -> None:
     from temporal_manifolds.dataset import abstract
 
     task_families = {config["task_family"] for config in abstract.tasks.values()}
 
-    assert abstract.quantities == [None]
-    assert all("{quantity}" not in template["template"] for template in abstract.templates)
     assert len(task_families) == len(abstract.tasks)
     assert {
         "adaptation",
@@ -458,11 +450,9 @@ def test_abstract_templates_use_the_conversational_prompt_framing_grid() -> None
     }
 
 
-def test_abstract_templates_share_a_format_neutral_completion_request() -> None:
+def test_abstract_templates_share_a_completion_request() -> None:
     from temporal_manifolds.dataset import abstract
 
-    assert all("output_format" not in template for template in abstract.templates)
-    assert all("Output format:" not in template["template"] for template in abstract.templates)
     assert all(
         template["template"].endswith(abstract.FORMAT_NEUTRAL_COMPLETION_REQUEST)
         for template in abstract.templates
@@ -481,7 +471,6 @@ def test_generated_abstract_tasks_each_span_every_base_time_unit() -> None:
     base_units_by_task = {task: set() for task in abstract.tasks}
 
     for record in records:
-        assert record["quantity"] is None
         if record["unit_variant"] == "original" and record["number_format"] == "numeric":
             base_units_by_task[record["task"]].add(record["base_unit"])
 

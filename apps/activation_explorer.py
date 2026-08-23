@@ -20,7 +20,6 @@ from temporal_manifolds.activations.extraction_policy import (
     CACHED_POSITION_INDEX,
     NOT_APPLICABLE,
     PROMPT_TOKEN_POSITION,
-    TARGET_LAYER_COMPONENT,
 )
 from temporal_manifolds.geometry.extrusion.rms_spline_surface_transformer import (
     RMSSplineSurfaceEvaluationResult,
@@ -2676,9 +2675,14 @@ with st.sidebar:
     st.success(f"{inspection['batch_count']:,} batches · {inspection['row_count']:,} source rows")
     st.divider()
     st.header("2 · Prepare analysis")
-    component = TARGET_LAYER_COMPONENT
+    available_components = list(inspection["components"])
+    component = (
+        available_components[0]
+        if len(available_components) == 1
+        else st.selectbox("Layer component", available_components)
+    )
     position_index = CACHED_POSITION_INDEX
-    st.caption("Fixed extraction slice")
+    st.caption("Extraction slice")
     st.write(f"`{component}` · final prompt token (`{PROMPT_TOKEN_POSITION}`)")
     candidate_fields = inspection["metadata_fields"]
     metadata_index = inspection["metadata_index"]

@@ -2,9 +2,8 @@
 
 Every task is deliberately available at every time unit so that a task traces a
 continuous path through time instead of appearing in only one short part of the
-manifold.  The task families exercise different kinds of temporal reasoning;
-resource allocation is only one family and there is no independent quantity
-sweep in this dataset.  Tasks describe terminal outcomes so the same
+manifold. The task families exercise different kinds of temporal reasoning.
+Tasks describe terminal outcomes so the same
 completion-focused request remains meaningful across all prompt framings.
 """
 
@@ -147,9 +146,6 @@ tasks = {
     ),
 }
 
-
-# No quantity axis: time horizon is the main continuous variable for each task.
-quantities = [None]
 
 # Rounded samples from an approximately uniform log grid over 1--100.  The
 # original anchors are retained; below 10, integer values limit finer spacing.

@@ -354,7 +354,7 @@ def _batch(path: Path) -> None:
         {
             "base_value": value,
             "base_unit": unit,
-            "template_metadata": {"prompt_framing": framing, "output_format": "steps"},
+            "template_metadata": {"prompt_framing": framing},
         }
         for value, unit, framing in [
             (1, "day", "task_available_time"),
@@ -384,7 +384,6 @@ def _curve_batch(path: Path) -> None:
             "base_unit": "months",
             "template_metadata": {
                 "prompt_framing": "task_available_time",
-                "output_format": "steps",
             },
         }
         for value in (1, 2, 4, 8, 16, 32, 64, 128)
@@ -529,7 +528,7 @@ def test_derived_source_folder_overrides_prompt_metadata_collision(tmp_path: Pat
 @pytest.mark.parametrize(
     ("mutation", "error_match"),
     [
-        ("wrong_layer", "must declare layer_component='layer_out/21'"),
+        ("wrong_layer", "must declare layer_component as a non-empty string"),
         ("wrong_position", r"must contain positions=\[-1\]"),
         ("extra_component", "must contain only 'layer_out/21'"),
         ("extra_position_axis", "batch x 1 cached position x hidden size"),
@@ -545,7 +544,7 @@ def test_inspect_rejects_batches_outside_extraction_contract(
     payload = torch.load(path, map_location="cpu", weights_only=True)
 
     if mutation == "wrong_layer":
-        payload["layer_component"] = "layer_out/20"
+        payload["layer_component"] = None
     elif mutation == "wrong_position":
         payload["positions"] = [0]
     elif mutation == "extra_component":
@@ -565,7 +564,7 @@ def test_inspect_rejects_batches_outside_extraction_contract(
 @pytest.mark.parametrize(
     ("layer_component", "position_index", "error_match"),
     [
-        ("layer_out/20", CACHED_POSITION_INDEX, "restricted to 'layer_out/21'"),
+        ("", CACHED_POSITION_INDEX, "needs a layer_component string"),
         (TARGET_LAYER_COMPONENT, 1, "restricted to cached position index 0"),
     ],
 )
@@ -927,7 +926,6 @@ def _unconstrained_batch(path: Path) -> None:
             "base_unit": unit,
             "template_metadata": {
                 "prompt_framing": "N/A" if unit == "N/A" else "task_available_time",
-                "output_format": "N/A" if unit == "N/A" else "steps",
             },
         }
         for task, value, unit in rows
@@ -1160,7 +1158,6 @@ def _regression_batch(path: Path) -> None:
             "base_unit": "months",
             "template_metadata": {
                 "prompt_framing": "task_available_time",
-                "output_format": "steps",
             },
         }
         for task, value in rows

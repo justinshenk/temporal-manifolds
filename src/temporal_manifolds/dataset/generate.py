@@ -13,6 +13,9 @@ from typing import Literal, TypedDict
 try:
     from . import abstract as abstract_dataset
     from . import conversational as conversational_dataset
+    from . import conversational_no_time as conversational_no_time_dataset
+    from . import event_anchored as event_anchored_dataset
+    from . import indirect_horizon as indirect_horizon_dataset
     from . import plain_english as plain_english_dataset
     from . import plain_long as plain_long_dataset
     from . import task_only as task_only_dataset
@@ -28,6 +31,9 @@ try:
 except ImportError:
     import abstract as abstract_dataset  # type: ignore
     import conversational as conversational_dataset  # type: ignore
+    import conversational_no_time as conversational_no_time_dataset  # type: ignore
+    import event_anchored as event_anchored_dataset  # type: ignore
+    import indirect_horizon as indirect_horizon_dataset  # type: ignore
     import plain_english as plain_english_dataset  # type: ignore
     import plain_long as plain_long_dataset  # type: ignore
     import task_only as task_only_dataset  # type: ignore
@@ -60,8 +66,6 @@ class PromptRecord(TypedDict):
     template_metadata: dict[str, str]
     task: str
     task_metadata: dict[str, str]
-    quantity: int | None
-    quantity_text: str | None
     base_value: int | None
     base_unit: str | None
     unit_variant: Literal["original", "smaller"] | None
@@ -71,14 +75,26 @@ class PromptRecord(TypedDict):
     unit: str | None
 
 
-DatasetName = Literal["conversational", "abstract", "plain_english", "plain_long", "task_only"]
+DatasetName = Literal[
+    "conversational",
+    "conversational_no_time",
+    "event_anchored",
+    "abstract",
+    "plain_english",
+    "plain_long",
+    "task_only",
+    "indirect_horizon",
+]
 
 DATASETS = {
     "conversational": conversational_dataset,
+    "conversational_no_time": conversational_no_time_dataset,
+    "event_anchored": event_anchored_dataset,
     "abstract": abstract_dataset,
     "plain_english": plain_english_dataset,
     "plain_long": plain_long_dataset,
     "task_only": task_only_dataset,
+    "indirect_horizon": indirect_horizon_dataset,
 }
 
 TIME_CONSTRAINT_LINE = re.compile(
@@ -120,15 +136,14 @@ def normalize_dataset_name(dataset: str) -> DatasetName:
 
 def load_dataset_config(
     dataset: str,
-) -> tuple[Iterable[TemplateConfig], Mapping[str, TaskConfig], Iterable[int], Iterable[int | None]]:
-    """Return templates, task units, time values, and quantities for a named dataset."""
+) -> tuple[Iterable[TemplateConfig], Mapping[str, TaskConfig], Iterable[int]]:
+    """Return templates, task units, and time values for a named dataset."""
     dataset_name = normalize_dataset_name(dataset)
     dataset_module = DATASETS[dataset_name]
     return (
         dataset_module.templates,
         dataset_module.tasks,
         dataset_module.values,
-        getattr(dataset_module, "quantities", (None,)),
     )
 
 
@@ -136,6 +151,18 @@ def is_time_free_dataset(dataset: str) -> bool:
     """Return whether a dataset's prompts never express a time horizon."""
     dataset_module = DATASETS[normalize_dataset_name(dataset)]
     return bool(getattr(dataset_module, "time_free", False))
+
+
+def dataset_record_builder(dataset: str):
+    """Return a dataset's own record builder, or ``None`` for template-driven datasets.
+
+    Most datasets render a prompt by formatting one template string. A dataset whose
+    horizon is implied rather than written -- clock times, calendar dates, fractions
+    of a larger allowance -- has to compute its text from the horizon instead, so it
+    builds its own records and this returns that builder.
+    """
+    dataset_module = DATASETS[normalize_dataset_name(dataset)]
+    return getattr(dataset_module, "build_prompt_records", None)
 
 
 def normalize_task_configs(
@@ -169,7 +196,6 @@ def make_prompt_record(
     template_metadata: dict[str, str],
     task: str,
     task_metadata: dict[str, str],
-    quantity: int | None,
     base_value: int,
     base_unit: str,
     value: int,
@@ -180,18 +206,10 @@ def make_prompt_record(
     """Return one formatted prompt plus the parameters that generated it."""
     rendered_unit = render_unit(value, unit)
     value_text = str(value) if number_format == "numeric" else number_to_words(value)
-    quantity_text = (
-        None
-        if quantity is None
-        else str(quantity)
-        if number_format == "numeric"
-        else number_to_words(quantity)
-    )
 
     return {
         "text": template.format(
             task=task,
-            quantity=quantity_text,
             value=value_text,
             unit=rendered_unit,
         ),
@@ -199,8 +217,6 @@ def make_prompt_record(
         "template_metadata": template_metadata,
         "task": task,
         "task_metadata": task_metadata,
-        "quantity": quantity,
-        "quantity_text": quantity_text,
         "base_value": base_value,
         "base_unit": base_unit,
         "unit_variant": unit_variant,
@@ -218,7 +234,6 @@ def append_prompt_variants(
     template_metadata: dict[str, str],
     task: str,
     task_metadata: dict[str, str],
-    quantity: int | None,
     base_value: int,
     base_unit: str,
     value: int,
@@ -234,7 +249,6 @@ def append_prompt_variants(
                 template_metadata=template_metadata,
                 task=task,
                 task_metadata=task_metadata,
-                quantity=quantity,
                 base_value=base_value,
                 base_unit=base_unit,
                 value=value,
@@ -245,50 +259,31 @@ def append_prompt_variants(
         )
 
 
-def append_unconstrained_prompt_variants(
+def append_unconstrained_prompt(
     records: list[PromptRecord],
     template: str,
     template_id: str,
     template_metadata: dict[str, str],
     task: str,
     task_metadata: dict[str, str],
-    quantity: int | None,
 ) -> None:
-    """Append only variants that still change an unconstrained prompt's text."""
-    number_formats: tuple[NumberFormat | None, ...] = (
-        (None,) if quantity is None else NUMBER_FORMATS
+    """Append one prompt with no horizon metadata."""
+    records.append(
+        {
+            "text": template.format(task=task, value="", unit=""),
+            "template_id": template_id,
+            "template_metadata": template_metadata,
+            "task": task,
+            "task_metadata": task_metadata,
+            "base_value": None,
+            "base_unit": None,
+            "unit_variant": None,
+            "number_format": None,
+            "value": None,
+            "value_text": None,
+            "unit": None,
+        }
     )
-    for number_format in number_formats:
-        quantity_text = (
-            None
-            if quantity is None
-            else str(quantity)
-            if number_format == "numeric"
-            else number_to_words(quantity)
-        )
-        records.append(
-            {
-                "text": template.format(
-                    task=task,
-                    quantity=quantity_text,
-                    value="",
-                    unit="",
-                ),
-                "template_id": template_id,
-                "template_metadata": template_metadata,
-                "task": task,
-                "task_metadata": task_metadata,
-                "quantity": quantity,
-                "quantity_text": quantity_text,
-                "base_value": None,
-                "base_unit": None,
-                "unit_variant": None,
-                "number_format": number_format,
-                "value": None,
-                "value_text": None,
-                "unit": None,
-            }
-        )
 
 
 def write_prompt_records(records: list[PromptRecord], output_path: str | Path | None) -> None:
@@ -304,86 +299,100 @@ def generate_task_dataset(
     template_list: Iterable[TemplateConfig] | None = None,
     task_units: Mapping[str, TaskConfig] | None = None,
     time_values: Iterable[int] | None = None,
-    quantity_values: Iterable[int | None] | None = None,
     output_path: str | Path | None = None,
     randomize_template: bool = False,
     dataset: str = "conversational",
     remove_time_constraints: bool = False,
-    remove_output_format_constraints: bool = False,
 ) -> list[PromptRecord]:
     """Return formatted prompt records from the configured templates and tasks.
 
     When ``randomize_template`` is false, return the full cartesian product of
     templates and task parameters. When true, generate each task-parameter sample
     once and choose one template from ``template_list`` at random for that sample.
-    Format-neutral conversational templates are selected only when no explicit
-    ``template_list`` is supplied.
-
     Datasets whose prompts never express a horizon declare ``time_free = True``
     and are always generated without time parameters, because iterating the
     horizon grid would emit identical duplicate prompts rather than new
     conditions.
     """
-    dataset_templates, dataset_tasks, dataset_values, dataset_quantities = load_dataset_config(
-        dataset
-    )
+    record_builder = dataset_record_builder(dataset)
+    if record_builder is not None:
+        unsupported = [
+            name
+            for name, argument in (
+                ("template_list", template_list),
+                ("task_units", task_units),
+                ("time_values", time_values),
+            )
+            if argument is not None
+        ]
+        unsupported += [
+            name
+            for name, flag in (
+                ("randomize_template", randomize_template),
+                ("remove_time_constraints", remove_time_constraints),
+            )
+            if flag
+        ]
+        if unsupported:
+            # These options all assume a prompt is one template string with the
+            # horizon substituted into it, which is precisely what this dataset is
+            # not. Silently ignoring them would emit prompts that contradict the
+            # caller's request; task_only and conversational_no_time provide
+            # explicit time-free controls instead.
+            raise ValueError(
+                f"Dataset {dataset!r} builds its own prompts and does not support: "
+                f"{', '.join(sorted(unsupported))}."
+            )
+        built_records: list[PromptRecord] = record_builder()
+        write_prompt_records(built_records, output_path)
+        return built_records
+
+    dataset_templates, dataset_tasks, dataset_values = load_dataset_config(dataset)
     if is_time_free_dataset(dataset):
         remove_time_constraints = True
     if template_list is None:
-        template_list = (
-            conversational_dataset.format_neutral_templates
-            if remove_output_format_constraints and dataset == "conversational"
-            else dataset_templates
-        )
+        template_list = dataset_templates
     if task_units is None:
         task_units = dataset_tasks
     if time_values is None:
         time_values = dataset_values
-    if quantity_values is None:
-        quantity_values = dataset_quantities
 
     records: list[PromptRecord] = []
     template_configs = tuple(template_list)
-    quantity_configs = tuple(quantity_values)
+    time_configs = tuple(time_values)
     if not template_configs:
         raise ValueError("template_list must contain at least one template")
-    if not quantity_configs:
-        raise ValueError("quantity_values must contain at least one value")
     task_configs = normalize_task_configs(task_units)
 
     if remove_time_constraints:
         if randomize_template:
             for task, task_config in sorted(task_configs.items()):
-                for quantity in quantity_configs:
-                    template_config = random.choice(template_configs)
-                    template_id = str(template_config["id"])
-                    template = unconstrained_template(template_config)
-                    metadata = template_metadata(template_config)
-                    append_unconstrained_prompt_variants(
-                        records,
-                        template,
-                        template_id,
-                        metadata,
-                        task,
-                        task_config["metadata"],
-                        quantity,
-                    )
+                template_config = random.choice(template_configs)
+                template_id = str(template_config["id"])
+                template = unconstrained_template(template_config)
+                metadata = template_metadata(template_config)
+                append_unconstrained_prompt(
+                    records,
+                    template,
+                    template_id,
+                    metadata,
+                    task,
+                    task_config["metadata"],
+                )
         else:
             for template_config in template_configs:
                 template_id = str(template_config["id"])
                 template = unconstrained_template(template_config)
                 metadata = template_metadata(template_config)
                 for task, task_config in sorted(task_configs.items()):
-                    for quantity in quantity_configs:
-                        append_unconstrained_prompt_variants(
-                            records,
-                            template,
-                            template_id,
-                            metadata,
-                            task,
-                            task_config["metadata"],
-                            quantity,
-                        )
+                    append_unconstrained_prompt(
+                        records,
+                        template,
+                        template_id,
+                        metadata,
+                        task,
+                        task_config["metadata"],
+                    )
 
         write_prompt_records(records, output_path)
         return records
@@ -392,9 +401,31 @@ def generate_task_dataset(
         for task, task_config in sorted(task_configs.items()):
             units = task_config["units"]
             task_metadata = task_config["metadata"]
-            for quantity in quantity_configs:
-                for unit in sorted(units):
-                    for value in time_values:
+            for unit in sorted(units):
+                for value in time_configs:
+                    template_config = random.choice(template_configs)
+                    template_id = str(template_config["id"])
+                    template = str(template_config["template"])
+                    if remove_time_constraints:
+                        template = remove_time_constraint_lines(template)
+                    metadata = template_metadata(template_config)
+                    append_prompt_variants(
+                        records=records,
+                        template=template,
+                        template_id=template_id,
+                        template_metadata=metadata,
+                        task=task,
+                        task_metadata=task_metadata,
+                        base_value=value,
+                        base_unit=unit,
+                        value=value,
+                        unit=unit,
+                        unit_variant="original",
+                    )
+
+                    smaller = smaller_unit_value(value, unit)
+                    if smaller is not None:
+                        smaller_value, smaller_unit = smaller
                         template_config = random.choice(template_configs)
                         template_id = str(template_config["id"])
                         template = str(template_config["template"])
@@ -408,37 +439,12 @@ def generate_task_dataset(
                             template_metadata=metadata,
                             task=task,
                             task_metadata=task_metadata,
-                            quantity=quantity,
                             base_value=value,
                             base_unit=unit,
-                            value=value,
-                            unit=unit,
-                            unit_variant="original",
+                            value=smaller_value,
+                            unit=smaller_unit,
+                            unit_variant="smaller",
                         )
-
-                        smaller = smaller_unit_value(value, unit)
-                        if smaller is not None:
-                            smaller_value, smaller_unit = smaller
-                            template_config = random.choice(template_configs)
-                            template_id = str(template_config["id"])
-                            template = str(template_config["template"])
-                            if remove_time_constraints:
-                                template = remove_time_constraint_lines(template)
-                            metadata = template_metadata(template_config)
-                            append_prompt_variants(
-                                records=records,
-                                template=template,
-                                template_id=template_id,
-                                template_metadata=metadata,
-                                task=task,
-                                task_metadata=task_metadata,
-                                quantity=quantity,
-                                base_value=value,
-                                base_unit=unit,
-                                value=smaller_value,
-                                unit=smaller_unit,
-                                unit_variant="smaller",
-                            )
     else:
         for template_config in template_configs:
             template_id = str(template_config["id"])
@@ -449,9 +455,25 @@ def generate_task_dataset(
             for task, task_config in sorted(task_configs.items()):
                 units = task_config["units"]
                 task_metadata = task_config["metadata"]
-                for quantity in quantity_configs:
-                    for unit in sorted(units):
-                        for value in time_values:
+                for unit in sorted(units):
+                    for value in time_configs:
+                        append_prompt_variants(
+                            records=records,
+                            template=template,
+                            template_id=template_id,
+                            template_metadata=metadata,
+                            task=task,
+                            task_metadata=task_metadata,
+                            base_value=value,
+                            base_unit=unit,
+                            value=value,
+                            unit=unit,
+                            unit_variant="original",
+                        )
+
+                        smaller = smaller_unit_value(value, unit)
+                        if smaller is not None:
+                            smaller_value, smaller_unit = smaller
                             append_prompt_variants(
                                 records=records,
                                 template=template,
@@ -459,31 +481,12 @@ def generate_task_dataset(
                                 template_metadata=metadata,
                                 task=task,
                                 task_metadata=task_metadata,
-                                quantity=quantity,
                                 base_value=value,
                                 base_unit=unit,
-                                value=value,
-                                unit=unit,
-                                unit_variant="original",
+                                value=smaller_value,
+                                unit=smaller_unit,
+                                unit_variant="smaller",
                             )
-
-                            smaller = smaller_unit_value(value, unit)
-                            if smaller is not None:
-                                smaller_value, smaller_unit = smaller
-                                append_prompt_variants(
-                                    records=records,
-                                    template=template,
-                                    template_id=template_id,
-                                    template_metadata=metadata,
-                                    task=task,
-                                    task_metadata=task_metadata,
-                                    quantity=quantity,
-                                    base_value=value,
-                                    base_unit=unit,
-                                    value=smaller_value,
-                                    unit=smaller_unit,
-                                    unit_variant="smaller",
-                                )
 
     write_prompt_records(records, output_path)
 
@@ -514,11 +517,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Remove explicit Available time, Deadline, and similar prompt fields.",
     )
-    parser.add_argument(
-        "--remove-output-format-constraints",
-        action="store_true",
-        help="Use format-neutral conversational prompts without an imposed output structure.",
-    )
     return parser.parse_args()
 
 
@@ -529,6 +527,5 @@ if __name__ == "__main__":
         output_path=args.output_path,
         randomize_template=args.randomize_template,
         remove_time_constraints=args.remove_time_constraints,
-        remove_output_format_constraints=args.remove_output_format_constraints,
     )
     print(json.dumps(dataset_records, indent=2))

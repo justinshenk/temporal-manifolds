@@ -30,8 +30,6 @@ PROMPT_METADATA_FIELDS = (
     "template_metadata",
     "task",
     "task_metadata",
-    "quantity",
-    "quantity_text",
     "base_value",
     "base_unit",
     "unit_variant",
@@ -40,7 +38,7 @@ PROMPT_METADATA_FIELDS = (
     "value_text",
     "unit",
 )
-TEMPLATE_METADATA_FIELDS = ("prompt_framing", "output_format")
+TEMPLATE_METADATA_FIELDS = ("prompt_framing",)
 TASK_METADATA_FIELDS = (
     "task_family",
     "difficulty",
@@ -120,10 +118,9 @@ def validate_model_hook_request(
 
 def validate_extraction_request(*, layer_component: Any, position_index: Any) -> None:
     """Reject a layer/position request outside the fixed extraction contract."""
-    if layer_component != TARGET_LAYER_COMPONENT:
+    if not isinstance(layer_component, str) or not layer_component:
         raise ValueError(
-            "Activation extraction is restricted to "
-            f"{TARGET_LAYER_COMPONENT!r}; got {layer_component!r}."
+            f"Activation extraction needs a layer_component string; got {layer_component!r}."
         )
     if type(position_index) is not int or position_index != CACHED_POSITION_INDEX:
         raise ValueError(
@@ -152,9 +149,9 @@ def validate_activation_payload(
         raise ValueError(f"{source_name} must be a mapping.")
 
     layer_component = payload.get("layer_component")
-    if layer_component != TARGET_LAYER_COMPONENT:
+    if not isinstance(layer_component, str) or not layer_component:
         raise ValueError(
-            f"{source_name} must declare layer_component={TARGET_LAYER_COMPONENT!r}; "
+            f"{source_name} must declare layer_component as a non-empty string; "
             f"got {layer_component!r}."
         )
 
@@ -169,26 +166,26 @@ def validate_activation_payload(
     if not isinstance(activations, Mapping):
         raise ValueError(f"{source_name} must contain an activations mapping.")
     activation_keys = set(activations)
-    if activation_keys != {TARGET_LAYER_COMPONENT}:
+    if activation_keys != {layer_component}:
         raise ValueError(
-            f"{source_name} must contain only {TARGET_LAYER_COMPONENT!r}; "
+            f"{source_name} must contain only {layer_component!r}; "
             f"got {sorted(map(str, activation_keys))!r}."
         )
 
-    activation = activations[TARGET_LAYER_COMPONENT]
+    activation = activations[layer_component]
     if not isinstance(activation, torch.Tensor):
         raise ValueError(
-            f"{source_name}:{TARGET_LAYER_COMPONENT} must be a torch.Tensor."
+            f"{source_name}:{layer_component} must be a torch.Tensor."
         )
     if activation.ndim != 3 or activation.shape[1] != len(CACHED_POSITIONS):
         raise ValueError(
-            f"{source_name}:{TARGET_LAYER_COMPONENT} must have shape "
+            f"{source_name}:{layer_component} must have shape "
             "batch x 1 cached position x hidden size; "
             f"got {tuple(activation.shape)}."
         )
     if activation.shape[2] < 1:
         raise ValueError(
-            f"{source_name}:{TARGET_LAYER_COMPONENT} must have a non-empty hidden dimension."
+            f"{source_name}:{layer_component} must have a non-empty hidden dimension."
         )
 
     row_fields = ("sample_indices", "prompts", "prompt_metadata")

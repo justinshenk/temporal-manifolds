@@ -63,12 +63,47 @@ uv run python -m temporal_manifolds.dataset.generate --dataset task_only \
   --output-path data/task_only_prompts.json
 ```
 
-The no-output-format conversational variant uses the same fixed extraction
-contract and writes to an isolated artifact namespace:
+Generate the matched conversational time-free dataset, which has three explicit
+task/goal/objective templates with no duration or deadline wording:
 
 ```bash
-bash scripts/run_activation_caching_nof_conversational_selected_acts.sh
+uv run python -m temporal_manifolds.dataset.generate \
+  --dataset conversational_no_time \
+  --output-path data/conversational_no_time_prompts.json
 ```
+
+Generate the indirect-horizon dataset, whose prompts never write the horizon out
+as a duration. Each one states it indirectly -- two wall-clock times,
+two calendar dates, a fraction of a larger allowance, a count of fixed-length
+passes -- so the horizon has to be derived rather than read off. It reuses the
+conversational tasks and time grid, and renders every task and horizon at least
+ten different ways:
+
+```bash
+uv run python -m temporal_manifolds.dataset.generate --dataset indirect_horizon   --output-path data/indirect_horizon_prompts.json
+```
+
+Cache indirect-horizon prompts to the isolated `indirect_horizon_selected_acts`
+GCS prefix:
+
+```bash
+bash scripts/run_activation_caching_indirect_horizon_selected_acts.sh
+```
+
+Generate the event-anchored dataset, whose prompts express the planning horizon
+through milestones, handoffs, reviews, transitions, and lifecycle boundaries.
+It contains two explicit event prompts for every supported base unit and crosses
+each one only with tasks for which that latent horizon is plausible:
+
+```bash
+uv run python -m temporal_manifolds.dataset.generate --dataset event_anchored \
+  --output-path data/event_anchored_prompts.json
+```
+
+The dataset builds its own prompts instead of formatting one template string, so
+`--randomize-template` and `--remove-time-constraints` are rejected rather than
+silently ignored;
+`task_only` and `conversational_no_time` provide explicit horizon-free controls.
 
 ## Pipeline
 

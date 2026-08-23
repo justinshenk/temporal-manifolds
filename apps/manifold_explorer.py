@@ -9,6 +9,7 @@ slice with Kernel PCA and scores every embedding against the fixed target
 from __future__ import annotations
 
 import gc
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ from temporal_manifolds.viz.manifold_explorer import (
     TARGET_FEATURE,
     ManifoldFitResult,
     default_manifold_parameters,
+    eigenvalue_spectrum_table,
     embedding_fields,
     explained_variance_table,
     fit_manifold,
@@ -172,15 +174,80 @@ def _format_metric(value: float | int | None, *, percent: bool = False) -> str:
     return f"{float(value):.4g}"
 
 
+FOLDER_BALANCE_SEED = 20240517
+
+
+def balanced_folder_mask(
+    folders: pd.Series, base_mask: np.ndarray | None, *, seed: int = FOLDER_BALANCE_SEED
+) -> np.ndarray | None:
+    """Return a fit mask that keeps the same number of rows from every source folder.
+
+    Kernel PCA has no sample-weight parameter: the geometry is the centered kernel matrix of
+    the rows it is given, so a folder contributing ten times as many rows pulls the leading
+    components ten times as hard. Equalizing the row counts is therefore how each folder is
+    given equal weight. Every folder is cut down to the smallest folder's row count with a
+    deterministic random subsample; the dropped rows are still projected into the fitted
+    coordinates and plotted, exactly like held-out folders.
+
+    ``None`` is returned when balancing would change nothing (a single folder, or folders that
+    are already the same size).
+    """
+
+    labels = folders.astype(str).to_numpy()
+    if base_mask is None:
+        base_mask = np.ones(len(labels), dtype=bool)
+    else:
+        base_mask = np.asarray(base_mask, dtype=bool)
+    eligible = np.flatnonzero(base_mask)
+    if len(eligible) == 0:
+        return base_mask
+    groups = {}
+    for row in eligible:
+        groups.setdefault(labels[row], []).append(row)
+    if len(groups) < 2:
+        return None
+    quota = min(len(rows) for rows in groups.values())
+    if all(len(rows) == quota for rows in groups.values()):
+        return None
+    rng = np.random.default_rng(seed)
+    balanced = np.zeros(len(labels), dtype=bool)
+    for folder in sorted(groups):
+        rows = np.asarray(groups[folder])
+        if len(rows) > quota:
+            rows = rows[rng.choice(len(rows), size=quota, replace=False)]
+        balanced[rows] = True
+    return balanced
+
+
 @st.cache_data(max_entries=8, show_spinner=False)
 def fit_manifold_cached(
     values: np.ndarray,
     target: np.ndarray,
     options: dict[str, Any],
+    fit_mask: np.ndarray | None = None,
 ) -> ManifoldFitResult:
-    """Cache one fitted embedding keyed by its data and every control value."""
+    """Cache one fitted embedding keyed by its data and every control value.
 
-    return fit_manifold(values, target, **options)
+    When ``fit_mask`` is given, the coordinate system is fitted on the masked rows only and
+    every prepared row is then projected into it. The returned embedding therefore still
+    covers all points, so the plot shows every source folder while the manifold's geometry is
+    defined by the chosen ones alone.
+    """
+
+    if fit_mask is None:
+        return fit_manifold(values, target, **options)
+
+    mask = np.asarray(fit_mask, dtype=bool)
+    fitted = fit_manifold(values[mask], target[mask], **options)
+    embedding = fitted.model.transform(values)
+    metrics = {
+        **fitted.metrics,
+        # ``input_points`` counts the rows the kernel saw; the plot carries more than that.
+        "fit_points": int(mask.sum()),
+        "projected_points": int(len(values)),
+        "held_out_points": int(len(values) - mask.sum()),
+    }
+    return replace(fitted, embedding=embedding, target=target, metrics=metrics)
 
 
 def kernel_pca_controls() -> dict[str, Any]:
@@ -545,6 +612,50 @@ prepared_row_offsets = st.session_state["prepared_row_offsets"]
 prepared_details = st.session_state["prepared_details"]
 point_count = len(prepared_metadata)
 
+# Source folders available to restrict the fit to. The multiselect below lives inside the fit
+# form, so its committed value is read from session state here and used consistently for the
+# row mask, the control clamps, and the fit key.
+if SOURCE_FOLDER_FIELD in prepared_metadata:
+    fit_folder_values = sorted(
+        prepared_metadata[SOURCE_FOLDER_FIELD].dropna().astype(str).unique().tolist()
+    )
+else:
+    fit_folder_values = []
+committed_fit_folders = st.session_state.get("manifold_fit_folders")
+selected_fit_folders = [
+    folder
+    for folder in fit_folder_values
+    if committed_fit_folders is None or folder in set(committed_fit_folders)
+]
+restrict_fit_folders = bool(fit_folder_values) and len(selected_fit_folders) != len(
+    fit_folder_values
+)
+if restrict_fit_folders:
+    fit_row_mask = (
+        prepared_metadata[SOURCE_FOLDER_FIELD]
+        .astype(str)
+        .isin(selected_fit_folders)
+        .to_numpy(dtype=bool)
+    )
+else:
+    fit_row_mask = None
+
+# Folder balancing lives in the fit form as well, so its committed value is read back here for
+# the same reason the folder selection is: the mask, the captions, and the fit key must agree.
+balance_fit_folders = bool(st.session_state.get("manifold_balance_folders", False)) and (
+    len(fit_folder_values) > 1
+)
+if balance_fit_folders:
+    balanced_mask = balanced_folder_mask(
+        prepared_metadata[SOURCE_FOLDER_FIELD], fit_row_mask
+    )
+    if balanced_mask is None:
+        # Nothing to equalize; keep the unbalanced mask so the fit key stays stable.
+        balance_fit_folders = False
+    else:
+        fit_row_mask = balanced_mask
+fit_point_count = int(fit_row_mask.sum()) if fit_row_mask is not None else point_count
+
 # Materialize the prepared rows once. Every method here is a whole-matrix batch algorithm, so
 # unlike incremental PCA there is no streaming path to preserve.
 if prepared_matrix is not None:
@@ -679,7 +790,7 @@ else:
             st.divider()
             st.markdown("**Embedding and scoring**")
             common_columns = st.columns(4)
-            maximum_components = max(1, min(point_count - 1, embedding_values.shape[1]))
+            maximum_components = max(1, min(fit_point_count - 1, embedding_values.shape[1]))
             component_default = min(3, maximum_components)
             clamp_integer_widget_state(
                 "manifold_components",
@@ -712,8 +823,8 @@ else:
                 common_columns[2].number_input(
                     "Quality neighbors",
                     min_value=2,
-                    max_value=max(2, min(100, point_count - 2)),
-                    value=min(10, max(2, point_count - 2)),
+                    max_value=max(2, min(100, fit_point_count - 2)),
+                    value=min(10, max(2, fit_point_count - 2)),
                     key="manifold_quality_neighbors",
                     help=(
                         "Neighborhood size used for trustworthiness, continuity, and the "
@@ -743,6 +854,42 @@ else:
                 ),
                 persist_state="page",
             )
+            if len(fit_folder_values) > 1:
+                st.divider()
+                st.markdown("**Fit scope**")
+                st.multiselect(
+                    "Fit on source folders",
+                    fit_folder_values,
+                    default=fit_folder_values,
+                    key="manifold_fit_folders",
+                    help=(
+                        "Restrict which folders define the coordinate system. Every prepared "
+                        "point is still projected and plotted; the excluded folders are simply "
+                        "held out of the fit and land as out-of-sample points."
+                    ),
+                )
+                st.caption(
+                    "Clearing a folder here does not remove its points from the plot. Use the "
+                    "sidebar filters to drop rows entirely."
+                )
+                st.checkbox(
+                    "Weight source folders equally",
+                    key="manifold_balance_folders",
+                    help=(
+                        "Kernel PCA has no sample weights, so a folder with more points pulls "
+                        "the components harder. This cuts every fitted folder down to the "
+                        "smallest one's point count, so each contributes equally. The dropped "
+                        "rows are still projected and plotted."
+                    ),
+                    persist_state="page",
+                )
+                if "<averaged>" in fit_folder_values:
+                    st.warning(
+                        f"Some aggregated points span several folders and are labelled "
+                        f"`<averaged>`. Add `{SOURCE_FOLDER_FIELD}` to **Aggregate by** in the "
+                        "sidebar to keep each folder's points separate.",
+                        icon=":material/warning:",
+                    )
             fit_submitted = st.form_submit_button(
                 "Fit / update embedding",
                 type="primary",
@@ -764,11 +911,35 @@ else:
             data_digest,
             MANIFOLD_MODEL_ARTIFACT_VERSION,
             repr(sorted(fit_options.items(), key=lambda item: item[0])),
+            tuple(selected_fit_folders) if restrict_fit_folders else None,
+            balance_fit_folders,
         )
+        if balance_fit_folders:
+            st.caption(
+                f"Fitting on {fit_point_count:,} folder-balanced point(s) · every fitted folder "
+                f"contributes {fit_point_count // max(len(selected_fit_folders), 1):,} point(s) "
+                "and the rest are projected into the fitted coordinates."
+            )
+        elif restrict_fit_folders:
+            st.caption(
+                f"Fitting on {fit_point_count:,} point(s) from "
+                f"{len(selected_fit_folders):,} of {len(fit_folder_values):,} source folders · "
+                f"{point_count - fit_point_count:,} held-out point(s) will be projected into "
+                "the fitted coordinates."
+            )
+        if fit_submitted and restrict_fit_folders and fit_point_count < 3:
+            st.error(
+                "At least three points are required to fit an embedding. The selected source "
+                "folders contain "
+                f"{fit_point_count:,}."
+            )
+            fit_submitted = False
         if fit_submitted:
             try:
                 with st.spinner(f"Fitting {ALGORITHM_LABEL}…"):
-                    fitted = fit_manifold_cached(embedding_values, embedding_target, fit_options)
+                    fitted = fit_manifold_cached(
+                        embedding_values, embedding_target, fit_options, fit_row_mask
+                    )
             except (ValueError, MemoryError, RuntimeError) as exc:
                 st.session_state.pop("manifold_result", None)
                 st.session_state.pop("manifold_key", None)
@@ -803,6 +974,9 @@ try:
 except ValueError as exc:
     st.error(f"The embedding could not be aligned with the prepared metadata: {exc}")
     st.stop()
+if fit_row_mask is not None and len(fit_row_mask) == len(projection):
+    # Exposed as an ordinary metadata column so it can be used to color or hover the plot.
+    projection["manifold_fit_role"] = np.where(fit_row_mask, "fitted", "projected")
 st.session_state.projection = projection
 st.session_state.details = details
 
@@ -877,6 +1051,24 @@ quality_columns[3].metric(
     _format_metric(details["continuity"]),
     help="Whether true activation-space neighbors stayed together in the embedding.",
 )
+if balance_fit_folders:
+    st.info(
+        f"The coordinate system was fitted on {fit_point_count:,} point(s) drawn in equal "
+        "numbers from each fitted source folder, so no folder dominates the components. All "
+        f"{point_count:,} prepared point(s) are plotted, and the variance, structure, and "
+        "target scores above describe the balanced fit sample only. Color by "
+        "`manifold_fit_role` to separate fitted from projected points.",
+        icon=":material/balance:",
+    )
+elif restrict_fit_folders:
+    st.info(
+        f"The coordinate system was fitted on {fit_point_count:,} point(s) from "
+        f"{', '.join(f'`{folder}`' for folder in selected_fit_folders)}. All "
+        f"{point_count:,} prepared point(s) are plotted, and the variance, structure, and "
+        "target scores above describe the fitted folders only. Color by "
+        "`manifold_fit_role` to separate fitted from held-out points.",
+        icon=":material/filter_alt:",
+    )
 if details.get("quality_subsampled"):
     st.caption(
         f"Structure scores use a {details['quality_points']:,}-point random subsample; "
@@ -902,6 +1094,67 @@ if manifold_result.model.parameters.get("supervised"):
         "optimistic by construction and are not evidence that the horizon is recoverable "
         "from the activations alone.",
         icon=":material/warning:",
+    )
+
+st.subheader("Feature-space eigenvalue spectrum")
+with st.container(border=True):
+    spectrum = eigenvalue_spectrum_table(manifold_result)
+    spectrum_controls = st.columns([1, 1, 2])
+    log_scale = spectrum_controls[0].toggle(
+        "Log scale",
+        value=True,
+        key="spectrum_log_scale",
+        help="Eigenvalues usually decay by orders of magnitude, so a log axis keeps the tail readable.",
+    )
+    show_cumulative = spectrum_controls[1].toggle(
+        "Cumulative share",
+        value=True,
+        key="spectrum_cumulative",
+        help="Overlay the cumulative share of retained kernel-space variance.",
+    )
+    spectrum_figure = px.bar(
+        spectrum,
+        x="component",
+        y="eigenvalue",
+        hover_data=["rank", "explained_variance", "cumulative_variance"],
+        color_discrete_sequence=["#2f6f5e"],
+    )
+    spectrum_figure.update_yaxes(
+        title_text="Kernel eigenvalue", type="log" if log_scale else "linear"
+    )
+    if show_cumulative:
+        spectrum_figure.add_scatter(
+            x=spectrum["component"],
+            y=spectrum["cumulative_variance"],
+            mode="lines+markers",
+            name="Cumulative share",
+            yaxis="y2",
+            line={"color": "#c2703d", "width": 2},
+        )
+        spectrum_figure.update_layout(
+            yaxis2={
+                "title": "Cumulative variance share",
+                "overlaying": "y",
+                "side": "right",
+                "range": [0, 1.02],
+                "showgrid": False,
+            }
+        )
+    spectrum_figure.update_layout(
+        height=380,
+        margin={"l": 12, "r": 12, "t": 28, "b": 12},
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font={"family": "Inter, ui-sans-serif, system-ui", "color": "#17201d"},
+        xaxis_title="Component",
+        showlegend=show_cumulative,
+    )
+    st.plotly_chart(spectrum_figure, width="stretch", config={"displaylogo": False})
+    st.caption(
+        "Eigenvalues of the centered kernel matrix for the current fit, so they are variances "
+        "in the kernel's implicit feature space rather than in activation space. Only the "
+        "retained components are shown; the plot is rebuilt whenever the embedding is refit "
+        "after a configuration change."
     )
 
 coordinate_fields = embedding_fields(n_components)
@@ -1595,6 +1848,8 @@ with st.expander(f"{ALGORITHM_LABEL} details and downloads"):
     safe_component = component.replace("/", "-").replace("\\", "-")
     model_metadata = {
         "layer_component": component,
+        "fit_source_folders": (list(selected_fit_folders) if restrict_fit_folders else "all"),
+        "fit_folders_balanced": balance_fit_folders,
         "cached_position": inspection["positions"][position_index],
         "aggregation_fields": list(analysis_aggregation_fields),
         "standardized": details["standardized"],

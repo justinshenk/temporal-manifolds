@@ -45,7 +45,7 @@ TASK_METADATA_FIELDS = (
     "stakes",
     "agency",
 )
-TEMPLATE_METADATA_FIELDS = ("prompt_framing", "output_format")
+TEMPLATE_METADATA_FIELDS = ("prompt_framing",)
 SCALAR_METADATA_FIELDS = (
     "template_id",
     "task",
@@ -56,8 +56,6 @@ SCALAR_METADATA_FIELDS = (
     "value",
     "value_text",
     "unit",
-    "quantity",
-    "quantity_text",
 )
 
 

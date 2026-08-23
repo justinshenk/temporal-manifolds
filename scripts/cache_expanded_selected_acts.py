@@ -56,7 +56,6 @@ class Scenario:
     dataset: str
     gcs_prefix: str
     output_dir_name: str
-    remove_output_format_constraints: bool = False
 
 
 # Mirrors the per-scenario shell wrappers in scripts/run_activation_caching_*.sh.
@@ -66,13 +65,6 @@ SCENARIOS: tuple[Scenario, ...] = (
         dataset="conversational",
         gcs_prefix="selected_acts",
         output_dir_name="selected_acts",
-    ),
-    Scenario(
-        name="conversational_no_output_format",
-        dataset="conversational",
-        gcs_prefix="NOF_selected_acts",
-        output_dir_name="selected_acts_no_output_format",
-        remove_output_format_constraints=True,
     ),
     Scenario(
         name="abstract",
@@ -91,6 +83,12 @@ SCENARIOS: tuple[Scenario, ...] = (
         dataset="plain_long",
         gcs_prefix="plain_long_selected_acts",
         output_dir_name="plain_long_selected_acts",
+    ),
+    Scenario(
+        name="indirect_horizon",
+        dataset="indirect_horizon",
+        gcs_prefix="indirect_horizon_selected_acts",
+        output_dir_name="indirect_horizon_selected_acts",
     ),
     Scenario(
         name="task_only",
@@ -317,7 +315,6 @@ def cache_scenario_expanded_acts(
 
     records = generate_task_dataset(
         dataset=scenario.dataset,
-        remove_output_format_constraints=scenario.remove_output_format_constraints,
     )
     if max_samples is not None:
         records = records[:max_samples]

@@ -71,8 +71,6 @@ def test_build_payload_identifies_the_abstract_dataset() -> None:
         "template_metadata",
         "task",
         "task_metadata",
-        "quantity",
-        "quantity_text",
         "base_value",
         "base_unit",
         "unit_variant",
@@ -83,7 +81,6 @@ def test_build_payload_identifies_the_abstract_dataset() -> None:
     ]
     assert first_metadata["template_metadata"] == {
         "prompt_framing": "task_available_time",
-        "output_format": "N/A",
     }
     assert first_metadata["task_metadata"] == {
         "task_family": "state_stabilization",
@@ -95,11 +92,9 @@ def test_build_payload_identifies_the_abstract_dataset() -> None:
         "agency": "N/A",
     }
     assert first_metadata["task"] == "N/A"
-    assert first_metadata["quantity"] == "N/A"
     assert first_metadata["base_unit"] == "days"
     assert second_metadata["template_metadata"] == {
         "prompt_framing": "goal_deadline",
-        "output_format": "N/A",
     }
     assert second_metadata["task_metadata"]["task_family"] == "adaptation"
     assert second_metadata["base_unit"] == "weeks"

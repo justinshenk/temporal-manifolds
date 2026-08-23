@@ -271,6 +271,37 @@ def explained_variance_table(
     )
 
 
+def eigenvalue_spectrum_table(
+    result: ManifoldFitResult | ManifoldModel,
+) -> pd.DataFrame:
+    """Return the retained kernel eigenvalues in descending order.
+
+    The eigenvalues are those of the centered kernel matrix, so they are variances measured
+    in the kernel's implicit feature space rather than in activation space. ``KernelPCA``
+    keeps only the components it was asked for, so this is the retained head of the spectrum,
+    not the whole of it.
+    """
+
+    model = result.model if isinstance(result, ManifoldFitResult) else result
+    eigenvalues = np.clip(
+        np.asarray(model.estimator.eigenvalues_, dtype=np.float64), 0.0, None
+    )
+    order = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[order]
+    ratios = np.asarray(model.explained_variance_ratio, dtype=np.float64)
+    if len(ratios) != len(eigenvalues):
+        ratios = np.full(len(eigenvalues), np.nan, dtype=np.float64)
+    return pd.DataFrame(
+        {
+            "component": embedding_fields(len(eigenvalues)),
+            "rank": np.arange(1, len(eigenvalues) + 1),
+            "eigenvalue": eigenvalues,
+            "explained_variance": ratios,
+            "cumulative_variance": np.cumsum(ratios),
+        }
+    )
+
+
 def _variance_ratios(
     estimator: KernelPCA,
     prepared: np.ndarray,

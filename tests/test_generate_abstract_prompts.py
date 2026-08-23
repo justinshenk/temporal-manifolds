@@ -26,8 +26,6 @@ def test_abstract_prompt_records_include_all_number_and_unit_variants() -> None:
     )
 
     assert len(records) == expected_record_count
-    assert all(record["quantity"] is None for record in records)
-
     base_value = 2
     base_unit = "hours"
     smaller = smaller_unit_value(base_value, base_unit)

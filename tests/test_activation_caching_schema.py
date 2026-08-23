@@ -39,8 +39,6 @@ def test_all_caching_modes_emit_the_conversational_metadata_schema() -> None:
         "text": "Prompt",
         "template_id": "template",
         "task": "Task",
-        "quantity": None,
-        "quantity_text": None,
         "base_value": 1,
         "base_unit": "days",
         "unit_variant": "original",
@@ -53,7 +51,6 @@ def test_all_caching_modes_emit_the_conversational_metadata_schema() -> None:
         **common,
         "template_metadata": {
             "prompt_framing": "task_available_time",
-            "output_format": "strategy_steps",
         },
         "task_metadata": {
             "task_family": "planning",
@@ -64,11 +61,6 @@ def test_all_caching_modes_emit_the_conversational_metadata_schema() -> None:
             "stakes": "medium",
             "agency": "individual",
         },
-    }
-    no_output_format_record = {
-        **common,
-        "template_metadata": {"prompt_framing": "task_available_time"},
-        "task_metadata": conversational_record["task_metadata"],
     }
     abstract_record = {
         **common,
@@ -93,13 +85,6 @@ def test_all_caching_modes_emit_the_conversational_metadata_schema() -> None:
         batch_index=0,
         model_name="test-model",
     )
-    no_output_format_payload = CONVERSATIONAL.build_payload(
-        activation=activation,
-        records=[no_output_format_record],
-        sample_indices=[0],
-        batch_index=0,
-        model_name="test-model",
-    )
     abstract_payload = ABSTRACT.build_payload(
         activation=activation,
         records=[abstract_record],
@@ -110,19 +95,10 @@ def test_all_caching_modes_emit_the_conversational_metadata_schema() -> None:
 
     metadata_rows = [
         conversational_payload["prompt_metadata"][0],
-        no_output_format_payload["prompt_metadata"][0],
         abstract_payload["prompt_metadata"][0],
     ]
     assert recursive_keys(metadata_rows[0]) == recursive_keys(metadata_rows[1])
-    assert recursive_keys(metadata_rows[0]) == recursive_keys(metadata_rows[2])
-    assert no_output_format_payload["prompt_metadata"][0]["template_metadata"][
-        "output_format"
-    ] == "N/A"
-    assert abstract_payload["prompt_metadata"][0]["template_metadata"]["output_format"] == (
-        "N/A"
-    )
     assert abstract_payload["prompt_metadata"][0]["task_metadata"]["difficulty"] == "N/A"
-    assert all(metadata["quantity"] == "N/A" for metadata in metadata_rows)
     assert "subject_framing" not in abstract_payload["prompt_metadata"][0][
         "template_metadata"
     ]

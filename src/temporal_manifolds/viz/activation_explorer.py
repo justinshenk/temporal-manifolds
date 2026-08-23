@@ -24,7 +24,6 @@ from temporal_manifolds.activations.extraction_policy import (
     CACHED_POSITION_INDEX,
     NOT_APPLICABLE,
     PROMPT_TOKEN_POSITION,
-    TARGET_LAYER_COMPONENT,
     validate_activation_payload,
     validate_cached_position,
     validate_extraction_request,
@@ -518,7 +517,7 @@ def inspect_sources(sources: Sequence[str | Path | bytes | BinaryIO]) -> dict[st
             payload,
             source_name=f"Activation batch {source_index + 1}",
         )
-        current_components = {TARGET_LAYER_COMPONENT}
+        current_components = {str(payload["layer_component"])}
         components = current_components if components is None else components & current_components
         current_positions = [PROMPT_TOKEN_POSITION]
         if positions is None:
@@ -654,10 +653,7 @@ def prepare_analysis_data(
     aggregation_fields: Sequence[str] | None,
     max_samples: int | None = None,
     chunk_size: int = 2048,
-    phrasing_fields: Sequence[str] = (
-        "template_metadata.prompt_framing",
-        "template_metadata.output_format",
-    ),
+    phrasing_fields: Sequence[str] = ("template_metadata.prompt_framing",),
 ) -> tuple[np.ndarray | None, np.ndarray, pd.DataFrame, dict[str, Any]]:
     """Filter metadata and aggregate a memory map without copying all selected rows."""
     validate_cached_position(cached_position)
@@ -999,10 +995,7 @@ def prepare_projection_from_matrix(
     aggregation_fields: Sequence[str] | None,
     n_components: int,
     max_samples: int | None = None,
-    phrasing_fields: Sequence[str] = (
-        "template_metadata.prompt_framing",
-        "template_metadata.output_format",
-    ),
+    phrasing_fields: Sequence[str] = ("template_metadata.prompt_framing",),
 ) -> tuple[pd.DataFrame, PCA | IncrementalPCA, dict[str, Any]]:
     """Prepare filtered data and fit PCA using bounded memory."""
     validate_cached_position(cached_position)
@@ -1029,10 +1022,7 @@ def prepare_projection(
     aggregation_fields: Sequence[str] | None,
     n_components: int,
     max_samples: int | None = None,
-    phrasing_fields: Sequence[str] = (
-        "template_metadata.prompt_framing",
-        "template_metadata.output_format",
-    ),
+    phrasing_fields: Sequence[str] = ("template_metadata.prompt_framing",),
 ) -> tuple[pd.DataFrame, PCA, dict[str, Any]]:
     """Filter, aggregate, and refit PCA in the notebook's operation order."""
     validate_extraction_request(

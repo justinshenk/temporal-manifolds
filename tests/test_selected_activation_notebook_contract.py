@@ -9,7 +9,6 @@ import pytest
 NOTEBOOKS = (
     "download_filtered_abstract_selected_activations.ipynb",
     "download_filtered_conversational_selected_activations.ipynb",
-    "download_filtered_conversational_selected_activations_no_output_format.ipynb",
     "download_filtered_plain_english_selected_activations.ipynb",
 )
 

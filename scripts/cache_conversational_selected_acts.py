@@ -35,7 +35,14 @@ GCS_PREFIX = "selected_acts"
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 DEFAULT_OUTPUT_DIR = Path("results/selected_acts")
 DEFAULT_BATCH_SIZE = 128
-SUPPORTED_DATASETS = ("conversational", "plain_english", "plain_long", "task_only")
+SUPPORTED_DATASETS = (
+    "conversational",
+    "event_anchored",
+    "plain_english",
+    "plain_long",
+    "task_only",
+    "indirect_horizon",
+)
 
 
 def build_payload(
@@ -100,7 +107,6 @@ def cache_conversational_selected_acts(
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_samples: int | None = None,
     remove_time_constraints: bool = False,
-    remove_output_format_constraints: bool = False,
     save_to_gcp: bool = True,
     gcp_project_id: str | None = None,
     gcs_bucket_name: str | None = None,
@@ -118,7 +124,6 @@ def cache_conversational_selected_acts(
     records = generate_task_dataset(
         dataset=dataset,
         remove_time_constraints=remove_time_constraints,
-        remove_output_format_constraints=remove_output_format_constraints,
     )
     if max_samples is not None:
         records = records[:max_samples]
@@ -208,7 +213,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--remove-time-constraints", action="store_true")
-    parser.add_argument("--remove-output-format-constraints", action="store_true")
     parser.add_argument("--save-to-gcp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gcp-project-id", default=None)
     parser.add_argument("--gcs-bucket-name", default=None)
@@ -232,7 +236,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         batch_size=args.batch_size,
         max_samples=args.max_samples,
         remove_time_constraints=args.remove_time_constraints,
-        remove_output_format_constraints=args.remove_output_format_constraints,
         save_to_gcp=args.save_to_gcp,
         gcp_project_id=args.gcp_project_id or os.getenv("GCP_PROJECT_ID"),
         gcs_bucket_name=args.gcs_bucket_name or os.getenv("GCS_BUCKET_NAME"),

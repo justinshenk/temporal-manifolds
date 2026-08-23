@@ -34,4 +34,3 @@ def test_abstract_notebook_preserves_per_task_temporal_trajectories() -> None:
     assert "'template_metadata.time_framing'" in source
     assert "'number_format'" in source
     assert "'unit_variant'" in source
-    assert "template_metadata.output_format" not in source

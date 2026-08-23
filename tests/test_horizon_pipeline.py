@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 import torch
 
-from temporal_manifolds.horizon.cache import build_cache, load_cache, time_horizon_months
+from temporal_manifolds.horizon.cache import build_cache, time_horizon_months
 from temporal_manifolds.horizon.evaluation import (
     balanced_group_folds,
     outlier_groups,
@@ -68,7 +68,7 @@ def _write_batches(root, folder: str, batch_size: int = 30, seed: int = 0):
                     "template_id": f"template_{value % 2}",
                     "task": f"task_{task_index}",
                     "task_metadata": {"task_family": f"family_{task_index % 2}", "domain": "test"},
-                    "template_metadata": {"prompt_framing": "N/A", "output_format": "N/A"},
+                    "template_metadata": {"prompt_framing": "N/A"},
                     "base_value": value,
                     "base_unit": unit,
                     "unit_variant": "original",
@@ -76,8 +76,6 @@ def _write_batches(root, folder: str, batch_size: int = 30, seed: int = 0):
                     "value": value,
                     "value_text": str(value),
                     "unit": unit,
-                    "quantity": "N/A",
-                    "quantity_text": "N/A",
                 }
             )
         torch.save(
