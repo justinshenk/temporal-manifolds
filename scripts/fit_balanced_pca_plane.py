@@ -13,7 +13,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import torch
 from sklearn.decomposition import IncrementalPCA
-from sklearn.metrics import balanced_accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, classification_report
 from sklearn.svm import LinearSVC
 
 from temporal_manifolds.activations.extraction_policy import CACHED_POSITION_INDEX
@@ -21,6 +21,7 @@ from temporal_manifolds.viz.activation_explorer import (
     SOURCE_FOLDER_FIELD,
     discover_activation_batch_paths,
     inspect_sources,
+    load_pca_model,
     prepare_analysis_data,
 )
 
@@ -190,6 +191,7 @@ def fit_balanced_pca_plane(
     folders: Sequence[str] = DEFAULT_FOLDERS,
     class_by_folder: dict[str, int] | None = None,
     ignore_filters: Mapping[str, Sequence[Any]] | None = None,
+    prefitted_pca_path: str | Path | None = None,
     pca_batch_size: int = 4096,
     svm_c: float = 1.0,
     random_state: int = 42,
@@ -258,10 +260,23 @@ def fit_balanced_pca_plane(
     if len(analysis_matrix) < 3:
         raise ValueError("At least three aggregated rows are required.")
 
-    pca = IncrementalPCA(n_components=3, batch_size=pca_batch_size)
-    batches = _bounded_slices(len(analysis_matrix), pca_batch_size, pca.n_components)
-    for batch in batches:
-        pca.partial_fit(np.asarray(analysis_matrix[batch]))
+    batches = _bounded_slices(len(analysis_matrix), pca_batch_size, 3)
+    if prefitted_pca_path is None:
+        pca = IncrementalPCA(n_components=3, batch_size=pca_batch_size)
+        for batch in batches:
+            pca.partial_fit(np.asarray(analysis_matrix[batch]))
+        pca_source = "fitted on current aggregated data"
+    else:
+        prefitted_pca_path = Path(prefitted_pca_path).resolve()
+        if not prefitted_pca_path.is_file():
+            raise FileNotFoundError(prefitted_pca_path)
+        pca, _ = load_pca_model(prefitted_pca_path)
+        if np.asarray(pca.components_).shape != (3, analysis_matrix.shape[1]):
+            raise ValueError(
+                "Pre-fitted PCA shape does not match the required "
+                f"(3, {analysis_matrix.shape[1]}) components."
+            )
+        pca_source = f"loaded from {prefitted_pca_path}"
     scores = np.empty((len(analysis_matrix), 3), dtype=np.float64)
     for batch in batches:
         scores[batch] = pca.transform(np.asarray(analysis_matrix[batch]))
@@ -324,13 +339,19 @@ def fit_balanced_pca_plane(
 
     prediction = classifier.predict(scores)
     print(f"Metadata cache: {cache_dir}")
+    print(f"PCA: {pca_source}")
     print(
         f"Ignored {int(ignored_rows.sum()):,} rows; aggregated {len(fit_positions):,} fit rows "
         f"into {len(metadata):,} points."
     )
+    print(f"Classifier accuracy: {accuracy_score(target, prediction):.6f}")
     print(
-        "Balanced accuracy:",
-        balanced_accuracy_score(target, prediction, sample_weight=sample_weight),
+        "Folder-weighted classifier accuracy: "
+        f"{accuracy_score(target, prediction, sample_weight=sample_weight):.6f}"
+    )
+    print(
+        "Folder-weighted balanced accuracy: "
+        f"{balanced_accuracy_score(target, prediction, sample_weight=sample_weight):.6f}"
     )
     print(
         classification_report(
@@ -354,6 +375,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--folders", nargs="+", default=list(DEFAULT_FOLDERS))
     parser.add_argument("--pca-batch-size", type=int, default=4096)
+    parser.add_argument(
+        "--prefitted-pca-path",
+        type=Path,
+        default=None,
+        help="Use this fitted three-component PCA model instead of fitting a new one.",
+    )
     parser.add_argument("--svm-c", type=float, default=1.0)
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--max-plot-points-per-folder", type=int, default=5_000)
@@ -383,6 +410,7 @@ def main() -> None:
         cache_dir=args.cache_dir,
         folders=args.folders,
         ignore_filters=ignore_filters,
+        prefitted_pca_path=args.prefitted_pca_path,
         pca_batch_size=args.pca_batch_size,
         svm_c=args.svm_c,
         random_state=args.random_state,

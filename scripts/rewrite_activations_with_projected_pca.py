@@ -127,6 +127,7 @@ def rewrite_activation_batches(
     component: str | None = None
     written_files = 0
     written_rows = 0
+    written_paths: list[Path] = []
     maximum_plane_error = 0.0
     for source in sources:
         source_path = Path(source)
@@ -177,10 +178,28 @@ def rewrite_activation_batches(
             raise
         written_files += 1
         written_rows += len(original)
+        written_paths.append(destination)
+
+    missing_outputs = [path for path in written_paths if not path.is_file()]
+    if missing_outputs:
+        preview = ", ".join(str(path) for path in missing_outputs[:3])
+        raise FileNotFoundError(
+            f"{len(missing_outputs)} rewritten batches are missing after writing; first: {preview}"
+        )
+    verified_files = sum(
+        1
+        for folder in folders
+        for _ in (output_dir / folder).glob("activations_batch_*.pt")
+    )
+    if verified_files != written_files:
+        raise RuntimeError(
+            f"Output verification found {verified_files} batches, expected {written_files}."
+        )
 
     return {
         "output_dir": output_dir,
         "files": written_files,
+        "verified_files": verified_files,
         "rows": written_rows,
         "maximum_plane_error": maximum_plane_error,
     }

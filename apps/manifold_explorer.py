@@ -475,7 +475,7 @@ def kernel_pca_controls() -> dict[str, Any]:
     )
     automatic_gamma = columns[1].checkbox(
         "Automatic gamma",
-        value=True,
+        value=False,
         key=f"{prefix}::auto_gamma",
         help="Uses 1 / n_features, scikit-learn's default kernel width.",
         persist_state="page",
@@ -638,11 +638,7 @@ with st.sidebar:
         SOURCE_FOLDER_FIELD in metadata_index
         and metadata_index[SOURCE_FOLDER_FIELD].nunique(dropna=False) > 1
     )
-    default_filter = []
-    if "template_metadata.prompt_framing" in candidate_fields:
-        default_filter.append("template_metadata.prompt_framing")
-    if multiple_source_folders:
-        default_filter.append(SOURCE_FOLDER_FIELD)
+    default_filter = ["base_unit"] if "base_unit" in candidate_fields else []
     filter_fields = st.multiselect("Filter fields", candidate_fields, default=default_filter)
     filter_options = {
         field: sorted(metadata_index[field].dropna().unique().tolist(), key=str)
@@ -657,15 +653,18 @@ with st.sidebar:
     )
     for field in filter_fields:
         values = filter_options[field]
-        default_values = (
-            [
+        if field == "template_metadata.prompt_framing" and "task_available_time" in values:
+            default_values = [
                 framing
                 for framing in ("task_available_time", *baseline_framings)
                 if framing in values
             ]
-            if field == "template_metadata.prompt_framing" and "task_available_time" in values
-            else values
-        )
+        elif field == "base_unit":
+            default_values = [
+                value for value in values if str(value).casefold() not in {"millennia", "seconds"}
+            ]
+        else:
+            default_values = values
         draft_filters[field] = st.multiselect(
             f"Keep · {field}", values, default=default_values, key=f"filter::{field}"
         )
@@ -1218,7 +1217,7 @@ else:
             elif embedding_method == "PLS":
                 pls_scale = common_columns[1].checkbox(
                     "Scale activations and target",
-                    value=True,
+                    value=False,
                     key="manifold_pls_scale",
                     persist_state="page",
                 )
