@@ -261,8 +261,11 @@ def test_app_fits_a_kernel_pca_embedding(tmp_path: Path) -> None:
     app.run(timeout=60)
 
     assert not app.exception
-    # Kernel PCA is the only method, so no method selector is offered.
-    assert "Method" not in [selectbox.label for selectbox in app.selectbox]
+    method_control = next(
+        control for control in app.segmented_control if control.label == "Embedding method"
+    )
+    assert method_control.options == ["Kernel PCA", "PCA", "PLS"]
+    assert method_control.value == "Kernel PCA"
     assert "Kernel" in [selectbox.label for selectbox in app.selectbox]
     assert any(ALGORITHM_LABEL in markdown.value for markdown in app.markdown)
 
@@ -275,6 +278,34 @@ def test_app_fits_a_kernel_pca_embedding(tmp_path: Path) -> None:
     assert app.session_state["manifold_result"] is not None
     projection = app.session_state["projection"]
     assert {"KPC1", "KPC2", "KPC3"} <= set(projection.columns)
+    assert TARGET_FEATURE in projection.columns
+
+
+@pytest.mark.parametrize(("method", "prefix"), [("PCA", "PC"), ("PLS", "PLS")])
+def test_app_fits_linear_embedding_methods(
+    tmp_path: Path, method: str, prefix: str
+) -> None:
+    path = tmp_path / "activations_batch_000.pt"
+    _manifold_batch(path)
+    app = AppTest.from_file(APP_PATH)
+    app.session_state["sources"] = [str(path)]
+    app.session_state["source_label"] = str(tmp_path)
+    app.session_state["source_is_local"] = True
+    app.session_state["source_revision"] = 1
+    app.run(timeout=60)
+
+    next(
+        control for control in app.segmented_control if control.label == "Embedding method"
+    ).set_value(method).run(timeout=60)
+    next(
+        button for button in app.button if button.label == "Fit / update embedding"
+    ).click().run(timeout=60)
+
+    assert not app.exception, [error.value for error in app.error]
+    projection = app.session_state["projection"]
+    assert {f"{prefix}1", f"{prefix}2", f"{prefix}3"} <= set(projection.columns)
+    assert app.session_state["details"]["direction_method"] == method
+    assert app.session_state["manifold_result"].model.parameters["method"] == method
     assert TARGET_FEATURE in projection.columns
 
 
@@ -376,8 +407,15 @@ def test_recovering_from_an_empty_filter_reprepares_the_analysis(tmp_path: Path)
     assert keep_filters, "the fixture should expose at least one metadata filter"
     original = list(keep_filters[0].value)
 
-    # Selecting no values matches no rows, so preparation fails.
+    # Editing the draft does not disturb the active analysis.
     keep_filters[0].set_value([]).run(timeout=60)
+    assert not app.exception
+    assert "projection" in app.session_state
+
+    # Applying no selected values matches no rows, so preparation fails.
+    next(button for button in app.button if button.label == "Apply filters").click().run(
+        timeout=60
+    )
     assert not app.exception
     assert any("could not be prepared" in error.value for error in app.error)
 
@@ -388,6 +426,9 @@ def test_recovering_from_an_empty_filter_reprepares_the_analysis(tmp_path: Path)
         if multiselect.label.startswith("Keep · ")
     )
     restored.set_value(original).run(timeout=60)
+    next(button for button in app.button if button.label == "Apply filters").click().run(
+        timeout=60
+    )
 
     assert not app.exception, [error.value for error in app.error]
     assert "prepared_metadata" in app.session_state
@@ -408,6 +449,10 @@ def test_aggregation_groups_by_exactly_the_selected_fields(tmp_path: Path) -> No
     assert any(GROUP_FEATURE in warning.value for warning in app.warning)
 
     aggregate_by.set_value(["time_horizon_months", GROUP_FEATURE]).run(timeout=60)
+    assert app.session_state["prepared_key"][1] == ("time_horizon_months",)
+    next(button for button in app.button if button.label == "Apply filters").click().run(
+        timeout=60
+    )
 
     assert not app.exception, [error.value for error in app.error]
     assert app.session_state["prepared_key"][1] == ("time_horizon_months", GROUP_FEATURE)
@@ -421,6 +466,15 @@ def test_changing_filters_withdraws_the_previous_metrics(tmp_path: Path) -> None
     next(
         toggle for toggle in app.toggle if toggle.label == "Limit source samples"
     ).set_value(True).run(timeout=60)
+
+    assert not app.exception
+    assert "projection" in app.session_state
+    assert "details" in app.session_state
+    assert "manifold_result" in app.session_state
+
+    next(button for button in app.button if button.label == "Apply filters").click().run(
+        timeout=60
+    )
 
     assert not app.exception
     assert "projection" not in app.session_state

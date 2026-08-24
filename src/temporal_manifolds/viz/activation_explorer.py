@@ -498,8 +498,84 @@ def _load(source: str | Path | bytes | BinaryIO) -> dict[str, Any]:
     return torch.load(source, **kwargs)
 
 
-def inspect_sources(sources: Sequence[str | Path | bytes | BinaryIO]) -> dict[str, Any]:
-    """Return available components, positions, and flattened metadata fields."""
+def _local_source_cache_identity(source: Any) -> str | None:
+    """Return the immutable name used to cache one local activation batch."""
+
+    if not isinstance(source, (str, Path)):
+        return None
+    return str(Path(source).resolve())
+
+
+def _source_cache_path(cache_dir: str | Path, source: Any, *, kind: str, suffix: str) -> Path:
+    identity = _local_source_cache_identity(source)
+    if identity is None:
+        raise ValueError("Only local activation batches can use the disk cache.")
+    digest = sha256(identity.encode("utf-8")).hexdigest()[:20]
+    return Path(cache_dir) / kind / f"{digest}{suffix}"
+
+
+def _inspect_source(
+    source: str | Path | bytes | BinaryIO,
+    *,
+    cache_dir: str | Path | None,
+    source_index: int,
+) -> dict[str, Any]:
+    """Inspect one batch, reusing name-keyed metadata for static local files."""
+
+    metadata_cache_path = (
+        _source_cache_path(cache_dir, source, kind="metadata", suffix=".joblib")
+        if cache_dir is not None and _local_source_cache_identity(source) is not None
+        else None
+    )
+    if metadata_cache_path is not None and metadata_cache_path.exists():
+        return joblib.load(metadata_cache_path)
+
+    payload = _load(source)
+    validate_activation_payload(
+        payload,
+        source_name=f"Activation batch {source_index + 1}",
+    )
+    metadata_rows = payload["prompt_metadata"]
+    sample_indices = payload["sample_indices"]
+    if len(sample_indices) != len(metadata_rows):
+        raise ValueError("A selected batch has misaligned sample indices and metadata rows.")
+    records = [
+        {
+            "sample_index": int(sample_index),
+            "_row_offset": row_offset,
+            **flatten_scalar_metadata(metadata),
+        }
+        for row_offset, (sample_index, metadata) in enumerate(
+            zip(sample_indices, metadata_rows, strict=True)
+        )
+    ]
+    result = {
+        "component": str(payload["layer_component"]),
+        "positions": [PROMPT_TOKEN_POSITION],
+        "records": records,
+        "row_count": len(records),
+    }
+    del payload
+
+    if metadata_cache_path is not None:
+        metadata_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        write_path = metadata_cache_path.with_suffix(".tmp")
+        try:
+            joblib.dump(result, write_path)
+            os.replace(write_path, metadata_cache_path)
+        except Exception:
+            if write_path.exists():
+                write_path.unlink()
+            raise
+    return result
+
+
+def inspect_sources(
+    sources: Sequence[str | Path | bytes | BinaryIO],
+    *,
+    cache_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """Return components, positions, and metadata, caching each local batch by name."""
     if not sources:
         raise ValueError("Select at least one activation batch.")
     components: set[str] | None = None
@@ -512,40 +588,32 @@ def inspect_sources(sources: Sequence[str | Path | bytes | BinaryIO]) -> dict[st
     for source_index, (source, source_folder) in enumerate(
         zip(sources, source_folders, strict=True)
     ):
-        payload = _load(source)
-        validate_activation_payload(
-            payload,
-            source_name=f"Activation batch {source_index + 1}",
+        source_details = _inspect_source(
+            source,
+            cache_dir=cache_dir,
+            source_index=source_index,
         )
-        current_components = {str(payload["layer_component"])}
+        current_components = {source_details["component"]}
         components = current_components if components is None else components & current_components
-        current_positions = [PROMPT_TOKEN_POSITION]
+        current_positions = source_details["positions"]
         if positions is None:
             positions = current_positions
         elif current_positions != positions:
             raise ValueError("Selected batches have inconsistent cached positions.")
-        metadata_rows = payload["prompt_metadata"]
-        sample_indices = payload["sample_indices"]
-        if len(sample_indices) != len(metadata_rows):
-            raise ValueError("A selected batch has misaligned sample indices and metadata rows.")
-        source_row_counts.append(len(metadata_rows))
-        rows += len(metadata_rows)
-        for row_offset, (sample_index, metadata) in enumerate(
-            zip(sample_indices, metadata_rows, strict=True)
-        ):
-            flattened = flatten_scalar_metadata(metadata)
-            metadata_fields.update(flattened)
+        source_row_counts.append(source_details["row_count"])
+        rows += source_details["row_count"]
+        for record in source_details["records"]:
+            metadata_fields.update(
+                field for field in record if field not in {"sample_index", "_row_offset"}
+            )
             metadata_fields.add(SOURCE_FOLDER_FIELD)
             metadata_records.append(
                 {
-                    "sample_index": int(sample_index),
+                    **record,
                     "_source_index": source_index,
-                    "_row_offset": row_offset,
-                    **flattened,
                     SOURCE_FOLDER_FIELD: source_folder,
                 }
             )
-        del payload
     if not components:
         raise ValueError("Selected batches do not share an activation component.")
     return {
@@ -568,7 +636,7 @@ def extract_activation_slice(
     cache_dir: str | Path | None = None,
     progress: Callable[[int, int], None] | None = None,
 ) -> tuple[np.ndarray, Path | None]:
-    """Stream one component/position into a reusable RAM or disk-backed matrix."""
+    """Build one slice, reusing each static local batch by its resolved filename."""
     validate_extraction_request(
         layer_component=layer_component,
         position_index=position_index,
@@ -584,10 +652,7 @@ def extract_activation_slice(
     if cache_dir is not None and local_sources:
         signature = sha256()
         for source in sources:
-            path = Path(source).resolve()
-            stat = path.stat()
-            signature.update(f"{path}|{stat.st_size}|{stat.st_mtime_ns}\n".encode())
-        signature.update(f"{layer_component}|{position_index}".encode())
+            signature.update(f"{_local_source_cache_identity(source)}\n".encode("utf-8"))
         cache_path = Path(cache_dir) / f"slice-{signature.hexdigest()[:20]}.npy"
         if cache_path.exists():
             cached = np.load(cache_path, mmap_mode="r")
@@ -601,19 +666,57 @@ def extract_activation_slice(
         for source_index, (source, expected_rows) in enumerate(
             zip(sources, source_row_counts, strict=True)
         ):
-            payload = _load(source)
-            tensor = validate_activation_payload(
-                payload,
-                source_name=f"Activation batch {source_index + 1}",
+            source_cache_path = (
+                _source_cache_path(cache_dir, source, kind="batches", suffix=".npy")
+                if cache_dir is not None and local_sources
+                else None
             )
-            if tensor.shape[0] != expected_rows:
-                raise ValueError(f"Batch {source_index + 1} changed since metadata was indexed.")
-            if not 0 <= position_index < tensor.shape[1]:
-                raise ValueError(
-                    f"Position {position_index} is unavailable in batch {source_index + 1}."
+            if source_cache_path is not None and source_cache_path.exists():
+                batch_values = np.load(source_cache_path, mmap_mode="r")
+                if batch_values.ndim != 2 or batch_values.shape[0] != expected_rows:
+                    raise ValueError(
+                        f"The cached slice for batch {source_index + 1} is incompatible. "
+                        f"Delete {source_cache_path} and load the folder again."
+                    )
+            else:
+                payload = _load(source)
+                tensor = validate_activation_payload(
+                    payload,
+                    source_name=f"Activation batch {source_index + 1}",
                 )
+                if tensor.shape[0] != expected_rows:
+                    raise ValueError(
+                        f"Batch {source_index + 1} does not match its cached metadata."
+                    )
+                if not 0 <= position_index < tensor.shape[1]:
+                    raise ValueError(
+                        f"Position {position_index} is unavailable in batch {source_index + 1}."
+                    )
+                batch_values = np.asarray(
+                    tensor[:, CACHED_POSITION_INDEX, :].to(torch.float32).numpy()
+                )
+                del tensor, payload
+                if source_cache_path is not None:
+                    source_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    source_write_path = source_cache_path.with_suffix(".tmp")
+                    try:
+                        cached_batch = np.lib.format.open_memmap(
+                            source_write_path,
+                            mode="w+",
+                            dtype=np.float32,
+                            shape=batch_values.shape,
+                        )
+                        cached_batch[:] = batch_values
+                        cached_batch.flush()
+                        del cached_batch
+                        os.replace(source_write_path, source_cache_path)
+                        batch_values = np.load(source_cache_path, mmap_mode="r")
+                    except Exception:
+                        if source_write_path.exists():
+                            source_write_path.unlink()
+                        raise
             if matrix is None:
-                shape = (total_rows, int(tensor.shape[-1]))
+                shape = (total_rows, int(batch_values.shape[-1]))
                 if write_path is None:
                     matrix = np.empty(shape, dtype=np.float32)
                 else:
@@ -622,11 +725,9 @@ def extract_activation_slice(
                         write_path, mode="w+", dtype=np.float32, shape=shape
                     )
             row_end = row_start + expected_rows
-            matrix[row_start:row_end] = (
-                tensor[:, CACHED_POSITION_INDEX, :].to(torch.float32).numpy()
-            )
+            matrix[row_start:row_end] = batch_values
             row_start = row_end
-            del tensor, payload
+            del batch_values
             if progress is not None:
                 progress(source_index + 1, len(sources))
         if matrix is None:

@@ -19,6 +19,7 @@ from temporal_manifolds.activations.extraction_policy import (
     PROMPT_TOKEN_POSITION,
     TARGET_LAYER_COMPONENT,
 )
+from temporal_manifolds.viz import activation_explorer as activation_explorer_module
 from temporal_manifolds.viz.activation_explorer import (
     PCA_PROJECTION_FINGERPRINT_VERSION,
     SOURCE_FOLDER_FIELD,
@@ -632,6 +633,52 @@ def test_disk_backed_slice_is_reused_for_projection(tmp_path: Path) -> None:
     assert list(result["sample_index"]) == [10, 11, 13]
     assert details["loaded_samples"] == 3
     assert details["pca_solver"] == "incremental"
+
+
+def test_adding_local_source_reads_only_the_new_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_folder = tmp_path / "first"
+    second_folder = tmp_path / "second"
+    first_folder.mkdir()
+    second_folder.mkdir()
+    first = first_folder / "activations_batch_000.pt"
+    second = second_folder / "activations_batch_000.pt"
+    _batch(first)
+    _batch(second)
+    cache_dir = tmp_path / "cache"
+
+    original_load = activation_explorer_module._load
+    loaded_paths: list[str] = []
+
+    def tracked_load(source):
+        loaded_paths.append(str(Path(source).resolve()))
+        return original_load(source)
+
+    monkeypatch.setattr(activation_explorer_module, "_load", tracked_load)
+
+    initial = inspect_sources([first], cache_dir=cache_dir)
+    extract_activation_slice(
+        [first],
+        layer_component=TARGET_LAYER_COMPONENT,
+        position_index=CACHED_POSITION_INDEX,
+        source_row_counts=initial["source_row_counts"],
+        cache_dir=cache_dir,
+    )
+    loaded_paths.clear()
+
+    expanded = inspect_sources([first, second], cache_dir=cache_dir)
+    matrix, _ = extract_activation_slice(
+        [first, second],
+        layer_component=TARGET_LAYER_COMPONENT,
+        position_index=CACHED_POSITION_INDEX,
+        source_row_counts=expanded["source_row_counts"],
+        cache_dir=cache_dir,
+    )
+
+    assert loaded_paths == [str(second.resolve()), str(second.resolve())]
+    assert expanded["source_row_counts"] == [4, 4]
+    assert matrix.shape == (8, 6)
 
 
 def test_aggregation_happens_before_pca(tmp_path: Path) -> None:

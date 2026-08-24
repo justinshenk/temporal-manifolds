@@ -1,15 +1,13 @@
-"""Streamlit UI for exploring Kernel PCA embeddings of cached activations.
+"""Streamlit UI for exploring Kernel PCA, PCA, and PLS activation embeddings.
 
-The linear explorer (``apps/activation_explorer.py``) fits PCA and log-time-horizon
-supervised PLS. This app is its nonlinear counterpart: it embeds the same fixed activation
-slice with Kernel PCA and scores every embedding against the fixed target
-``log10_time_horizon_months``.
+Every method embeds the same fixed activation slice and is scored against the fixed target
+``log10_time_horizon_months``. PLS additionally uses that target during fitting.
 """
 
 from __future__ import annotations
 
 import gc
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -19,6 +17,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from pandas.api.types import is_bool_dtype, is_numeric_dtype
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.decomposition import PCA
 
 from temporal_manifolds.activations.extraction_policy import (
     CACHED_POSITION_INDEX,
@@ -32,11 +32,15 @@ from temporal_manifolds.viz.activation_explorer import (
     extract_activation_slice,
     inspect_sources,
     log10_time_horizon,
+    load_pca_model,
+    load_pls_model,
     metadata_filter_choices,
     metadata_filter_mask,
     prepare_analysis_data,
     projection_details_table,
     select_activation_batch_uploads,
+    serialize_pca_model,
+    serialize_pls_model,
     subtract_unconstrained_baseline,
 )
 from temporal_manifolds.viz.manifold_explorer import (
@@ -54,6 +58,8 @@ from temporal_manifolds.viz.manifold_explorer import (
     load_manifold_model,
     manifold_projection_frame,
     serialize_manifold_model,
+    target_alignment_metrics,
+    _structure_metrics,
 )
 from temporal_manifolds.viz.manifold_regression import (
     GROUP_FEATURE,
@@ -74,7 +80,7 @@ st.caption("TEMPORAL MANIFOLDS · LOCAL NONLINEAR ANALYSIS")
 st.title("Manifold Atlas")
 st.write(
     "Filter conversational activation batches, aggregate comparable prompts, and embed them "
-    f"with Kernel PCA. Every embedding is scored against `{TARGET_FEATURE}`. Your files stay "
+    f"with Kernel PCA, PCA, or PLS. Every embedding is scored against `{TARGET_FEATURE}`. Your files stay "
     "in this local app session."
 )
 
@@ -90,6 +96,7 @@ def reset_loaded_data() -> None:
         "slice_key",
         "activation_matrix",
         "activation_cache_path",
+        "applied_preparation_settings",
         "prepared_key",
         "prepared_matrix",
         "prepared_row_offsets",
@@ -119,6 +126,22 @@ def forget_loaded_manifold() -> None:
         "loaded_manifold_model",
         "loaded_manifold_provenance",
         "loaded_manifold_filename",
+        "manifold_result",
+        "manifold_key",
+        "projection",
+        "details",
+    ):
+        st.session_state.pop(key, None)
+
+
+def forget_loaded_linear_embedding() -> None:
+    for key in (
+        "linear_model_upload",
+        "loaded_linear_digest",
+        "loaded_linear_model",
+        "loaded_linear_provenance",
+        "loaded_linear_filename",
+        "loaded_linear_method",
         "manifold_result",
         "manifold_key",
         "projection",
@@ -175,6 +198,174 @@ def _format_metric(value: float | int | None, *, percent: bool = False) -> str:
 
 
 FOLDER_BALANCE_SEED = 20240517
+EMBEDDING_METHODS = [ALGORITHM_LABEL, "PCA", "PLS"]
+
+
+@dataclass(frozen=True)
+class LinearEmbeddingModel:
+    """PCA/PLS adapter exposing the model contract used by the shared explorer UI."""
+
+    estimator: PCA | PLSRegression
+    method: str
+    component_count: int
+    feature_count: int
+    parameters: dict[str, Any]
+    training_embedding: np.ndarray
+    training_target: np.ndarray
+    explained_variance_ratio: np.ndarray
+    metrics: dict[str, Any]
+    retained_variance_fraction: float | None
+    scaler: None = None
+    warnings: tuple[str, ...] = ()
+
+    def transform(self, values: np.ndarray) -> np.ndarray:
+        prepared = np.asarray(values, dtype=np.float64)
+        if prepared.ndim != 2 or prepared.shape[1] != self.feature_count:
+            raise ValueError(
+                f"Expected activations with {self.feature_count:,} features, got {prepared.shape}."
+            )
+        return np.asarray(self.estimator.transform(prepared), dtype=np.float64)
+
+
+def fit_linear_embedding(
+    values: np.ndarray,
+    target: np.ndarray,
+    *,
+    method: str,
+    n_components: int,
+    random_state: int,
+    quality_neighbors: int,
+    fit_mask: np.ndarray | None = None,
+    pls_scale: bool = True,
+    pls_max_iter: int = 500,
+    pls_tolerance: float = 1e-6,
+) -> ManifoldFitResult:
+    """Fit PCA or horizon-supervised PLS and return the common embedding contract."""
+
+    values = np.asarray(values, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    mask = (
+        np.ones(len(values), dtype=bool)
+        if fit_mask is None
+        else np.asarray(fit_mask, dtype=bool).copy()
+    )
+    if method == "PLS" and not np.isfinite(target[mask]).all():
+        raise ValueError(
+            "PLS requires positive, finite time horizons. Exclude horizon-free prompts or "
+            "subtract their unconstrained baselines before fitting."
+        )
+    training_values = values[mask]
+    training_target = target[mask]
+    maximum = min(max(len(training_values) - 1, 0), values.shape[1])
+    if not 1 <= n_components <= maximum:
+        raise ValueError(f"{method} components must be between 1 and {maximum}.")
+
+    if method == "PCA":
+        estimator: PCA | PLSRegression = PCA(
+            n_components=n_components,
+            svd_solver="auto",
+            random_state=random_state,
+        )
+        training_embedding = np.asarray(
+            estimator.fit_transform(training_values), dtype=np.float64
+        )
+        explained_variance = np.asarray(estimator.explained_variance_ratio_, dtype=np.float64)
+        parameters = {"method": "PCA", "kernel": "linear", "supervised": False}
+    elif method == "PLS":
+        if len(training_values) < 3 or np.ptp(training_target) <= np.finfo(np.float64).eps:
+            raise ValueError("PLS requires at least three points with two distinct time horizons.")
+        estimator = PLSRegression(
+            n_components=n_components,
+            scale=pls_scale,
+            max_iter=pls_max_iter,
+            tol=pls_tolerance,
+            copy=True,
+        )
+        training_embedding, _ = estimator.fit_transform(
+            training_values, training_target.reshape(-1, 1)
+        )
+        training_embedding = np.asarray(training_embedding, dtype=np.float64)
+        x_scale = np.asarray(estimator._x_std, dtype=np.float64)  # noqa: SLF001
+        estimator.components_ = np.asarray(estimator.x_rotations_).T / x_scale[np.newaxis, :]
+        estimator.mean_ = np.asarray(estimator._x_mean)  # noqa: SLF001
+        scaled_total = np.sum(
+            np.square((training_values - estimator.mean_) / x_scale, dtype=np.float64),
+            dtype=np.float64,
+        )
+        component_energy = np.sum(np.square(training_embedding), axis=0) * np.sum(
+            np.square(estimator.x_loadings_), axis=0
+        )
+        explained_variance = (
+            np.clip(component_energy / scaled_total, 0.0, 1.0)
+            if scaled_total > np.finfo(np.float64).eps
+            else np.zeros(n_components, dtype=np.float64)
+        )
+        estimator.explained_variance_ratio_ = explained_variance
+        parameters = {
+            "method": "PLS",
+            "kernel": "linear",
+            "supervised": True,
+            "scale": pls_scale,
+            "max_iter": pls_max_iter,
+            "tolerance": pls_tolerance,
+            "target": TARGET_FEATURE,
+        }
+    else:
+        raise ValueError(f"Unknown linear embedding method: {method!r}.")
+
+    embedding = (
+        training_embedding
+        if fit_mask is None and method != "PLS"
+        else np.asarray(estimator.transform(values), dtype=np.float64)
+    )
+    metrics = target_alignment_metrics(
+        training_embedding,
+        training_target,
+        n_neighbors=min(quality_neighbors, max(len(training_values) - 1, 1)),
+    )
+    metrics.update(
+        _structure_metrics(
+            training_values,
+            training_embedding,
+            quality_neighbors=quality_neighbors,
+            max_quality_points=2_000,
+            random_state=random_state,
+        )
+    )
+    metrics.update(
+        {
+            "algorithm": method.lower(),
+            "input_points": len(training_values),
+            "fit_points": len(training_values),
+            "projected_points": len(values),
+            "held_out_points": len(values) - len(training_values),
+            "feature_count": values.shape[1],
+            "component_count": n_components,
+            "standardized": bool(method == "PLS" and pls_scale),
+            "explained_variance_ratio": explained_variance,
+            "cumulative_variance_ratio": np.cumsum(explained_variance),
+            "retained_variance_fraction": float(np.sum(explained_variance)),
+            "full_variance_spectrum": method == "PCA",
+        }
+    )
+    model = LinearEmbeddingModel(
+        estimator=estimator,
+        method=method,
+        component_count=n_components,
+        feature_count=values.shape[1],
+        parameters=parameters,
+        training_embedding=training_embedding,
+        training_target=training_target,
+        explained_variance_ratio=explained_variance,
+        retained_variance_fraction=float(np.sum(explained_variance)),
+        metrics=metrics,
+    )
+    return ManifoldFitResult(
+        model=model,  # type: ignore[arg-type]
+        embedding=embedding,
+        target=target,
+        metrics=metrics,
+    )
 
 
 def balanced_folder_mask(
@@ -234,11 +425,25 @@ def fit_manifold_cached(
     defined by the chosen ones alone.
     """
 
+    method = str(options.get("method", ALGORITHM_LABEL))
+    if method in {"PCA", "PLS"}:
+        linear_options = dict(options)
+        linear_options.pop("method", None)
+        return fit_linear_embedding(
+            values,
+            target,
+            method=method,
+            fit_mask=fit_mask,
+            **linear_options,
+        )
+
+    kernel_options = dict(options)
+    kernel_options.pop("method", None)
     if fit_mask is None:
-        return fit_manifold(values, target, **options)
+        return fit_manifold(values, target, **kernel_options)
 
     mask = np.asarray(fit_mask, dtype=bool)
-    fitted = fit_manifold(values[mask], target[mask], **options)
+    fitted = fit_manifold(values[mask], target[mask], **kernel_options)
     embedding = fitted.model.transform(values)
     metrics = {
         **fitted.metrics,
@@ -402,11 +607,17 @@ if not st.session_state.get("source_label"):
         else f"Uploaded folders · {len(sources):,} batches"
     )
 source_label = st.session_state.get("source_label", "Selected activation batches")
+activation_cache_dir = (
+    Path("data") / "activation_explorer_cache" if st.session_state.get("source_is_local") else None
+)
 
 try:
     if "inspection" not in st.session_state:
         with st.spinner("Reading batch structure…"):
-            st.session_state.inspection = inspect_sources(sources)
+            st.session_state.inspection = inspect_sources(
+                sources,
+                cache_dir=activation_cache_dir,
+            )
     inspection = st.session_state.inspection
 except Exception as exc:  # noqa: BLE001 - surface invalid local batch errors in the UI
     st.error(f"Could not read the selected batches: {exc}")
@@ -437,7 +648,7 @@ with st.sidebar:
         field: sorted(metadata_index[field].dropna().unique().tolist(), key=str)
         for field in filter_fields
     }
-    filters = {}
+    draft_filters = {}
     # The subtraction toggle is rendered below, so its previous value is read from session
     # state. Unconstrained prompts carry the NOT_APPLICABLE framing, and dropping them by
     # default would leave subtraction with no baselines to compute.
@@ -455,7 +666,7 @@ with st.sidebar:
             if field == "template_metadata.prompt_framing" and "task_available_time" in values
             else values
         )
-        filters[field] = st.multiselect(
+        draft_filters[field] = st.multiselect(
             f"Keep · {field}", values, default=default_values, key=f"filter::{field}"
         )
     aggregation_candidates = [*candidate_fields]
@@ -495,13 +706,63 @@ with st.sidebar:
         else None
     )
 
+    draft_preparation_settings = {
+        "filters": {
+            field: list(draft_filters[field])
+            for field in filter_fields
+        },
+        "aggregation_fields": list(aggregation_fields),
+        "max_samples": max_samples,
+        "subtract_baseline": bool(subtract_baseline),
+    }
+    applied_preparation_settings = st.session_state.get("applied_preparation_settings")
+    if applied_preparation_settings is None:
+        applied_preparation_settings = draft_preparation_settings
+        st.session_state.applied_preparation_settings = applied_preparation_settings
+    filters_pending = applied_preparation_settings != draft_preparation_settings
+    apply_filters = st.button(
+        "Apply filters",
+        type="primary",
+        icon=":material/filter_alt:",
+        width="stretch",
+        disabled=not filters_pending,
+        help="Apply the current filters and rebuild the prepared analysis data.",
+    )
+    if apply_filters:
+        applied_preparation_settings = draft_preparation_settings
+        st.session_state.applied_preparation_settings = applied_preparation_settings
+    elif filters_pending:
+        st.caption("Filter changes are pending. The current analysis remains active.")
+
     st.divider()
     st.header("3 · Embedding method")
-    st.markdown(f"**{ALGORITHM_LABEL}**")
-    st.caption(ALGORITHM_DESCRIPTION)
+    embedding_method = st.segmented_control(
+        "Embedding method",
+        EMBEDDING_METHODS,
+        default=ALGORITHM_LABEL,
+        key="embedding_method",
+        help=(
+            "Kernel PCA learns nonlinear coordinates. PCA finds unsupervised linear variance "
+            "directions. PLS finds linear directions supervised by log10(time_horizon_months)."
+        ),
+        persist_state="page",
+    )
+    if embedding_method == ALGORITHM_LABEL:
+        st.caption(ALGORITHM_DESCRIPTION)
+    elif embedding_method == "PCA":
+        st.caption("Unsupervised linear directions ordered by activation variance.")
+    else:
+        st.caption(f"Supervised linear directions fitted against `{TARGET_FEATURE}`.")
     st.info(f"Optimization target: `{TARGET_FEATURE}` (fixed).", icon=":material/target:")
 
-analysis_aggregation_fields = list(aggregation_fields)
+applied_preparation_settings = st.session_state["applied_preparation_settings"]
+filters = {
+    field: list(values)
+    for field, values in applied_preparation_settings["filters"].items()
+}
+analysis_aggregation_fields = list(applied_preparation_settings["aggregation_fields"])
+max_samples = applied_preparation_settings["max_samples"]
+subtract_baseline = bool(applied_preparation_settings["subtract_baseline"])
 if subtract_baseline and "task" not in candidate_fields:
     st.error("Subtracting unconstrained activations requires the 'task' metadata field.")
     st.stop()
@@ -522,9 +783,7 @@ if st.session_state.get("slice_key") != slice_key:
             layer_component=component,
             position_index=position_index,
             source_row_counts=inspection["source_row_counts"],
-            cache_dir=(Path("data") / "activation_explorer_cache")
-            if st.session_state.get("source_is_local")
-            else None,
+            cache_dir=activation_cache_dir,
             progress=update_extraction_progress,
         )
         progress_bar.empty()
@@ -544,7 +803,7 @@ if st.session_state.get("activation_cache_path") is not None:
     )
 
 prepared_key = (
-    tuple((field, tuple(filters[field])) for field in filter_fields),
+    tuple((field, tuple(values)) for field, values in filters.items()),
     tuple(analysis_aggregation_fields),
     max_samples,
     subtract_baseline,
@@ -671,7 +930,7 @@ finite_target_count = int(np.isfinite(embedding_target).sum())
 
 st.subheader("Embedding")
 with st.container(border=True):
-    st.markdown(f"**{ALGORITHM_LABEL}**")
+    st.markdown(f"**{embedding_method}**")
     st.caption(
         f"{point_count:,} prepared point(s) · {embedding_values.shape[1]:,} activation "
         f"features · {finite_target_count:,} point(s) carry a finite `{TARGET_FEATURE}`."
@@ -693,7 +952,128 @@ with st.container(border=True):
     )
 
 manifold_result: ManifoldFitResult | None = None
-if embedding_mode == "Use saved":
+if embedding_method in {"PCA", "PLS"} and embedding_mode == "Use saved":
+    with st.container(border=True):
+        st.subheader(f"Saved {embedding_method} embedding")
+        st.warning(
+            "Only load model files you trust. Joblib and pickle artifacts can execute code "
+            "when opened."
+        )
+        upload = st.file_uploader(
+            f"Saved {embedding_method} model",
+            type=["joblib", "pkl", "pickle"],
+            key="linear_model_upload",
+            help=f"Choose an {embedding_method} artifact downloaded from Activation Atlas.",
+        )
+        upload_bytes = upload.getvalue() if upload is not None else None
+        upload_digest = sha256(upload_bytes).hexdigest() if upload_bytes is not None else None
+        already_loaded = (
+            upload_digest is not None
+            and upload_digest == st.session_state.get("loaded_linear_digest")
+            and embedding_method == st.session_state.get("loaded_linear_method")
+        )
+        if st.button(
+            f"Load uploaded {embedding_method}",
+            type="primary",
+            icon=":material/upload_file:",
+            width="stretch",
+            disabled=upload_bytes is None or already_loaded,
+            key="load_linear_model_button",
+        ):
+            try:
+                loader = load_pca_model if embedding_method == "PCA" else load_pls_model
+                loaded_model, loaded_provenance = loader(upload_bytes)
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.session_state.loaded_linear_digest = upload_digest
+                st.session_state.loaded_linear_model = loaded_model
+                st.session_state.loaded_linear_provenance = loaded_provenance
+                st.session_state.loaded_linear_filename = upload.name
+                st.session_state.loaded_linear_method = embedding_method
+
+        loaded_estimator = st.session_state.get("loaded_linear_model")
+        if loaded_estimator is None or st.session_state.get("loaded_linear_method") != embedding_method:
+            st.info(f"Choose a saved model and click **Load uploaded {embedding_method}**.")
+            st.stop()
+        loaded_provenance = st.session_state.get("loaded_linear_provenance", {})
+        n_components = int(loaded_estimator.components_.shape[0])
+        feature_count = int(loaded_estimator.components_.shape[1])
+        if feature_count != embedding_values.shape[1]:
+            st.error(
+                f"The loaded {embedding_method} expects {feature_count:,} activation features, "
+                f"but the prepared slice has {embedding_values.shape[1]:,}."
+            )
+            st.stop()
+        embedding = np.asarray(loaded_estimator.transform(embedding_values), dtype=np.float64)
+        explained_variance = np.asarray(
+            loaded_estimator.explained_variance_ratio_, dtype=np.float64
+        )
+        current_metrics = target_alignment_metrics(embedding, embedding_target)
+        current_metrics.update(
+            _structure_metrics(
+                embedding_values,
+                embedding,
+                quality_neighbors=10,
+                max_quality_points=2_000,
+                random_state=42,
+            )
+        )
+        current_metrics.update(
+            {
+                "feature_count": feature_count,
+                "component_count": n_components,
+                "standardized": bool(
+                    embedding_method == "PLS" and getattr(loaded_estimator, "scale", False)
+                ),
+                "explained_variance_ratio": explained_variance,
+                "cumulative_variance_ratio": np.cumsum(explained_variance),
+                "retained_variance_fraction": float(np.sum(explained_variance)),
+                "direction_source": "loaded",
+            }
+        )
+        linear_model = LinearEmbeddingModel(
+            estimator=loaded_estimator,
+            method=embedding_method,
+            component_count=n_components,
+            feature_count=feature_count,
+            parameters={
+                "method": embedding_method,
+                "kernel": "linear",
+                "supervised": embedding_method == "PLS",
+                "target": TARGET_FEATURE if embedding_method == "PLS" else None,
+            },
+            training_embedding=embedding,
+            training_target=embedding_target,
+            explained_variance_ratio=explained_variance,
+            retained_variance_fraction=float(np.sum(explained_variance)),
+            metrics=current_metrics,
+        )
+        manifold_result = ManifoldFitResult(
+            model=linear_model,  # type: ignore[arg-type]
+            embedding=embedding,
+            target=embedding_target,
+            metrics=current_metrics,
+        )
+        random_state = int(loaded_provenance.get("random_state", 42))
+        standardize = current_metrics["standardized"]
+        st.success(
+            f"{st.session_state.get('loaded_linear_filename', f'Saved {embedding_method}')} · "
+            f"{n_components:,} components"
+        )
+        st.button(
+            f"Forget loaded {embedding_method}",
+            icon=":material/delete:",
+            on_click=forget_loaded_linear_embedding,
+        )
+    st.session_state.manifold_result = manifold_result
+    st.session_state.manifold_key = (
+        "loaded",
+        embedding_method,
+        upload_digest,
+        prepared_key,
+    )
+elif embedding_mode == "Use saved":
     with st.container(border=True):
         st.subheader("Saved embedding")
         st.warning(
@@ -786,11 +1166,25 @@ else:
     with st.container(border=True):
         with st.form("manifold_fit_form"):
             st.markdown("**Model controls**")
-            manifold_parameters = kernel_pca_controls()
+            manifold_parameters = (
+                kernel_pca_controls() if embedding_method == ALGORITHM_LABEL else {}
+            )
+            if embedding_method == "PCA":
+                st.caption("PCA centers activations and orders linear directions by variance.")
+            elif embedding_method == "PLS":
+                st.caption(f"PLS is supervised by `{TARGET_FEATURE}`.")
             st.divider()
             st.markdown("**Embedding and scoring**")
             common_columns = st.columns(4)
-            maximum_components = max(1, min(fit_point_count - 1, embedding_values.shape[1]))
+            eligible_component_points = fit_point_count
+            if embedding_method == "PLS":
+                eligible_mask = np.isfinite(embedding_target)
+                if fit_row_mask is not None:
+                    eligible_mask &= fit_row_mask
+                eligible_component_points = int(eligible_mask.sum())
+            maximum_components = max(
+                1, min(eligible_component_points - 1, embedding_values.shape[1])
+            )
             component_default = min(3, maximum_components)
             clamp_integer_widget_state(
                 "manifold_components",
@@ -809,16 +1203,30 @@ else:
                     persist_state="page",
                 )
             )
-            standardize = common_columns[1].checkbox(
-                "Standardize features",
-                value=True,
-                key="manifold_standardize",
-                help=(
-                    "Z-score each activation dimension first. Recommended: kernels are "
-                    "distance-based, so unscaled features let a few dimensions dominate."
-                ),
-                persist_state="page",
-            )
+            if embedding_method == ALGORITHM_LABEL:
+                standardize = common_columns[1].checkbox(
+                    "Standardize features",
+                    value=True,
+                    key="manifold_standardize",
+                    help=(
+                        "Z-score each activation dimension first. Recommended: kernels are "
+                        "distance-based, so unscaled features let a few dimensions dominate."
+                    ),
+                    persist_state="page",
+                )
+                pls_scale = True
+            elif embedding_method == "PLS":
+                pls_scale = common_columns[1].checkbox(
+                    "Scale activations and target",
+                    value=True,
+                    key="manifold_pls_scale",
+                    persist_state="page",
+                )
+                standardize = pls_scale
+            else:
+                common_columns[1].caption("PCA centers features automatically.")
+                standardize = False
+                pls_scale = True
             quality_neighbors = int(
                 common_columns[2].number_input(
                     "Quality neighbors",
@@ -843,17 +1251,45 @@ else:
                     persist_state="page",
                 )
             )
-            full_variance_spectrum = st.checkbox(
-                "Report variance against the full spectrum",
-                value=False,
-                key="manifold_full_spectrum",
-                help=(
-                    "By default the ratios are shares among the retained components, so they sum "
-                    "to 100%. This computes every eigenvalue to report the retained share of "
-                    "total kernel variance instead, at the cost of a full N×N decomposition."
-                ),
-                persist_state="page",
-            )
+            full_variance_spectrum = False
+            if embedding_method == ALGORITHM_LABEL:
+                full_variance_spectrum = st.checkbox(
+                    "Report variance against the full spectrum",
+                    value=False,
+                    key="manifold_full_spectrum",
+                    help=(
+                        "By default the ratios are shares among retained components. This "
+                        "computes every eigenvalue to report the retained share of total kernel "
+                        "variance, at the cost of a full N×N decomposition."
+                    ),
+                    persist_state="page",
+                )
+            pls_max_iter = 500
+            pls_tolerance = 1e-6
+            if embedding_method == "PLS":
+                advanced_columns = st.columns(2)
+                pls_max_iter = int(
+                    advanced_columns[0].number_input(
+                        "Maximum iterations",
+                        min_value=1,
+                        max_value=100_000,
+                        value=500,
+                        step=100,
+                        key="manifold_pls_max_iter",
+                        persist_state="page",
+                    )
+                )
+                pls_tolerance = float(
+                    advanced_columns[1].number_input(
+                        "Convergence tolerance",
+                        min_value=1e-12,
+                        max_value=1e-1,
+                        value=1e-6,
+                        format="%.1e",
+                        key="manifold_pls_tolerance",
+                        persist_state="page",
+                    )
+                )
             if len(fit_folder_values) > 1:
                 st.divider()
                 st.markdown("**Fit scope**")
@@ -873,13 +1309,14 @@ else:
                     "sidebar filters to drop rows entirely."
                 )
                 st.checkbox(
-                    "Weight source folders equally",
+                    "Enable folder-balanced subsampling",
+                    value=False,
                     key="manifold_balance_folders",
                     help=(
-                        "Kernel PCA has no sample weights, so a folder with more points pulls "
-                        "the components harder. This cuts every fitted folder down to the "
-                        "smallest one's point count, so each contributes equally. The dropped "
-                        "rows are still projected and plotted."
+                        "When enabled, deterministically subsample every fitted folder to the "
+                        "smallest folder's point count before fitting. When disabled, "
+                        "fit on every eligible point, so larger folders contribute more strongly. "
+                        "Subsampled rows are still projected and plotted."
                     ),
                     persist_state="page",
                 )
@@ -897,14 +1334,26 @@ else:
                 width="stretch",
             )
 
-        fit_options = {
-            "n_components": n_components,
-            "parameters": manifold_parameters,
-            "standardize": standardize,
-            "random_state": random_state,
-            "quality_neighbors": quality_neighbors,
-            "full_variance_spectrum": full_variance_spectrum,
-        }
+        if embedding_method == ALGORITHM_LABEL:
+            fit_options = {
+                "method": embedding_method,
+                "n_components": n_components,
+                "parameters": manifold_parameters,
+                "standardize": standardize,
+                "random_state": random_state,
+                "quality_neighbors": quality_neighbors,
+                "full_variance_spectrum": full_variance_spectrum,
+            }
+        else:
+            fit_options = {
+                "method": embedding_method,
+                "n_components": n_components,
+                "random_state": random_state,
+                "quality_neighbors": quality_neighbors,
+                "pls_scale": pls_scale,
+                "pls_max_iter": pls_max_iter,
+                "pls_tolerance": pls_tolerance,
+            }
         data_digest = sha256(np.ascontiguousarray(embedding_values).tobytes()).hexdigest()
         manifold_key = (
             prepared_key,
@@ -936,7 +1385,7 @@ else:
             fit_submitted = False
         if fit_submitted:
             try:
-                with st.spinner(f"Fitting {ALGORITHM_LABEL}…"):
+                with st.spinner(f"Fitting {embedding_method}…"):
                     fitted = fit_manifold_cached(
                         embedding_values, embedding_target, fit_options, fit_row_mask
                     )
@@ -968,9 +1417,24 @@ if manifold_result is None:
     st.stop()
 
 try:
-    projection, details = manifold_projection_frame(
-        prepared_metadata, manifold_result, details=prepared_details
-    )
+    if embedding_method == ALGORITHM_LABEL:
+        projection, details = manifold_projection_frame(
+            prepared_metadata, manifold_result, details=prepared_details
+        )
+    else:
+        projection = prepared_metadata.copy().reset_index(drop=True)
+        direction_prefix = "PC" if embedding_method == "PCA" else "PLS"
+        for index in range(manifold_result.model.component_count):
+            projection[f"{direction_prefix}{index + 1}"] = manifold_result.embedding[:, index]
+        projection[TARGET_FEATURE] = manifold_result.target
+        details = {
+            **prepared_details,
+            **manifold_result.metrics,
+            "direction_method": embedding_method,
+            "direction_source": manifold_result.metrics.get("direction_source", "fitted"),
+            "direction_target": TARGET_FEATURE if embedding_method == "PLS" else None,
+            "manifold_parameters": dict(manifold_result.model.parameters),
+        }
 except ValueError as exc:
     st.error(f"The embedding could not be aligned with the prepared metadata: {exc}")
     st.stop()
@@ -993,12 +1457,12 @@ metric_columns[0].metric("Source samples", f"{details['loaded_samples']:,}")
 metric_columns[1].metric("Embedded points", f"{details['analysis_rows']:,}")
 metric_columns[2].metric("Activation width", f"{details['feature_count']:,}")
 metric_columns[3].metric(
-    "Variance captured",
+    "X variance represented" if embedding_method == "PLS" else "Variance captured",
     _format_metric(captured_variance, percent=True),
     help=(
-        "Cumulative share of kernel-space variance carried by the retained components. "
+        f"Cumulative variance represented by the retained {embedding_method} components. "
         + (
-            "Measured against the full eigenvalue spectrum."
+            "Measured against total activation variance."
             if retained_fraction is not None
             else "Measured among the retained components only, so it sums to 100%. Enable "
             "**Report variance against the full spectrum** for the share of total variance."
@@ -1014,7 +1478,7 @@ metric_columns[4].metric(
         "usable way. Fitted and scored on the same points, so it is not a predictive score."
     ),
 )
-if retained_fraction is None:
+if retained_fraction is None and embedding_method == ALGORITHM_LABEL:
     st.caption(
         "Explained variance is reported among the retained components. Kernel-space variance "
         "is not activation-space variance: it describes how the kernel's geometry is "
@@ -1096,9 +1560,35 @@ if manifold_result.model.parameters.get("supervised"):
         icon=":material/warning:",
     )
 
-st.subheader("Feature-space eigenvalue spectrum")
+st.subheader(
+    "Feature-space eigenvalue spectrum"
+    if embedding_method == ALGORITHM_LABEL
+    else f"{embedding_method} component spectrum"
+)
 with st.container(border=True):
-    spectrum = eigenvalue_spectrum_table(manifold_result)
+    if embedding_method == ALGORITHM_LABEL:
+        spectrum = eigenvalue_spectrum_table(manifold_result)
+    else:
+        ratios = np.asarray(
+            manifold_result.model.explained_variance_ratio, dtype=np.float64
+        )
+        if embedding_method == "PCA":
+            spectrum_values = np.asarray(
+                manifold_result.model.estimator.explained_variance_, dtype=np.float64
+            )
+            prefix = "PC"
+        else:
+            spectrum_values = ratios
+            prefix = "PLS"
+        spectrum = pd.DataFrame(
+            {
+                "component": [f"{prefix}{index + 1}" for index in range(len(ratios))],
+                "rank": np.arange(1, len(ratios) + 1),
+                "eigenvalue": spectrum_values,
+                "explained_variance": ratios,
+                "cumulative_variance": np.cumsum(ratios),
+            }
+        )
     spectrum_controls = st.columns([1, 1, 2])
     log_scale = spectrum_controls[0].toggle(
         "Log scale",
@@ -1120,7 +1610,12 @@ with st.container(border=True):
         color_discrete_sequence=["#2f6f5e"],
     )
     spectrum_figure.update_yaxes(
-        title_text="Kernel eigenvalue", type="log" if log_scale else "linear"
+        title_text=(
+            "Kernel eigenvalue"
+            if embedding_method == ALGORITHM_LABEL
+            else "Component variance"
+        ),
+        type="log" if log_scale else "linear",
     )
     if show_cumulative:
         spectrum_figure.add_scatter(
@@ -1150,14 +1645,25 @@ with st.container(border=True):
         showlegend=show_cumulative,
     )
     st.plotly_chart(spectrum_figure, width="stretch", config={"displaylogo": False})
-    st.caption(
-        "Eigenvalues of the centered kernel matrix for the current fit, so they are variances "
-        "in the kernel's implicit feature space rather than in activation space. Only the "
-        "retained components are shown; the plot is rebuilt whenever the embedding is refit "
-        "after a configuration change."
-    )
+    if embedding_method == ALGORITHM_LABEL:
+        st.caption(
+            "Eigenvalues of the centered kernel matrix for the current fit. Only retained "
+            "components are shown."
+        )
+    elif embedding_method == "PLS":
+        st.caption(
+            "PLS is supervised by log-time horizon; bars show activation-space variance "
+            "represented by each latent score."
+        )
+    else:
+        st.caption("PCA eigenvalues and their share of total activation-space variance.")
 
-coordinate_fields = embedding_fields(n_components)
+if embedding_method == ALGORITHM_LABEL:
+    coordinate_fields = embedding_fields(n_components)
+elif embedding_method == "PCA":
+    coordinate_fields = [f"PC{index + 1}" for index in range(n_components)]
+else:
+    coordinate_fields = [f"PLS{index + 1}" for index in range(n_components)]
 axis_fields = [*coordinate_fields]
 metadata_fields = sorted(
     column for column in projection if column not in {*coordinate_fields, "sample_index"}
@@ -1784,7 +2290,7 @@ with st.container(border=True):
                                 "layer_component": component,
                                 "cached_position": inspection["positions"][position_index],
                                 "aggregation_fields": list(analysis_aggregation_fields),
-                                "kernel": manifold_result.model.parameters["kernel"],
+                                "embedding_method": embedding_method,
                                 "embedding_components": n_components,
                             },
                         ),
@@ -1798,8 +2304,19 @@ with st.container(border=True):
                         ),
                     )
 
-with st.expander(f"{ALGORITHM_LABEL} details and downloads"):
-    variance = explained_variance_table(manifold_result)
+with st.expander(f"{embedding_method} details and downloads"):
+    if embedding_method == ALGORITHM_LABEL:
+        variance = explained_variance_table(manifold_result)
+    else:
+        variance = pd.DataFrame(
+            {
+                "component": coordinate_fields,
+                "explained_variance": manifold_result.model.explained_variance_ratio,
+                "cumulative_variance": np.cumsum(
+                    manifold_result.model.explained_variance_ratio
+                ),
+            }
+        )
     st.dataframe(
         variance,
         hide_index=True,
@@ -1809,20 +2326,18 @@ with st.expander(f"{ALGORITHM_LABEL} details and downloads"):
             "cumulative_variance": st.column_config.NumberColumn(format="%.5g"),
         },
     )
-    st.caption(
-        "Ratios are shares of kernel-space variance, the same quantity PCA reports but "
-        "measured in the kernel's implicit feature space rather than activation space. "
-        + (
-            "They are measured against the full eigenvalue spectrum."
-            if retained_fraction is not None
-            else "They are measured among the retained components, so the cumulative column "
-            "reaches 1.0 by construction."
+    if embedding_method == ALGORITHM_LABEL:
+        st.caption(
+            "Ratios are shares of kernel-space variance rather than activation-space variance."
         )
-    )
+    elif embedding_method == "PLS":
+        st.caption("Ratios describe activation (X) variance represented by each PLS score.")
+    else:
+        st.caption("Ratios are shares of total activation-space variance explained by PCA.")
     st.write(
         {
-            "Method": ALGORITHM_LABEL,
-            "Target": TARGET_FEATURE,
+            "Method": embedding_method,
+            "Target": TARGET_FEATURE if embedding_method != "PCA" else None,
             "Parameters": manifold_result.model.parameters,
             "Standardized features": details["standardized"],
             "Quality neighbors": details["quality_neighbors"],
@@ -1855,13 +2370,26 @@ with st.expander(f"{ALGORITHM_LABEL} details and downloads"):
         "standardized": details["standardized"],
         "random_state": random_state,
     }
+    if embedding_method == ALGORITHM_LABEL:
+        model_data = lambda: serialize_manifold_model(  # noqa: E731
+            manifold_result.model, metadata=model_metadata
+        )
+        model_filename = f"activation_manifold_kernel_pca_{safe_component}.joblib"
+    elif embedding_method == "PCA":
+        model_data = lambda: serialize_pca_model(  # noqa: E731
+            manifold_result.model.estimator, metadata=model_metadata
+        )
+        model_filename = f"activation_pca_{safe_component}.joblib"
+    else:
+        model_data = lambda: serialize_pls_model(  # noqa: E731
+            manifold_result.model.estimator, metadata=model_metadata
+        )
+        model_filename = f"activation_pls_{safe_component}.joblib"
     with st.container(horizontal=True):
         st.download_button(
-            "Download manifold model",
-            data=lambda: serialize_manifold_model(
-                manifold_result.model, metadata=model_metadata
-            ),
-            file_name=f"activation_manifold_kernel_pca_{safe_component}.joblib",
+            f"Download {embedding_method} model",
+            data=model_data,
+            file_name=model_filename,
             mime="application/octet-stream",
             icon=":material/download:",
             on_click="ignore",
@@ -1873,19 +2401,10 @@ with st.expander(f"{ALGORITHM_LABEL} details and downloads"):
         st.download_button(
             "Download embedded CSV",
             projection.to_csv(index=False).encode("utf-8"),
-            file_name="activation_kernel_pca_embedding.csv",
+            file_name=f"activation_{embedding_method.lower().replace(' ', '_')}_embedding.csv",
             mime="text/csv",
             icon=":material/download:",
             on_click="ignore",
             help="Includes every embedding coordinate and the retained prompt metadata.",
         )
-    st.warning(
-        "Only load manifold files you trust. Joblib and pickle artifacts can execute code "
-        "when opened."
-    )
-    st.code(
-        "from temporal_manifolds.viz.manifold_explorer import load_manifold_model\n\n"
-        'model, provenance = load_manifold_model("manifold.joblib")\n'
-        "coordinates = model.transform(activation_rows)",
-        language="python",
-    )
+    st.warning("Only load model files you trust; joblib and pickle can execute code.")

@@ -148,21 +148,23 @@ slice into a disk-backed cache under `data/activation_explorer_cache/`.
 
 ## Nonlinear manifold explorer
 
-The linear explorer fits PCA and log-time-horizon-supervised PLS. Its nonlinear
-counterpart embeds the same fixed activation slice with Kernel PCA, which
-applies PCA in an implicit feature space defined by a kernel and so can unfold
-curvature that a linear subspace flattens:
+The manifold explorer offers PCA, log-time-horizon-supervised PLS, and Kernel
+PCA over the same fixed activation slice. Kernel PCA applies PCA in an implicit
+feature space defined by a kernel and can unfold curvature that a linear
+subspace flattens:
 
 ```bash
 uv run streamlit run apps/manifold_explorer.py
 ```
 
-Kernel PCA was selected after comparing it against Isomap and UMAP on this data;
-it outperformed both by a clear margin, so it is the only method offered.
+Use **Embedding method** to compare nonlinear Kernel PCA coordinates with
+unsupervised linear PCA and supervised linear PLS. Every method retains the
+same filtering, aggregation, folder-balanced fitting, held-out projection,
+visualization, regression, saved-model, and download workflows.
 
-The optimization target is fixed at `log10_time_horizon_months`. Kernel PCA is
-unsupervised, so the target never influences the fit — it drives the reported
-metrics only:
+The optimization target is fixed at `log10_time_horizon_months`. Kernel PCA and
+PCA are unsupervised, so the target drives their reported metrics only; PLS uses
+it directly during fitting and is labelled as supervised in the app:
 
 - **Variance captured** — cumulative share of kernel-space variance carried by
   the retained components, with a per-component table mirroring the linear
