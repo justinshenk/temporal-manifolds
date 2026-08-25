@@ -23,6 +23,11 @@ INDIRECT_HORIZON_RUNNER_PATH = (
     / "scripts"
     / "run_activation_caching_indirect_horizon_selected_acts.sh"
 )
+INDEXED_HORIZON_RUNNER_PATH = (
+    Path.cwd()
+    / "scripts"
+    / "run_activation_caching_indexed_horizon_selected_acts.sh"
+)
 SPEC = importlib.util.spec_from_file_location("cache_conversational_selected_acts", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
 SCRIPT = importlib.util.module_from_spec(SPEC)
@@ -196,6 +201,17 @@ def test_indirect_horizon_is_a_supported_caching_dataset() -> None:
     args = SCRIPT.build_parser().parse_args(["--dataset", "indirect_horizon"])
 
     assert args.dataset == "indirect_horizon"
+
+
+def test_indexed_horizon_runner_targets_only_the_indexed_dataset() -> None:
+    runner = INDEXED_HORIZON_RUNNER_PATH.read_text(encoding="utf-8")
+
+    assert "scripts/cache_conversational_selected_acts.py" in runner
+    assert "scripts/run_activation_caching_scenario.sh" in runner
+    assert "--dataset indexed_horizon" in runner
+    assert "--gcs-prefix indexed_horizon_selected_acts" in runner
+    assert "results/indexed_horizon_selected_acts" in runner
+    assert "run_activation_caching_all_selected_acts.sh" not in runner
 
 
 def test_event_anchored_is_a_supported_caching_dataset() -> None:
