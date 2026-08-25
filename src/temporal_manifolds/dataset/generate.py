@@ -16,6 +16,7 @@ try:
     from . import conversational_no_time as conversational_no_time_dataset
     from . import event_anchored as event_anchored_dataset
     from . import indirect_horizon as indirect_horizon_dataset
+    from . import indexed_horizon as indexed_horizon_dataset
     from . import plain_english as plain_english_dataset
     from . import plain_long as plain_long_dataset
     from . import task_only as task_only_dataset
@@ -34,6 +35,7 @@ except ImportError:
     import conversational_no_time as conversational_no_time_dataset  # type: ignore
     import event_anchored as event_anchored_dataset  # type: ignore
     import indirect_horizon as indirect_horizon_dataset  # type: ignore
+    import indexed_horizon as indexed_horizon_dataset  # type: ignore
     import plain_english as plain_english_dataset  # type: ignore
     import plain_long as plain_long_dataset  # type: ignore
     import task_only as task_only_dataset  # type: ignore
@@ -84,6 +86,7 @@ DatasetName = Literal[
     "plain_long",
     "task_only",
     "indirect_horizon",
+    "indexed_horizon",
 ]
 
 DATASETS = {
@@ -95,6 +98,7 @@ DATASETS = {
     "plain_long": plain_long_dataset,
     "task_only": task_only_dataset,
     "indirect_horizon": indirect_horizon_dataset,
+    "indexed_horizon": indexed_horizon_dataset,
 }
 
 TIME_CONSTRAINT_LINE = re.compile(

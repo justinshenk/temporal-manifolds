@@ -73,12 +73,16 @@ def _validate_models(
     classifier: object,
 ) -> tuple[np.ndarray, float, np.ndarray, float]:
     components = np.asarray(getattr(pca, "components_", None))
-    if components.ndim != 2 or components.shape[0] != 3:
-        raise ValueError(f"Expected a fitted three-component PCA model, got {components.shape}.")
+    if components.ndim != 2 or components.shape[0] < 3:
+        raise ValueError(
+            f"Expected a fitted PCA model with at least three components, got {components.shape}."
+        )
     coefficient = np.asarray(getattr(classifier, "coef_", None))
     intercepts = np.asarray(getattr(classifier, "intercept_", None))
-    if coefficient.shape != (1, 3) or intercepts.shape != (1,):
-        raise ValueError("Expected a fitted binary linear classifier in three-dimensional PC space.")
+    if coefficient.shape != (1, components.shape[0]) or intercepts.shape != (1,):
+        raise ValueError(
+            "Expected a fitted binary linear classifier matching the PCA component count."
+        )
     normal = coefficient[0].astype(np.float64)
     intercept = float(intercepts[0])
     basis = pca_reconstruction_basis(pca)

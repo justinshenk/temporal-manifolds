@@ -42,6 +42,7 @@ SUPPORTED_DATASETS = (
     "plain_long",
     "task_only",
     "indirect_horizon",
+    "indexed_horizon",
 )
 
 

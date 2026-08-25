@@ -51,3 +51,6 @@ figures/*
 .streamlit/config.toml
 
 FULL*
+
+# Generated indirect-horizon prompt dump
+indirect_horizon_prompts.csv

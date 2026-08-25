@@ -1,4 +1,4 @@
-"""Fit a folder-balanced linear plane in a three-component activation PCA space."""
+"""Fit a folder-balanced linear plane in an N-component activation PCA space."""
 
 from __future__ import annotations
 
@@ -131,6 +131,11 @@ def _plane_figure(
     max_points_per_folder: int,
     random_state: int,
 ) -> go.Figure:
+    if scores.ndim != 2 or scores.shape[1] < 3:
+        raise ValueError("At least three PCA components are required for the 3D plot.")
+    relevant_axes = np.argsort(np.abs(normal))[-3:][::-1]
+    display_scores = scores[:, relevant_axes]
+    display_normal = normal[relevant_axes]
     rng = np.random.default_rng(random_state)
     palette = ("#1f77b4", "#17becf", "#d62728", "#ff7f0e")
     colors = {folder: palette[index % len(palette)] for index, folder in enumerate(folder_order)}
@@ -141,19 +146,19 @@ def _plane_figure(
             indices = rng.choice(indices, max_points_per_folder, replace=False)
         figure.add_trace(
             go.Scatter3d(
-                x=scores[indices, 0],
-                y=scores[indices, 1],
-                z=scores[indices, 2],
+                x=display_scores[indices, 0],
+                y=display_scores[indices, 1],
+                z=display_scores[indices, 2],
                 mode="markers",
                 name=folder,
                 marker={"size": 2.5, "opacity": 0.45, "color": colors[folder]},
             )
         )
 
-    solve_axis = int(np.argmax(np.abs(normal)))
+    solve_axis = int(np.argmax(np.abs(display_normal)))
     free_axes = [axis for axis in range(3) if axis != solve_axis]
-    lower = np.quantile(scores, 0.01, axis=0)
-    upper = np.quantile(scores, 0.99, axis=0)
+    lower = np.quantile(display_scores, 0.01, axis=0)
+    upper = np.quantile(display_scores, 0.99, axis=0)
     u, v = np.meshgrid(
         np.linspace(lower[free_axes[0]], upper[free_axes[0]], 30),
         np.linspace(lower[free_axes[1]], upper[free_axes[1]], 30),
@@ -161,8 +166,10 @@ def _plane_figure(
     coordinates: list[np.ndarray | None] = [None, None, None]
     coordinates[free_axes[0]], coordinates[free_axes[1]] = u, v
     coordinates[solve_axis] = -(
-        intercept + normal[free_axes[0]] * u + normal[free_axes[1]] * v
-    ) / normal[solve_axis]
+        intercept
+        + display_normal[free_axes[0]] * u
+        + display_normal[free_axes[1]] * v
+    ) / display_normal[solve_axis]
     figure.add_trace(
         go.Surface(
             x=coordinates[0],
@@ -175,8 +182,12 @@ def _plane_figure(
         )
     )
     figure.update_layout(
-        title="Three-component PCA with balanced maximum-margin plane",
-        scene={"xaxis_title": "PC1", "yaxis_title": "PC2", "zaxis_title": "PC3"},
+        title="Most classifier-relevant PCA components and decision-plane slice",
+        scene={
+            "xaxis_title": f"PC{relevant_axes[0] + 1}",
+            "yaxis_title": f"PC{relevant_axes[1] + 1}",
+            "zaxis_title": f"PC{relevant_axes[2] + 1}",
+        },
         legend_title="Source folder",
         height=750,
     )
@@ -192,6 +203,7 @@ def fit_balanced_pca_plane(
     class_by_folder: dict[str, int] | None = None,
     ignore_filters: Mapping[str, Sequence[Any]] | None = None,
     prefitted_pca_path: str | Path | None = None,
+    n_components: int = 3,
     pca_batch_size: int = 4096,
     svm_c: float = 1.0,
     random_state: int = 42,
@@ -212,6 +224,8 @@ def fit_balanced_pca_plane(
         raise ValueError("class_by_folder must define exactly the selected folders.")
     if set(labels.values()) != {0, 1}:
         raise ValueError("class_by_folder must contain both binary labels 0 and 1.")
+    if n_components < 3:
+        raise ValueError("n_components must be at least 3 so the result can be visualized.")
 
     sources, _ = discover_activation_batch_paths([acts_dir / folder for folder in folders])
     inspection = inspect_sources(sources, cache_dir=cache_dir)
@@ -257,12 +271,14 @@ def fit_balanced_pca_plane(
     )
     if len(analysis_matrix) != len(metadata):
         raise ValueError("Aggregated activations and metadata are misaligned.")
-    if len(analysis_matrix) < 3:
-        raise ValueError("At least three aggregated rows are required.")
+    if n_components > min(analysis_matrix.shape):
+        raise ValueError(
+            "n_components cannot exceed the number of aggregated rows or activation features."
+        )
 
-    batches = _bounded_slices(len(analysis_matrix), pca_batch_size, 3)
+    batches = _bounded_slices(len(analysis_matrix), pca_batch_size, n_components)
     if prefitted_pca_path is None:
-        pca = IncrementalPCA(n_components=3, batch_size=pca_batch_size)
+        pca = IncrementalPCA(n_components=n_components, batch_size=pca_batch_size)
         for batch in batches:
             pca.partial_fit(np.asarray(analysis_matrix[batch]))
         pca_source = "fitted on current aggregated data"
@@ -271,13 +287,13 @@ def fit_balanced_pca_plane(
         if not prefitted_pca_path.is_file():
             raise FileNotFoundError(prefitted_pca_path)
         pca, _ = load_pca_model(prefitted_pca_path)
-        if np.asarray(pca.components_).shape != (3, analysis_matrix.shape[1]):
+        if np.asarray(pca.components_).shape != (n_components, analysis_matrix.shape[1]):
             raise ValueError(
                 "Pre-fitted PCA shape does not match the required "
-                f"(3, {analysis_matrix.shape[1]}) components."
+                f"({n_components}, {analysis_matrix.shape[1]}) components."
             )
         pca_source = f"loaded from {prefitted_pca_path}"
-    scores = np.empty((len(analysis_matrix), 3), dtype=np.float64)
+    scores = np.empty((len(analysis_matrix), n_components), dtype=np.float64)
     for batch in batches:
         scores[batch] = pca.transform(np.asarray(analysis_matrix[batch]))
 
@@ -320,7 +336,7 @@ def fit_balanced_pca_plane(
     points.insert(3, "class_id", target)
     points.insert(4, "class_name", np.where(target == 0, "class_1", "class_2"))
     points["sample_weight"] = sample_weight
-    for axis in range(3):
+    for axis in range(n_components):
         points[f"pc{axis + 1}"] = scores[:, axis]
         points[f"projected_pc{axis + 1}"] = projected[:, axis]
     decision_value = scores @ normal + intercept
@@ -375,11 +391,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--folders", nargs="+", default=list(DEFAULT_FOLDERS))
     parser.add_argument("--pca-batch-size", type=int, default=4096)
+    parser.add_argument("--n-components", type=int, default=3)
     parser.add_argument(
         "--prefitted-pca-path",
         type=Path,
         default=None,
-        help="Use this fitted three-component PCA model instead of fitting a new one.",
+        help="Use this fitted N-component PCA model instead of fitting a new one.",
     )
     parser.add_argument("--svm-c", type=float, default=1.0)
     parser.add_argument("--random-state", type=int, default=42)
@@ -411,6 +428,7 @@ def main() -> None:
         folders=args.folders,
         ignore_filters=ignore_filters,
         prefitted_pca_path=args.prefitted_pca_path,
+        n_components=args.n_components,
         pca_batch_size=args.pca_batch_size,
         svm_c=args.svm_c,
         random_state=args.random_state,

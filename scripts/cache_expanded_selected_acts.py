@@ -91,6 +91,12 @@ SCENARIOS: tuple[Scenario, ...] = (
         output_dir_name="indirect_horizon_selected_acts",
     ),
     Scenario(
+        name="indexed_horizon",
+        dataset="indexed_horizon",
+        gcs_prefix="indexed_horizon_selected_acts",
+        output_dir_name="indexed_horizon_selected_acts",
+    ),
+    Scenario(
         name="task_only",
         dataset="task_only",
         gcs_prefix="task_only_selected_acts",
