@@ -1,7 +1,8 @@
 """Streamlit UI for exploring Kernel PCA, PCA, and PLS activation embeddings.
 
-Every method embeds the same fixed activation slice and is scored against the fixed target
-``log10_time_horizon_months``. PLS additionally uses that target during fitting.
+Every method embeds the same fixed activation slice, optionally after saved Fisher LDA
+deflation, and is scored against the fixed target ``log10_time_horizon_months``. PLS
+additionally uses that target during fitting.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+import joblib
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -80,8 +82,8 @@ st.caption("TEMPORAL MANIFOLDS · LOCAL NONLINEAR ANALYSIS")
 st.title("Manifold Atlas")
 st.write(
     "Filter conversational activation batches, aggregate comparable prompts, and embed them "
-    f"with Kernel PCA, PCA, or PLS. Every embedding is scored against `{TARGET_FEATURE}`. Your files stay "
-    "in this local app session."
+    "with Kernel PCA, PCA, or PLS, optionally after Fisher LDA deflation. Every embedding is "
+    f"scored against `{TARGET_FEATURE}`. Your files stay in this local app session."
 )
 
 st.session_state.setdefault("sources", None)
@@ -102,6 +104,9 @@ def reset_loaded_data() -> None:
         "prepared_row_offsets",
         "prepared_metadata",
         "prepared_details",
+        "deflation_preprocessing_key",
+        "deflation_preprocessed_values",
+        "refit_after_deflation_change",
         "manifold_key",
         "manifold_result",
         "projection",
@@ -166,6 +171,26 @@ def clear_regression() -> None:
         st.session_state.pop(key, None)
 
 
+def handle_deflation_iteration_change() -> None:
+    """Invalidate every result downstream of the deflation preprocessing choice."""
+
+    had_embedding = st.session_state.get("manifold_result") is not None
+    for key in (
+        "deflation_preprocessing_key",
+        "deflation_preprocessed_values",
+        "manifold_key",
+        "manifold_result",
+        "projection",
+        "details",
+        "regression_key",
+        "regression_result",
+    ):
+        st.session_state.pop(key, None)
+    st.session_state["refit_after_deflation_change"] = bool(
+        had_embedding and st.session_state.get("manifold_model_mode", "Fit new") == "Fit new"
+    )
+
+
 def reset_prompt_framing_filter() -> None:
     """Re-derive the framing filter so toggling subtraction re-applies its default."""
     st.session_state.pop("filter::template_metadata.prompt_framing", None)
@@ -199,6 +224,132 @@ def _format_metric(value: float | int | None, *, percent: bool = False) -> str:
 
 FOLDER_BALANCE_SEED = 20240517
 EMBEDDING_METHODS = [ALGORITHM_LABEL, "PCA", "PLS"]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+DEFLATION_ARTIFACTS_DIR = REPOSITORY_ROOT / "results" / "deflation_artifacts"
+DEFLATION_ARTIFACT_FILENAME = "lda_pipeline.joblib"
+DEFLATION_UPDATE_CHUNK_ROWS = 2_048
+
+
+def discover_deflation_artifacts(
+    artifacts_dir: Path = DEFLATION_ARTIFACTS_DIR,
+) -> dict[int, Path]:
+    """Return the available iteration bundles keyed by completed deflation count."""
+
+    artifacts: dict[int, Path] = {}
+    if not artifacts_dir.is_dir():
+        return artifacts
+    for iteration_dir in artifacts_dir.glob("iter_*"):
+        try:
+            iteration = int(iteration_dir.name.removeprefix("iter_"))
+        except ValueError:
+            continue
+        artifact_path = iteration_dir / DEFLATION_ARTIFACT_FILENAME
+        if iteration >= 0 and artifact_path.is_file():
+            artifacts[iteration] = artifact_path
+    return dict(sorted(artifacts.items()))
+
+
+@st.cache_resource(max_entries=12, show_spinner=False)
+def load_deflation_artifact(artifact_path: str, modified_time_ns: int) -> dict[str, Any]:
+    """Load one trusted local bundle, invalidating the cache when it is overwritten."""
+
+    del modified_time_ns  # Used only as part of the Streamlit cache key.
+    artifact = joblib.load(artifact_path)
+    if not isinstance(artifact, dict):
+        raise ValueError("The deflation artifact must contain a dictionary bundle.")
+    return artifact
+
+
+def apply_lda_deflation_preprocessing(
+    values: np.ndarray,
+    artifact: dict[str, Any],
+    *,
+    iterations: int,
+    expected_component: str,
+    expected_position_index: int,
+) -> np.ndarray:
+    """Deflate in the artifact's PC space and reconstruct activation-space vectors."""
+
+    prepared = np.asarray(values)
+    if prepared.ndim != 2:
+        raise ValueError(f"Expected a 2D activation matrix, got shape {prepared.shape}.")
+    if iterations == 0:
+        return np.asarray(prepared, dtype=np.float64)
+
+    required_fields = {"pca", "completed_deflations", "deflations_completed"}
+    missing_fields = sorted(required_fields - set(artifact))
+    if missing_fields:
+        raise ValueError(
+            "The deflation artifact is missing required fields: " + ", ".join(missing_fields)
+        )
+    saved_iterations = int(artifact["deflations_completed"])
+    if saved_iterations != iterations:
+        raise ValueError(
+            f"Selected {iterations} deflations, but the artifact represents {saved_iterations}."
+        )
+    steps = artifact["completed_deflations"]
+    if not isinstance(steps, (list, tuple)) or len(steps) != iterations:
+        raise ValueError(
+            f"The iteration-{iterations} artifact must contain {iterations} completed steps."
+        )
+
+    saved_component = artifact.get("activation_component")
+    if saved_component is not None and saved_component != expected_component:
+        raise ValueError(
+            f"The artifact was fitted for {saved_component!r}, not {expected_component!r}."
+        )
+    saved_position = artifact.get("position_index")
+    if saved_position is not None and int(saved_position) != expected_position_index:
+        raise ValueError(
+            f"The artifact was fitted for cached position {saved_position}, not "
+            f"{expected_position_index}."
+        )
+
+    pca = artifact["pca"]
+    expected_width = int(
+        artifact.get("input_feature_count", getattr(pca, "n_features_in_", -1))
+    )
+    if prepared.shape[1] != expected_width:
+        raise ValueError(
+            f"The deflation PCA expects {expected_width:,} activation features, but the "
+            f"prepared slice has {prepared.shape[1]:,}."
+        )
+    if not hasattr(pca, "transform") or not hasattr(pca, "inverse_transform"):
+        raise ValueError("The deflation artifact does not contain a fitted, invertible PCA model.")
+
+    component_dtype = np.asarray(pca.components_).dtype
+    if not np.issubdtype(component_dtype, np.floating):
+        component_dtype = np.dtype(np.float64)
+    pc_values = np.asarray(pca.transform(prepared), dtype=component_dtype)
+    if pc_values.ndim != 2 or not np.isfinite(pc_values).all():
+        raise ValueError("PCA projection produced invalid deflation coordinates.")
+
+    for step_index, step in enumerate(steps, start=1):
+        if not isinstance(step, dict):
+            raise ValueError(f"Deflation step {step_index} is not a dictionary.")
+        center = np.asarray(step.get("center"), dtype=component_dtype)
+        direction = np.asarray(step.get("direction"), dtype=component_dtype)
+        alpha = float(step.get("alpha", artifact.get("deflation_alpha", 1.0)))
+        expected_shape = (pc_values.shape[1],)
+        if center.shape != expected_shape or direction.shape != expected_shape:
+            raise ValueError(
+                f"Deflation step {step_index} has incompatible center/direction shapes."
+            )
+        if not np.isfinite(center).all() or not np.isfinite(direction).all() or not np.isfinite(alpha):
+            raise ValueError(f"Deflation step {step_index} contains non-finite values.")
+
+        scores = pc_values @ direction
+        scores -= np.dot(center, direction)
+        for start in range(0, len(pc_values), DEFLATION_UPDATE_CHUNK_ROWS):
+            stop = min(start + DEFLATION_UPDATE_CHUNK_ROWS, len(pc_values))
+            pc_values[start:stop] -= (
+                alpha * scores[start:stop, None] * direction[None, :]
+            )
+
+    reconstructed = np.asarray(pca.inverse_transform(pc_values), dtype=np.float64)
+    if reconstructed.shape != prepared.shape or not np.isfinite(reconstructed).all():
+        raise ValueError("Inverse PCA produced invalid activation-space vectors.")
+    return reconstructed
 
 
 @dataclass(frozen=True)
@@ -638,8 +789,7 @@ with st.sidebar:
         SOURCE_FOLDER_FIELD in metadata_index
         and metadata_index[SOURCE_FOLDER_FIELD].nunique(dropna=False) > 1
     )
-    default_filter = ["base_unit"] if "base_unit" in candidate_fields else []
-    filter_fields = st.multiselect("Filter fields", candidate_fields, default=default_filter)
+    filter_fields = st.multiselect("Filter fields", candidate_fields, default=[])
     filter_options = {
         field: sorted(metadata_index[field].dropna().unique().tolist(), key=str)
         for field in filter_fields
@@ -752,6 +902,37 @@ with st.sidebar:
         st.caption("Unsupervised linear directions ordered by activation variance.")
     else:
         st.caption(f"Supervised linear directions fitted against `{TARGET_FEATURE}`.")
+    st.markdown("**Preprocessing**")
+    deflation_artifacts = discover_deflation_artifacts()
+    deflation_iteration_options = sorted({0, *deflation_artifacts})
+    if st.session_state.get("lda_deflation_iterations", 0) not in deflation_iteration_options:
+        st.session_state.lda_deflation_iterations = 0
+    deflation_iterations = int(
+        st.selectbox(
+            "LDA deflation iterations",
+            deflation_iteration_options,
+            index=0,
+            format_func=lambda count: (
+                "None" if count == 0 else f"{count} iteration{'s' if count != 1 else ''}"
+            ),
+            key="lda_deflation_iterations",
+            on_change=handle_deflation_iteration_change,
+            help=(
+                "Before fitting the selected embedding, project activations through the saved "
+                "Fisher LDA PCA, replay this many deflation updates, then reconstruct activation "
+                "vectors with inverse PCA. Zero leaves the prepared activations unchanged."
+            ),
+            persist_state="page",
+        )
+    )
+    if len(deflation_iteration_options) == 1:
+        st.caption(
+            "No deflation bundles were found under "
+            "`results/deflation_artifacts/iter_*`; run the Fisher LDA notebook to create them."
+        )
+    elif deflation_iterations:
+        selected_path = deflation_artifacts[deflation_iterations]
+        st.caption(f"Using `{selected_path.parent.name}/{selected_path.name}`.")
     st.info(f"Optimization target: `{TARGET_FEATURE}` (fixed).", icon=":material/target:")
 
 applied_preparation_settings = st.session_state["applied_preparation_settings"]
@@ -818,6 +999,8 @@ if st.session_state.get("prepared_key") != prepared_key:
             "prepared_row_offsets",
             "prepared_metadata",
             "prepared_details",
+            "deflation_preprocessing_key",
+            "deflation_preprocessed_values",
             "projection",
             "details",
             "manifold_result",
@@ -915,11 +1098,75 @@ if balance_fit_folders:
 fit_point_count = int(fit_row_mask.sum()) if fit_row_mask is not None else point_count
 
 # Materialize the prepared rows once. Every method here is a whole-matrix batch algorithm, so
-# unlike incremental PCA there is no streaming path to preserve.
+# unlike incremental PCA there is no streaming path to preserve. Optional LDA deflation happens
+# in the saved PCA space, then inverse PCA reconstructs vectors at the original activation width
+# before any of the three embedding methods sees them.
 if prepared_matrix is not None:
-    embedding_values = np.asarray(prepared_matrix, dtype=np.float64)
+    raw_embedding_values = np.asarray(prepared_matrix)
 else:
-    embedding_values = np.asarray(activation_matrix[prepared_row_offsets], dtype=np.float64)
+    raw_embedding_values = np.asarray(activation_matrix[prepared_row_offsets])
+
+selected_deflation_artifact = deflation_artifacts.get(deflation_iterations)
+deflation_artifact_version: int | None = None
+if deflation_iterations:
+    if selected_deflation_artifact is None:
+        st.error(
+            f"No saved artifact is available for {deflation_iterations} deflation iterations."
+        )
+        st.stop()
+    try:
+        artifact_stat = selected_deflation_artifact.stat()
+        deflation_preprocessing_key = (
+            slice_key,
+            prepared_key,
+            deflation_iterations,
+            str(selected_deflation_artifact.resolve()),
+            artifact_stat.st_mtime_ns,
+        )
+        deflation_artifact = load_deflation_artifact(
+            str(selected_deflation_artifact.resolve()), artifact_stat.st_mtime_ns
+        )
+        deflation_artifact_version = int(deflation_artifact.get("artifact_version", 0))
+        if st.session_state.get("deflation_preprocessing_key") != deflation_preprocessing_key:
+            st.session_state.pop("deflation_preprocessed_values", None)
+            gc.collect()
+            with st.spinner(
+                f"Applying {deflation_iterations} LDA deflation "
+                f"iteration{'s' if deflation_iterations != 1 else ''} and inverse PCA…"
+            ):
+                st.session_state.deflation_preprocessed_values = (
+                    apply_lda_deflation_preprocessing(
+                        raw_embedding_values,
+                        deflation_artifact,
+                        iterations=deflation_iterations,
+                        expected_component=component,
+                        expected_position_index=position_index,
+                    )
+                )
+                st.session_state.deflation_preprocessing_key = deflation_preprocessing_key
+        embedding_values = st.session_state["deflation_preprocessed_values"]
+    except Exception as exc:  # noqa: BLE001 - surface invalid local artifact errors in the UI
+        st.session_state.pop("deflation_preprocessing_key", None)
+        st.session_state.pop("deflation_preprocessed_values", None)
+        st.error(f"LDA deflation preprocessing failed: {exc}")
+        st.stop()
+else:
+    st.session_state.pop("deflation_preprocessing_key", None)
+    st.session_state.pop("deflation_preprocessed_values", None)
+    deflation_preprocessing_key = ("none",)
+    embedding_values = np.asarray(raw_embedding_values, dtype=np.float64)
+
+embedding_preparation_details = {
+    **prepared_details,
+    "lda_deflation_iterations": deflation_iterations,
+    "lda_deflation_artifact": (
+        selected_deflation_artifact.relative_to(REPOSITORY_ROOT).as_posix()
+        if selected_deflation_artifact is not None and deflation_iterations
+        else None
+    ),
+    "lda_deflation_artifact_version": deflation_artifact_version,
+    "deflation_projected_back_to_input_space": bool(deflation_iterations),
+}
 
 if "time_horizon_months" not in prepared_metadata:
     st.error("The prepared metadata has no `time_horizon_months` field to build the target from.")
@@ -930,9 +1177,16 @@ finite_target_count = int(np.isfinite(embedding_target).sum())
 st.subheader("Embedding")
 with st.container(border=True):
     st.markdown(f"**{embedding_method}**")
+    deflation_summary = (
+        "no LDA deflation"
+        if deflation_iterations == 0
+        else f"{deflation_iterations} LDA deflation iteration"
+        f"{'s' if deflation_iterations != 1 else ''} + inverse PCA"
+    )
     st.caption(
         f"{point_count:,} prepared point(s) · {embedding_values.shape[1]:,} activation "
-        f"features · {finite_target_count:,} point(s) carry a finite `{TARGET_FEATURE}`."
+        f"features · {deflation_summary} · {finite_target_count:,} point(s) carry a finite "
+        f"`{TARGET_FEATURE}`."
     )
     if point_count < 3:
         st.warning("At least three prepared points are required to fit an embedding.")
@@ -996,6 +1250,17 @@ if embedding_method in {"PCA", "PLS"} and embedding_mode == "Use saved":
             st.info(f"Choose a saved model and click **Load uploaded {embedding_method}**.")
             st.stop()
         loaded_provenance = st.session_state.get("loaded_linear_provenance", {})
+        saved_deflation_iterations = loaded_provenance.get("lda_deflation_iterations")
+        if (
+            saved_deflation_iterations is not None
+            and int(saved_deflation_iterations) != deflation_iterations
+        ):
+            st.error(
+                f"This saved {embedding_method} model was fitted after "
+                f"{int(saved_deflation_iterations)} LDA deflation iterations. Select the same "
+                "preprocessing count before projecting with it."
+            )
+            st.stop()
         n_components = int(loaded_estimator.components_.shape[0])
         feature_count = int(loaded_estimator.components_.shape[1])
         if feature_count != embedding_values.shape[1]:
@@ -1071,6 +1336,7 @@ if embedding_method in {"PCA", "PLS"} and embedding_mode == "Use saved":
         embedding_method,
         upload_digest,
         prepared_key,
+        deflation_preprocessing_key,
     )
 elif embedding_mode == "Use saved":
     with st.container(border=True):
@@ -1116,6 +1382,17 @@ elif embedding_mode == "Use saved":
             st.stop()
 
         loaded_provenance = st.session_state.get("loaded_manifold_provenance", {})
+        saved_deflation_iterations = loaded_provenance.get("lda_deflation_iterations")
+        if (
+            saved_deflation_iterations is not None
+            and int(saved_deflation_iterations) != deflation_iterations
+        ):
+            st.error(
+                "This saved Kernel PCA model was fitted after "
+                f"{int(saved_deflation_iterations)} LDA deflation iterations. Select the same "
+                "preprocessing count before projecting with it."
+            )
+            st.stop()
         st.success(
             f"{st.session_state.get('loaded_manifold_filename', 'Saved embedding')} · "
             f"{loaded_manifold.component_count:,} components · "
@@ -1160,7 +1437,12 @@ elif embedding_mode == "Use saved":
             "training data, not the points shown here."
         )
     st.session_state.manifold_result = manifold_result
-    st.session_state.manifold_key = ("loaded", upload_digest, prepared_key)
+    st.session_state.manifold_key = (
+        "loaded",
+        upload_digest,
+        prepared_key,
+        deflation_preprocessing_key,
+    )
 else:
     with st.container(border=True):
         with st.form("manifold_fit_form"):
@@ -1375,16 +1657,25 @@ else:
                 f"{point_count - fit_point_count:,} held-out point(s) will be projected into "
                 "the fitted coordinates."
             )
-        if fit_submitted and restrict_fit_folders and fit_point_count < 3:
+        refit_after_deflation_change = bool(
+            st.session_state.pop("refit_after_deflation_change", False)
+        )
+        fit_requested = fit_submitted or refit_after_deflation_change
+        if fit_requested and restrict_fit_folders and fit_point_count < 3:
             st.error(
                 "At least three points are required to fit an embedding. The selected source "
                 "folders contain "
                 f"{fit_point_count:,}."
             )
-            fit_submitted = False
-        if fit_submitted:
+            fit_requested = False
+        if fit_requested:
             try:
-                with st.spinner(f"Fitting {embedding_method}…"):
+                spinner_text = (
+                    f"Recomputing {embedding_method} after LDA deflation change…"
+                    if refit_after_deflation_change
+                    else f"Fitting {embedding_method}…"
+                )
+                with st.spinner(spinner_text):
                     fitted = fit_manifold_cached(
                         embedding_values, embedding_target, fit_options, fit_row_mask
                     )
@@ -1418,7 +1709,7 @@ if manifold_result is None:
 try:
     if embedding_method == ALGORITHM_LABEL:
         projection, details = manifold_projection_frame(
-            prepared_metadata, manifold_result, details=prepared_details
+            prepared_metadata, manifold_result, details=embedding_preparation_details
         )
     else:
         projection = prepared_metadata.copy().reset_index(drop=True)
@@ -1427,7 +1718,7 @@ try:
             projection[f"{direction_prefix}{index + 1}"] = manifold_result.embedding[:, index]
         projection[TARGET_FEATURE] = manifold_result.target
         details = {
-            **prepared_details,
+            **embedding_preparation_details,
             **manifold_result.metrics,
             "direction_method": embedding_method,
             "direction_source": manifold_result.metrics.get("direction_source", "fitted"),
@@ -1721,7 +2012,7 @@ point_size = plot_controls[1].slider(
     "Point size",
     min_value=1,
     max_value=20,
-    value=4 if plot_mode == "3D" else 7,
+    value=2,
     key=f"point_size::{plot_mode}",
 )
 point_opacity = plot_controls[2].slider(
@@ -1734,7 +2025,11 @@ point_opacity = plot_controls[2].slider(
 tooltip_fields = plot_controls[3].multiselect(
     "Tooltip fields",
     ["sample_index", *metadata_fields],
-    default=[field for field in ["sample_index", "time_horizon_months"] if field in projection],
+    default=[
+        field
+        for field in ["sample_index", "time_horizon_months", "task"]
+        if field in projection
+    ],
 )
 
 stored_visual_fields = st.session_state.get("visual_filter_fields", [])
@@ -2291,6 +2586,10 @@ with st.container(border=True):
                                 "aggregation_fields": list(analysis_aggregation_fields),
                                 "embedding_method": embedding_method,
                                 "embedding_components": n_components,
+                                "lda_deflation_iterations": deflation_iterations,
+                                "lda_deflation_artifact": embedding_preparation_details[
+                                    "lda_deflation_artifact"
+                                ],
                             },
                         ),
                         file_name="activation_horizon_regression.joblib",
@@ -2338,6 +2637,7 @@ with st.expander(f"{embedding_method} details and downloads"):
             "Method": embedding_method,
             "Target": TARGET_FEATURE if embedding_method != "PCA" else None,
             "Parameters": manifold_result.model.parameters,
+            "LDA deflation iterations": deflation_iterations,
             "Standardized features": details["standardized"],
             "Quality neighbors": details["quality_neighbors"],
         }
@@ -2366,6 +2666,10 @@ with st.expander(f"{embedding_method} details and downloads"):
         "fit_folders_balanced": balance_fit_folders,
         "cached_position": inspection["positions"][position_index],
         "aggregation_fields": list(analysis_aggregation_fields),
+        "lda_deflation_iterations": deflation_iterations,
+        "lda_deflation_artifact": embedding_preparation_details["lda_deflation_artifact"],
+        "lda_deflation_artifact_version": deflation_artifact_version,
+        "deflation_projected_back_to_input_space": bool(deflation_iterations),
         "standardized": details["standardized"],
         "random_state": random_state,
     }

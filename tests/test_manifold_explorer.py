@@ -399,6 +399,10 @@ def _fitted_app(tmp_path: Path) -> AppTest:
 def test_recovering_from_an_empty_filter_reprepares_the_analysis(tmp_path: Path) -> None:
     """A failed preparation must not leave a key that makes stale data look current."""
     app = _fitted_app(tmp_path)
+    filter_fields = next(
+        multiselect for multiselect in app.multiselect if multiselect.label == "Filter fields"
+    )
+    filter_fields.set_value(["base_unit"]).run(timeout=60)
     keep_filters = [
         multiselect
         for multiselect in app.multiselect
@@ -432,6 +436,22 @@ def test_recovering_from_an_empty_filter_reprepares_the_analysis(tmp_path: Path)
 
     assert not app.exception, [error.value for error in app.error]
     assert "prepared_metadata" in app.session_state
+
+
+def test_plot_controls_use_unfiltered_small_point_defaults(tmp_path: Path) -> None:
+    app = _fitted_app(tmp_path)
+
+    filter_fields = next(
+        multiselect for multiselect in app.multiselect if multiselect.label == "Filter fields"
+    )
+    tooltip_fields = next(
+        multiselect for multiselect in app.multiselect if multiselect.label == "Tooltip fields"
+    )
+    point_size = next(slider for slider in app.slider if slider.label == "Point size")
+
+    assert filter_fields.value == []
+    assert tooltip_fields.value == ["sample_index", "time_horizon_months", "task"]
+    assert point_size.value == 2
 
 
 def test_aggregation_groups_by_exactly_the_selected_fields(tmp_path: Path) -> None:
